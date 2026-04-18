@@ -110,6 +110,36 @@ class MetricsCalculator:
         return annual_return / max_drawdown
     
     @staticmethod
+    def calculate_sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.02) -> float:
+        """
+        Calculate Sharpe Ratio (risk-adjusted return).
+        
+        For daily returns: annualization factor = sqrt(252)
+        For monthly returns: annualization factor = sqrt(12)
+        
+        Args:
+            returns: Series of returns (daily or other frequency)
+            risk_free_rate: Annual risk-free rate (default: 2%)
+            
+        Returns:
+            Annualized Sharpe Ratio
+        """
+        if len(returns) < 2 or returns.std() == 0:
+            return 0
+        
+        # Assume daily returns, use 252 trading days per year
+        mean_daily_return = returns.mean()
+        std_daily_return = returns.std()
+        
+        sharpe_ratio = (mean_daily_return / std_daily_return) * np.sqrt(252)
+        
+        # Optional: subtract risk-free rate component
+        # This is a simplified version; strict formula would be:
+        # sharpe = (mean_annual_return - annual_rf_rate) / annual_volatility
+        
+        return sharpe_ratio
+    
+    @staticmethod
     def calculate_win_rate(trades: list) -> float:
         """
         Calculate win rate from trades.

@@ -101,7 +101,7 @@ class StatArbStrategy:
         signals.loc[np.abs(z_score) < self.exit_threshold, 'signal'] = 0
         
         # Forward fill signals to maintain position
-        signals['signal'] = signals['signal'].fillna(method='ffill').fillna(0)
+        signals['signal'] = signals['signal'].ffill().fillna(0)
         
         # Position sizes (normalized)
         signals['position_a'] = signals['signal']
