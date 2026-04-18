@@ -161,15 +161,20 @@ def run_backtest():
         logger.info(f"Loaded {len(prices)} price records for backtesting")
         
         # Run backtest with improved engine and risk controls
-        logger.info("Initializing backtesting engine (v2 - fixed metrics)...")
+        logger.info("Initializing backtesting engine (v2 - fixed window baseline)...")
+        logger.info("=" * 80)
+        logger.info("STRATEGY CONFIGURATION")
+        logger.info("=" * 80)
+        logger.info(f"  Window Mode:         FIXED (not rolling)")
+        logger.info(f"  Training Period:     60 days")
+        logger.info(f"  Entry Threshold:     Z-score > 2.0")
+        logger.info(f"  Exit Threshold:      Z-score < 0.5")
         logger.info("=" * 80)
         logger.info("RISK PARAMETERS")
         logger.info("=" * 80)
         logger.info(f"  Initial Capital:     $100,000")
         logger.info(f"  Max Position Size:   10% of capital")
         logger.info(f"  Commission:          0.1%")
-        logger.info(f"  Entry Threshold:     Z-score > 2.0")
-        logger.info(f"  Exit Threshold:      Z-score close to 0")
         logger.info(f"  Stop Loss:           5% per position")
         logger.info("=" * 80)
         
@@ -180,7 +185,8 @@ def run_backtest():
             exit_threshold=0.5,
             lookback=60,
             max_position_pct=0.10,  # Max 10% per position
-            stop_loss_pct=0.05      # 5% stop loss
+            stop_loss_pct=0.05,     # 5% stop loss
+            use_fixed_window=True   # KEY FIX: Use fixed training window instead of rolling
         )
         
         results = engine.run(prices)

@@ -28,7 +28,8 @@ class BacktestEngineV2:
         exit_threshold: float = 0.5,
         lookback: int = 60,
         max_position_pct: float = 0.10,
-        stop_loss_pct: float = 0.05
+        stop_loss_pct: float = 0.05,
+        use_fixed_window: bool = True
     ):
         """
         Initialize backtesting engine.
@@ -38,9 +39,10 @@ class BacktestEngineV2:
             commission: Trading commission as decimal (0.001 = 0.1%)
             entry_threshold: Z-score threshold for entry
             exit_threshold: Z-score threshold for exit
-            lookback: Lookback period for rolling statistics
+            lookback: Lookback period for statistics (training window size)
             max_position_pct: Maximum position as % of capital (for risk control)
             stop_loss_pct: Stop loss threshold as % of entry price
+            use_fixed_window: If True, use fixed training window; if False, use rolling
         """
         self.initial_capital = initial_capital
         self.commission = commission
@@ -49,6 +51,7 @@ class BacktestEngineV2:
         self.lookback = lookback
         self.max_position_pct = max_position_pct
         self.stop_loss_pct = stop_loss_pct
+        self.use_fixed_window = use_fixed_window  # NEW: control window type
         
         # State tracking
         self.cash = initial_capital
@@ -61,6 +64,10 @@ class BacktestEngineV2:
     def generate_signals(self, prices: pd.DataFrame) -> pd.DataFrame:
         """
         Generate trading signals using mean-reversion.
+        
+        Supports both:
+        - Fixed window (RECOMMENDED): Use first N bars for statistics baseline
+        - Rolling window (DEPRECATED): Update statistics daily
         
         Args:
             prices: DataFrame with 'timestamp', 'symbol', 'close' columns
@@ -78,12 +85,29 @@ class BacktestEngineV2:
             symbol_data = prices[prices['symbol'] == symbol].copy()
             symbol_data = symbol_data.sort_values('timestamp').reset_index(drop=True)
             
-            # Calculate rolling statistics
-            symbol_data['ma'] = symbol_data['close'].rolling(self.lookback).mean()
-            symbol_data['std'] = symbol_data['close'].rolling(self.lookback).std()
-            
-            # Z-score: distance from mean in standard deviations
-            symbol_data['z_score'] = (symbol_data['close'] - symbol_data['ma']) / symbol_data['std']
+            if self.use_fixed_window:
+                # FIXED WINDOW MODE (corrected approach)
+                # Use only the first N days for calculating mean and std
+                training_end = min(self.lookback, len(symbol_data))
+                training_data = symbol_data.iloc[:training_end]
+                
+                fixed_ma = training_data['close'].mean()
+                fixed_std = training_data['close'].std()
+                
+                # Calculate z-score using FIXED statistics (no rolling)
+                symbol_data['z_score'] = (symbol_data['close'] - fixed_ma) / fixed_std
+                symbol_data['ma'] = fixed_ma  # Constant line
+                symbol_data['std'] = fixed_std  # Constant line
+                
+                logger.debug(f"{symbol}: Fixed window mode - training period {training_end} bars, "
+                           f"mean={fixed_ma:.2f}, std={fixed_std:.4f}")
+            else:
+                # ROLLING WINDOW MODE (deprecated, causes window drift)
+                symbol_data['ma'] = symbol_data['close'].rolling(self.lookback).mean()
+                symbol_data['std'] = symbol_data['close'].rolling(self.lookback).std()
+                
+                # Z-score: distance from mean in standard deviations
+                symbol_data['z_score'] = (symbol_data['close'] - symbol_data['ma']) / symbol_data['std']
             
             # Generate signals
             symbol_data['signal'] = 'HOLD'
