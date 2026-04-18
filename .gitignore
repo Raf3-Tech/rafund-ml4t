@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+env/
+
+# Environment variables (SECRETS)
+.env
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database dumps / temp
+*.sql
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.tmp

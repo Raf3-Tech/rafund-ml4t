@@ -1,0 +1,183 @@
+# ML4T System Configuration
+# Last Updated: 2026-04-16
+
+# ============================================================================
+# DATABASE CONFIGURATION
+# ============================================================================
+database:
+  type: postgresql
+  host: localhost
+  port: 5432
+  database: ml4t_db
+  user: postgres
+  password: ${DB_PASSWORD}  # Set via environment variable
+  echo: false  # Enable SQL logging
+
+# ============================================================================
+# EXCHANGE CREDENTIALS
+# ============================================================================
+exchanges:
+  binance:
+    name: Binance
+    api_key: ${BINANCE_API_KEY}
+    api_secret: ${BINANCE_SECRET}
+    testnet: false
+    rate_limit: 1200  # requests per minute
+    
+  kraken:
+    name: Kraken
+    api_key: ${KRAKEN_API_KEY}
+    api_secret: ${KRAKEN_SECRET}
+    rate_limit: 15  # requests per minute
+    
+  htx:
+    name: HTX
+    api_key: ${HTX_API_KEY}
+    api_secret: ${HTX_SECRET}
+    rate_limit: 100
+
+# ============================================================================
+# STRATEGY PARAMETERS
+# ============================================================================
+strategy:
+  name: statistical_arbitrage
+  
+  # Spread calculation
+  lookback_period: 60  # days for mean/std calculation
+  
+  # Z-score thresholds
+  entry_threshold: 2.0      # z-score for entry
+  exit_threshold: 0.5       # z-score for exit
+  
+  # Position sizing
+  max_position_size: 10000  # maximum units per asset
+  max_allocation_pct: 0.20  # max 20% of capital per position
+  
+  # Risk management
+  risk_limit: 0.02          # 2% max loss per trade
+  stop_loss_pct: 0.05       # 5% stop loss
+  take_profit_pct: 0.10     # 10% take profit
+
+# ============================================================================
+# PORTFOLIO SETTINGS
+# ============================================================================
+portfolio:
+  initial_capital: 100000       # Starting capital in USDT
+  trading_pairs:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - BNB/USDT
+    
+  rebalance_frequency: daily    # daily, weekly, monthly
+  rebalance_time: "09:00:00"   # UTC time
+
+# ============================================================================
+# BACKTESTING CONFIGURATION
+# ============================================================================
+backtesting:
+  enabled: true
+  
+  # Date range
+  start_date: 2023-01-01
+  end_date: 2024-12-31
+  
+  # Simulation parameters
+  initial_capital: 100000
+  commission: 0.001      # 0.1% per trade
+  slippage: 0.0001       # 0.01%
+  
+  # Results
+  generate_plots: true
+  save_results: true
+  results_dir: ./backtest_results
+
+# ============================================================================
+# DATA SETTINGS
+# ============================================================================
+data:
+  # OHLCV fetching
+  timeframe: 1d          # 1d, 4h, 1h, 15m, 5m
+  lookback_days: 365     # Historical data window
+  
+  # Data validation
+  min_bars: 100          # Minimum bars for feature calculation
+  handle_gaps: yes       # Handle gaps in data
+  
+  # Storage
+  cache_data: true
+  cache_dir: ./data_cache
+
+# ============================================================================
+# MONITORING & LOGGING
+# ============================================================================
+monitoring:
+  log_level: INFO        # DEBUG, INFO, WARNING, ERROR
+  log_file: ./logs/ml4t.log
+  
+  # Metrics tracking
+  track_metrics: true
+  metrics_dir: ./metrics
+  
+  # Alerts
+  enable_alerts: false
+  alert_email: ${ALERT_EMAIL}
+  alert_webhook: ${ALERT_WEBHOOK}
+
+# ============================================================================
+# DASHBOARD
+# ============================================================================
+dashboard:
+  enabled: true
+  host: 0.0.0.0
+  port: 5000
+  debug: false
+  
+  # Refresh intervals
+  position_refresh: 30   # seconds
+  metrics_refresh: 60    # seconds
+
+# ============================================================================
+# EXECUTION SETTINGS
+# ============================================================================
+execution:
+  mode: backtest         # backtest, paper, live
+  
+  # Order parameters
+  order_type: limit      # limit, market
+  timeout: 300           # seconds to wait for order fill
+  
+  # Safety limits
+  max_daily_loss_pct: 0.05      # Stop trading if daily loss > 5%
+  max_open_positions: 5         # Maximum concurrent positions
+  
+  # Paper trading (mock execution)
+  paper_trading_enabled: false
+  paper_slippage: 0.001         # 0.1% slippage
+
+# ============================================================================
+# FEATURE ENGINEERING
+# ============================================================================
+features:
+  # Rolling windows
+  ma_periods: [20, 50, 200]           # Moving average periods
+  volatility_periods: [20, 60]        # Volatility calculation periods
+  
+  # Technical indicators
+  use_rsi: false
+  use_macd: false
+  use_bollinger_bands: false
+
+# ============================================================================
+# MODEL SETTINGS (Future)
+# ============================================================================
+models:
+  enabled: false
+  
+  # Model parameters
+  model_type: lstm       # linear, random_forest, lstm
+  prediction_horizon: 5  # days ahead
+  
+  # Hyperparameters
+  train_test_split: 0.8
+  validation_split: 0.1

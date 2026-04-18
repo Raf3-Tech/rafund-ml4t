@@ -1,0 +1,3 @@
+"""
+Strategies - trading strategy implementations.
+"""
