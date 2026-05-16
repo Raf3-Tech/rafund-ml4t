@@ -22,8 +22,9 @@ env/
 Thumbs.db
 
 # Database dumps / temp
-*.sql
 *.sqlite3
+# Keep schema in repo for onboarding
+!data/schema.sql
 
 # Jupyter
 .ipynb_checkpoints/

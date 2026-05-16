@@ -48,67 +48,96 @@ def load_env_file():
 
 load_env_file()
 
-def collect_data():
-    """Collect market data from Binance."""
+def get_db_connection():
+    """Shared database connection using .env credentials."""
+    from data.db import DatabaseConnection
+    return DatabaseConnection(
+        host=os.getenv('DB_HOST', 'localhost'),
+        port=int(os.getenv('DB_PORT', 5432)),
+        database=os.getenv('DB_NAME', 'rafund'),
+        user=os.getenv('DB_USER', 'postgres'),
+        password=os.getenv('DB_PASSWORD', 'postgres'),
+    )
+
+
+def collect_data(full_history: bool = True):
+    """
+    Collect OHLCV from Binance into `prices` table.
+
+    - First run: from COLLECT_START_DATE (default 2017-08-17) to today
+    - Later runs: incremental from last stored bar per symbol to today
+    """
     logger.info("=" * 80)
     logger.info("STARTING DATA COLLECTION")
     logger.info("=" * 80)
-    
+
     try:
         from data.collectors.binance_collector import BinanceCollector
-        from data.db import DatabaseConnection
-        from datetime import timedelta
-        
-        # Initialize collector and database
-        logger.info("Initializing Binance collector and database connection...")
+        from datetime import timedelta, timezone
+
         collector = BinanceCollector(testnet=False, rate_limit_ms=100)
-        db = DatabaseConnection(
-            host=os.getenv('DB_HOST', 'localhost'),
-            port=int(os.getenv('DB_PORT', 5432)),
-            database=os.getenv('DB_NAME', 'rafund'),
-            user=os.getenv('DB_USER', 'postgres'),
-            password=os.getenv('DB_PASSWORD', 'postgres')
-        )
-        
-        # Test connection
+        db = get_db_connection()
+
         if not db.test_connection():
             logger.error("Database connection failed")
             return False
-        
-        # Define symbols
-        symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
-        
-        # Set date range (4 years of data for robust statistical analysis)
-        end_date = datetime.utcnow()
-        start_date = end_date - timedelta(days=4*365)  # ~4 years
-        
-        logger.info(f"Collecting data for symbols: {symbols}")
-        logger.info(f"Period: {start_date.date()} to {end_date.date()}")
-        logger.info(f"Data range: ~{(end_date - start_date).days} days")
-        
-        # Collect data
+
+        default_symbols = (
+            'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
+            'ADA/USDT', 'DOT/USDT', 'LINK/USDT', 'XRP/USDT',
+        )
+        symbols_env = os.getenv('COLLECT_SYMBOLS', '')
+        symbols = (
+            [s.strip() for s in symbols_env.split(',') if s.strip()]
+            if symbols_env
+            else list(default_symbols)
+        )
+
+        end_date = datetime.now(timezone.utc).replace(tzinfo=None)
+        default_start = datetime.strptime(
+            os.getenv('COLLECT_START_DATE', '2017-08-17'), '%Y-%m-%d'
+        )
+
+        logger.info(f"Symbols: {symbols}")
+        logger.info(f"Collect through: {end_date.date()}")
+
+        total_inserted = 0
         for symbol in symbols:
             try:
+                latest = db.get_latest_timestamp(symbol)
+                if full_history and latest is None:
+                    start_date = default_start
+                    logger.info(f"[{symbol}] Full history from {start_date.date()}")
+                elif latest is not None:
+                    start_date = latest + timedelta(days=1)
+                    if start_date.date() >= end_date.date():
+                        logger.info(f"[{symbol}] Already up to date (latest {latest.date()})")
+                        continue
+                    logger.info(f"[{symbol}] Incremental from {start_date.date()}")
+                else:
+                    start_date = default_start
+                    logger.info(f"[{symbol}] No data yet — from {start_date.date()}")
+
                 df = collector.fetch_ohlcv_history(symbol, '1d', start_date, end_date)
-                
                 if not df.empty and collector.validate_data(df):
-                    db.insert_prices(df)
-                    logger.info(f"[OK] {symbol}: {len(df)} records inserted")
+                    inserted = db.insert_prices(df)
+                    total_inserted += inserted
+                    logger.info(f"[OK] {symbol}: {inserted} new rows ({len(df)} fetched)")
                 else:
                     logger.warning(f"[SKIP] {symbol}: No valid data")
             except Exception as e:
                 logger.error(f"[ERROR] {symbol}: {str(e)}")
-        
-        # Show statistics
+
         stats = db.get_data_stats()
-        logger.info(f"\nDatabase now contains:")
+        logger.info("\nDatabase prices summary:")
         logger.info(f"  Total records: {stats.get('total_price_records', 0)}")
         logger.info(f"  Total symbols: {stats.get('num_symbols', 0)}")
         logger.info(f"  Date range: {stats.get('min_date')} to {stats.get('max_date')}")
-        
+        logger.info(f"  Rows inserted this run: {total_inserted}")
+
         db.close_pool()
         return True
-        
+
     except Exception as e:
         logger.error(f"Data collection error: {str(e)}", exc_info=True)
         return False
@@ -122,74 +151,72 @@ def run_backtest():
     
     try:
         from data.db import DatabaseConnection
-        from backtesting.engine_v2 import BacktestEngineV2
-        from datetime import datetime
+        from backtesting.engine_eval import EvaluationBacktestEngine
+        from backtesting.evaluation_rules import PropFirmRules
         
         # Connect to database
         logger.info("Loading price data from database...")
-        db = DatabaseConnection(
-            host=os.getenv('DB_HOST', 'localhost'),
-            port=int(os.getenv('DB_PORT', 5432)),
-            database=os.getenv('DB_NAME', 'rafund'),
-            user=os.getenv('DB_USER', 'postgres'),
-            password=os.getenv('DB_PASSWORD', 'postgres')
+        db = get_db_connection()
+        pair_a = os.getenv('EVAL_PAIR_A', 'BTC/USDT')
+        pair_b = os.getenv('EVAL_PAIR_B', 'ETH/USDT')
+
+        pa = db.get_prices(pair_a, None, None)
+        pb = db.get_prices(pair_b, None, None)
+        if pa.empty or pb.empty:
+            logger.error(f"Missing prices for {pair_a} or {pair_b}. Run: python main.py collect")
+            db.close_pool()
+            return False
+
+        prices = pd.concat([pa, pb], ignore_index=True)
+        logger.info(
+            f"Loaded {len(prices)} bars for {pair_a} / {pair_b} "
+            f"({pa['timestamp'].min().date()} → {pa['timestamp'].max().date()})"
         )
         
-        # Get all available symbols
-        symbols_with_data = db.get_symbols_with_data()
-        
-        if not symbols_with_data:
-            logger.error("No symbols with data found in database")
-            db.close_pool()
-            return False
-        
-        logger.info(f"Found {len(symbols_with_data)} symbols: {', '.join(symbols_with_data)}")
-        
-        # Fetch all price data
-        all_prices = []
-        for symbol in symbols_with_data:
-            symbol_prices = db.get_prices(symbol, None, None)
-            if not symbol_prices.empty:
-                all_prices.append(symbol_prices)
-        
-        if not all_prices:
-            logger.error("No price data retrieved")
-            db.close_pool()
-            return False
-        
-        prices = pd.concat(all_prices, ignore_index=True)
-        logger.info(f"Loaded {len(prices)} price records for backtesting")
-        
-        # Run backtest with improved engine and risk controls
-        logger.info("Initializing backtesting engine (v2 - fixed window baseline)...")
+        rules = PropFirmRules()
+        pair_a = os.getenv('EVAL_PAIR_A', 'BTC/USDT')
+        pair_b = os.getenv('EVAL_PAIR_B', 'ETH/USDT')
+
+        logger.info("Initializing evaluation backtest (pairs stat-arb + prop rules)...")
         logger.info("=" * 80)
-        logger.info("STRATEGY CONFIGURATION")
+        logger.info("PROP FIRM EVALUATION RULES")
         logger.info("=" * 80)
-        logger.info(f"  Window Mode:         FIXED (not rolling)")
-        logger.info(f"  Training Period:     60 days")
-        logger.info(f"  Entry Threshold:     Z-score > 2.0")
-        logger.info(f"  Exit Threshold:      Z-score < 0.5")
+        logger.info(f"  Account Size:        ${rules.account_size:,.0f}")
+        logger.info(f"  Step 1 Target:       +${rules.step1_profit:.0f}  (equity ${rules.step1_equity:,.0f})")
+        logger.info(f"  Step 2 Target:       +${rules.step2_profit:.0f}  (equity ${rules.step2_equity:,.0f})")
+        logger.info(f"  Max Daily Loss:      {rules.max_daily_loss_pct*100:.0f}% (${rules.max_daily_loss_amount:.0f})")
+        logger.info(f"  Max Drawdown:        {rules.max_drawdown_pct*100:.0f}% (floor ${rules.min_equity:,.0f})")
+        logger.info(f"  Max Leverage:        {rules.max_leverage:.0f}x")
+        logger.info(f"  Evaluation Fee:      ${rules.evaluation_fee:.2f}")
         logger.info("=" * 80)
-        logger.info("RISK PARAMETERS")
+        logger.info("STRATEGY: PAIRS STATISTICAL ARBITRAGE (MEAN REVERSION)")
         logger.info("=" * 80)
-        logger.info(f"  Initial Capital:     $100,000")
-        logger.info(f"  Max Position Size:   10% of capital")
+        logger.info(f"  Pair:                {pair_a} / {pair_b}")
+        logger.info(f"  Spread:              log(A) - beta * log(B)")
+        logger.info(f"  Training Window:     60 days (fixed mean/std)")
+        logger.info(f"  Entry:               |z| > 2.0  (fade the dislocation)")
+        logger.info(f"  Exit:                |z| < 0.5  (spread reverted)")
+        logger.info(f"  Leg Size:            18% equity per leg (~0.36x gross leverage)")
+        logger.info(f"  Spread Stop Loss:    3% of position equity")
+        logger.info(f"  Max Hold:            30 days per spread trade")
         logger.info(f"  Commission:          0.1%")
-        logger.info(f"  Stop Loss:           5% per position")
         logger.info("=" * 80)
         
-        engine = BacktestEngineV2(
-            initial_capital=100000,
-            commission=0.001,
+        engine = EvaluationBacktestEngine(
+            rules=rules,
+            symbol_a=pair_a,
+            symbol_b=pair_b,
             entry_threshold=2.0,
             exit_threshold=0.5,
             lookback=60,
-            max_position_pct=0.10,  # Max 10% per position
-            stop_loss_pct=0.05,     # 5% stop loss
-            use_fixed_window=True   # KEY FIX: Use fixed training window instead of rolling
+            leg_allocation_pct=0.18,
+            commission=0.001,
+            stop_loss_spread_pct=0.03,
+            max_holding_days=30,
         )
         
         results = engine.run(prices)
+        ev = results.get('evaluation', {})
         
         # Display results
         logger.info("\n" + "=" * 80)
@@ -207,15 +234,38 @@ def run_backtest():
         logger.info(f"Mean Daily Return:  {results['mean_daily_return']*100:.4f}%")
         logger.info(f"Daily Volatility:   {results['daily_volatility']*100:.4f}%")
         logger.info("=" * 80)
+        logger.info("EVALUATION OUTCOME")
+        logger.info("=" * 80)
+        logger.info(f"  Status:              {ev.get('status', 'N/A')}")
+        logger.info(f"  Phase Reached:       {ev.get('phase', 'N/A')}")
+        logger.info(f"  Days Simulated:      {ev.get('days_traded', 0)}")
+        logger.info(f"  Worst Daily Loss:    ${ev.get('worst_daily_loss', 0):,.2f}")
+        logger.info(f"  Worst Drawdown:      {ev.get('worst_drawdown_pct', 0):.2f}%")
+        logger.info(f"  Min Equity Allowed:  ${ev.get('min_equity_floor', 0):,.0f}")
+        logger.info("=" * 80)
         
         if results['num_trades'] > 0:
             logger.info("\nSample Trades (first 10):")
             for i, trade in enumerate(results['trades'][:10], 1):
-                logger.info(f"  {i}. {trade['date']} {trade['symbol']:10} {trade['side']:4} "
-                          f"@ ${trade['price']:.2f}")
+                logger.info(
+                    f"  {i}. {trade['date']} {trade.get('side', '')} "
+                    f"{trade.get('symbol_a', '')}/{trade.get('symbol_b', '')} "
+                    f"status={trade.get('status', '')}"
+                )
         
         logger.info("=" * 80)
-        
+
+        if os.getenv('SAVE_TO_DB', '1') == '1' and results.get('signals_df') is not None:
+            from backtesting.persist import persist_evaluation_run
+            backtest_id = (
+                f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+                f"{ev.get('status', 'UNKNOWN')}"
+            )
+            written = persist_evaluation_run(db, results, backtest_id)
+            logger.info(f"Persisted to database: {written}")
+            for table, count in db.get_table_counts().items():
+                logger.info(f"  {table:20} {count:8} rows")
+
         db.close_pool()
         return True
     
@@ -417,158 +467,99 @@ def generate_signals():
 
 
 def run_full_pipeline():
-    """Run complete pipeline: features -> signals -> backtest -> save results."""
+    """
+    Full trading infrastructure bootstrap:
+      1. Collect all price history to date (incremental)
+      2. Run evaluation backtest on primary pair through latest data
+      3. Persist features, signals, trades, portfolio, backtest_results
+    """
     logger.info("=" * 80)
-    logger.info("RUNNING COMPLETE ML4T PIPELINE")
+    logger.info("RUNNING FULL ML4T INFRASTRUCTURE PIPELINE")
     logger.info("=" * 80)
-    
+
     try:
-        from data.db import DatabaseConnection
-        from backtesting.engine import BacktestEngine
-        from datetime import datetime
-        import uuid
-        
-        # Step 1: Calculate features
-        logger.info("\n[STEP 1] Calculating features...")
-        if not calculate_features():
-            logger.error("Feature calculation failed")
+        from backtesting.engine_eval import EvaluationBacktestEngine
+        from backtesting.evaluation_rules import PropFirmRules
+        from backtesting.persist import persist_evaluation_run
+
+        # Step 1: Collect market data to date
+        logger.info("\n[STEP 1/4] Collecting price data to date...")
+        if not collect_data(full_history=True):
+            logger.error("Data collection failed")
             return False
-        
-        # Step 2: Generate signals
-        logger.info("\n[STEP 2] Generating signals...")
-        if not generate_signals():
-            logger.error("Signal generation failed")
-            return False
-        
-        # Step 3: Load data and run backtest
-        logger.info("\n[STEP 3] Running backtest...")
-        
-        db = DatabaseConnection(
-            host=os.getenv('DB_HOST', 'localhost'),
-            port=int(os.getenv('DB_PORT', 5432)),
-            database=os.getenv('DB_NAME', 'rafund'),
-            user=os.getenv('DB_USER', 'postgres'),
-            password=os.getenv('DB_PASSWORD', 'postgres')
+
+        db = get_db_connection()
+        pair_a = os.getenv('EVAL_PAIR_A', 'BTC/USDT')
+        pair_b = os.getenv('EVAL_PAIR_B', 'ETH/USDT')
+
+        for sym in (pair_a, pair_b):
+            if sym not in db.get_symbols_with_data():
+                logger.error(f"Missing price data for {sym}. Collection may have failed.")
+                db.close_pool()
+                return False
+
+        pa = db.get_prices(pair_a, None, None)
+        pb = db.get_prices(pair_b, None, None)
+        prices = pd.concat([pa, pb], ignore_index=True)
+        logger.info(
+            f"\n[STEP 2/4] Loaded {len(prices)} bars | "
+            f"{pair_a}: {pa['timestamp'].min().date()} to {pa['timestamp'].max().date()} | "
+            f"{pair_b}: {pb['timestamp'].min().date()} to {pb['timestamp'].max().date()}"
         )
-        
-        symbols_with_data = db.get_symbols_with_data()
-        if not symbols_with_data:
-            logger.error("No symbols with data found")
-            db.close_pool()
-            return False
-        
-        # Fetch all price data
-        all_prices = []
-        for symbol in symbols_with_data:
-            symbol_prices = db.get_prices(symbol, None, None)
-            if not symbol_prices.empty:
-                all_prices.append(symbol_prices)
-        
-        if not all_prices:
-            logger.error("No price data retrieved")
-            db.close_pool()
-            return False
-        
-        prices = pd.concat(all_prices, ignore_index=True)
-        logger.info(f"Loaded {len(prices)} price records")
-        
-        # Run backtest
-        from backtesting.engine_v2 import BacktestEngineV2
-        
-        engine = BacktestEngineV2(
-            initial_capital=100000,
-            commission=0.001,
+
+        rules = PropFirmRules()
+        logger.info("\n[STEP 3/4] Running evaluation simulation to latest date...")
+        engine = EvaluationBacktestEngine(
+            rules=rules,
+            symbol_a=pair_a,
+            symbol_b=pair_b,
             entry_threshold=2.0,
             exit_threshold=0.5,
             lookback=60,
-            max_position_pct=0.10,
-            stop_loss_pct=0.05
+            leg_allocation_pct=0.18,
+            commission=0.001,
+            stop_loss_spread_pct=0.03,
+            max_holding_days=30,
         )
-        
         results = engine.run(prices)
-        
-        # Step 4: Save backtest results and trades
-        logger.info("\n[STEP 4] Saving results to database...")
-        
-        # Create unique backtest ID
-        backtest_id = f"backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
-        # Prepare results for database
-        db_results = {
-            'backtest_id': backtest_id,
-            'start_date': prices['timestamp'].min(),
-            'end_date': prices['timestamp'].max(),
-            'initial_capital': results['initial_capital'],
-            'final_value': results['final_value'],
-            'total_return': results['total_return'],
-            'sharpe_ratio': results['sharpe_ratio'],
-            'max_drawdown': results['max_drawdown'],
-            'num_trades': results['num_trades'],
-            'win_rate': results['win_rate']
-        }
-        
-        # Save backtest results
-        if db.insert_backtest_results(db_results):
-            logger.info(f"[OK] Backtest results saved: {backtest_id}")
-        else:
-            logger.warning("Failed to save backtest results")
-        
-        # Save trades
-        if results['trades']:
-            trades_df = pd.DataFrame(results['trades'])
-            trades_df['trade_date'] = trades_df['date']  # Map 'date' to 'trade_date'
-            trades_df = trades_df.drop('date', axis=1)
-            trades_df['status'] = 'OPEN'
-            trades_df['direction'] = 'LONG'
-            trades_df['entry_price'] = trades_df['price']
-            trades_df['exit_price'] = None
-            trades_df['quantity'] = trades_df['quantity'].astype(int)
-            trades_df['pnl'] = None
-            trades_df['return_pct'] = None
-            inserted_trades = db.insert_trades(trades_df)
-            logger.info(f"Saved {inserted_trades} trades to database")
-        
-        # Step 5: Display comprehensive database summary
-        logger.info("\n[STEP 5] Database Summary...")
-        try:
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            
-            summary = {}
-            tables = ['prices', 'features', 'signals', 'trades', 'backtest_results']
-            
-            for table in tables:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cursor.fetchone()[0]
-                summary[table] = count
-                logger.info(f"  {table:20} {count:8} records")
-            
-            cursor.close()
-            db.return_connection(conn)
-        except Exception as e:
-            logger.warning(f"Could not retrieve database summary: {str(e)}")
-        
-        # Display summary
+
+        ev = results.get('evaluation', {})
+        backtest_id = (
+            f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{ev.get('status', 'UNKNOWN')}"
+        )
+
+        logger.info("\n[STEP 4/4] Persisting to database (schema tables)...")
+        written = persist_evaluation_run(db, results, backtest_id)
+
+        counts = db.get_table_counts()
         logger.info("\n" + "=" * 80)
-        logger.info("PIPELINE COMPLETE - FINAL RESULTS")
+        logger.info("DATABASE RECORD COUNTS")
         logger.info("=" * 80)
-        logger.info(f"Backtest ID:        {backtest_id}")
-        logger.info(f"Period:             {prices['timestamp'].min()} to {prices['timestamp'].max()}")
-        logger.info(f"Initial Capital:    ${results['initial_capital']:,.2f}")
-        logger.info(f"Final Value:        ${results['final_value']:,.2f}")
-        logger.info(f"Total Return:       {results['total_return_pct']:.2f}%")
-        logger.info(f"Sharpe Ratio:       {results['sharpe_ratio']:.2f}")
-        logger.info(f"Max Drawdown:       {results['max_drawdown_pct']:.2f}%")
-        logger.info(f"Total Trades:       {results['num_trades']}")
-        logger.info(f"Win Rate:           {results['win_rate_pct']:.2f}%")
+        for table, count in counts.items():
+            logger.info(f"  {table:20} {count:8} rows")
         logger.info("=" * 80)
-        
+        logger.info("PIPELINE COMPLETE")
+        logger.info("=" * 80)
+        logger.info(f"Backtest ID:     {backtest_id}")
+        logger.info(f"Pair:            {pair_a} / {pair_b}")
+        logger.info(f"Simulation end:  {pa['timestamp'].max()}")
+        logger.info(f"Final equity:    ${results['final_value']:,.2f}")
+        logger.info(f"Total return:    {results['total_return_pct']:.2f}%")
+        logger.info(f"Eval status:     {ev.get('status')}")
+        logger.info(f"Rows written:    {written}")
+        logger.info("=" * 80)
+
         db.close_pool()
         return True
-        
+
     except Exception as e:
         logger.error(f"Pipeline error: {str(e)}", exc_info=True)
         return False
+
+
+def run_bootstrap():
+    """Alias: collect + simulate + persist (same as pipeline)."""
+    return run_full_pipeline()
 
 
 def run_paper_trading():
@@ -610,7 +601,8 @@ Examples:
   python main.py features             # Calculate features
   python main.py signals              # Generate signals
   python main.py backtest             # Run backtest
-  python main.py pipeline             # Run complete pipeline (features -> signals -> backtest)
+  python main.py pipeline             # Collect data, backtest to date, persist all tables
+  python main.py bootstrap            # Same as pipeline (full infrastructure setup)
   python main.py paper                # Run paper trading
   python main.py live                 # Run live trading (DANGER!)
         """
@@ -620,7 +612,7 @@ Examples:
         'mode',
         nargs='?',
         default='collect',
-        choices=['collect', 'features', 'signals', 'backtest', 'pipeline', 'paper', 'live'],
+        choices=['collect', 'features', 'signals', 'backtest', 'pipeline', 'bootstrap', 'paper', 'live'],
         help='Operation mode (default: collect)'
     )
     
@@ -642,6 +634,8 @@ Examples:
             success = run_backtest()
         elif args.mode == 'pipeline':
             success = run_full_pipeline()
+        elif args.mode == 'bootstrap':
+            success = run_bootstrap()
         elif args.mode == 'paper':
             success = run_paper_trading()
         elif args.mode == 'live':

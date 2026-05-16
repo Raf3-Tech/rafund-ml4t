@@ -311,7 +311,7 @@ class DatabaseConnection:
             execute_values(cursor, query, data)
             conn.commit()
             
-            inserted = cursor.rowcount
+            inserted = len(data)
             logger.info(f"Inserted {inserted} feature records into database")
             
             cursor.close()
@@ -366,7 +366,7 @@ class DatabaseConnection:
             execute_values(cursor, query, data)
             conn.commit()
             
-            inserted = cursor.rowcount
+            inserted = len(data)
             logger.info(f"Inserted {inserted} signal records into database")
             
             cursor.close()
@@ -546,6 +546,141 @@ class DatabaseConnection:
                 pass
             return 0
     
+    def insert_portfolio(self, df: pd.DataFrame) -> int:
+        """
+        Insert portfolio snapshots into portfolio table.
+
+        Expected columns: timestamp, symbol, position_size, entry_price,
+        current_price, unrealized_pnl
+        """
+        if df.empty:
+            return 0
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            data = [
+                (
+                    row["timestamp"],
+                    row["symbol"],
+                    int(row["position_size"]),
+                    float(row["entry_price"]),
+                    float(row["current_price"]) if pd.notna(row.get("current_price")) else None,
+                    float(row["unrealized_pnl"]) if pd.notna(row.get("unrealized_pnl")) else None,
+                )
+                for _, row in df.iterrows()
+            ]
+            query = """
+                INSERT INTO portfolio (timestamp, symbol, position_size, entry_price,
+                                       current_price, unrealized_pnl)
+                VALUES %s
+                ON CONFLICT (timestamp, symbol) DO UPDATE SET
+                    position_size = EXCLUDED.position_size,
+                    entry_price = EXCLUDED.entry_price,
+                    current_price = EXCLUDED.current_price,
+                    unrealized_pnl = EXCLUDED.unrealized_pnl
+            """
+            execute_values(cursor, query, data)
+            conn.commit()
+            inserted = cursor.rowcount
+            cursor.close()
+            self.return_connection(conn)
+            logger.info(f"Upserted {inserted} portfolio snapshots")
+            return inserted
+        except Exception as e:
+            logger.error(f"Error inserting portfolio: {str(e)}")
+            try:
+                conn.rollback()
+                cursor.close()
+                self.return_connection(conn)
+            except Exception:
+                pass
+            return 0
+
+    def delete_signals_for_pair(self, symbol_a: str, symbol_b: str) -> int:
+        """Remove signals for a pair before re-inserting."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM signals WHERE symbol_a = %s AND symbol_b = %s",
+                (symbol_a, symbol_b),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            logger.info(f"Deleted {deleted} signals for {symbol_a}/{symbol_b}")
+            return deleted
+        except Exception as e:
+            logger.error(f"Error deleting signals: {str(e)}")
+            return 0
+
+    def delete_features_for_pair(self, symbol_a: str, symbol_b: str) -> int:
+        """Remove features for a pair before re-calculating."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM features WHERE symbol_a = %s AND symbol_b = %s",
+                (symbol_a, symbol_b),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            logger.info(f"Deleted {deleted} features for {symbol_a}/{symbol_b}")
+            return deleted
+        except Exception as e:
+            logger.error(f"Error deleting features: {str(e)}")
+            return 0
+
+    def delete_trades_for_symbol(self, symbol: str) -> int:
+        """Remove trades for a spread symbol label before re-inserting."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trades WHERE symbol = %s", (symbol,))
+            deleted = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return deleted
+        except Exception as e:
+            logger.error(f"Error deleting trades: {str(e)}")
+            return 0
+
+    def delete_portfolio_for_symbol(self, symbol: str) -> int:
+        """Remove portfolio rows for a symbol label."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM portfolio WHERE symbol = %s", (symbol,))
+            deleted = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return deleted
+        except Exception as e:
+            logger.error(f"Error deleting portfolio: {str(e)}")
+            return 0
+
+    def get_table_counts(self) -> Dict[str, int]:
+        """Row counts for all core tables."""
+        tables = ["prices", "features", "signals", "trades", "portfolio", "backtest_results"]
+        counts = {}
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            for table in tables:
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                counts[table] = cursor.fetchone()[0]
+            cursor.close()
+            self.return_connection(conn)
+            return counts
+        except Exception as e:
+            logger.error(f"Error getting table counts: {str(e)}")
+            return counts
+
     def close_pool(self):
         """Close all connections in the pool."""
         try:
