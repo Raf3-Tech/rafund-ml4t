@@ -161,6 +161,39 @@ venv\Scripts\activate
 source venv/bin/activate
 ```
 
+### Step 3: Configure the Database
+
+Create a `.env` file or export `DATABASE_URL` directly. Example:
+
+```bash
+export DATABASE_URL="postgresql://user:password@localhost:5432/rafund"
+```
+
+If you prefer environment variables instead of a single URL, set:
+
+```bash
+export DB_HOST=localhost
+export DB_PORT=5432
+export DB_NAME=rafund
+export DB_USER=postgres
+export DB_PASSWORD=postgres
+```
+
+Then run the Alembic baseline migration:
+
+```bash
+alembic upgrade head
+```
+
+### Step 4: Install Python Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+source venv/bin/activate
+```
+
 ### Step 3: Install Dependencies
 
 ```bash

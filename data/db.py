@@ -5,15 +5,20 @@ This module handles all database interactions including
 connection pooling, data insertion, and querying.
 """
 
+import json
+import logging
 import os
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import execute_values
 import pandas as pd
-import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
+
+from config.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Load environment variables from .env file
 def load_env():
@@ -42,6 +47,7 @@ class DatabaseConnection:
         database: str = None,
         user: str = None,
         password: str = None,
+        database_url: str = None,
         min_conn: int = 1,
         max_conn: int = 5
     ):
@@ -54,9 +60,11 @@ class DatabaseConnection:
             database: Database name
             user: Database user
             password: Database password
+            database_url: Optional PostgreSQL DSN URL
             min_conn: Minimum connections in pool
             max_conn: Maximum connections in pool
         """
+        self.database_url = database_url or os.getenv('DATABASE_URL')
         self.host = host or os.getenv('DB_HOST', 'localhost')
         self.port = int(port or os.getenv('DB_PORT', 5432))
         self.database = database or os.getenv('DB_NAME', 'rafund')
@@ -70,14 +78,20 @@ class DatabaseConnection:
     def _initialize_pool(self):
         """Initialize connection pool."""
         try:
+            pool_config = {
+                'dsn': self.database_url
+            } if self.database_url else {
+                'host': self.host,
+                'port': self.port,
+                'database': self.database,
+                'user': self.user,
+                'password': self.password,
+            }
+
             self.pool = SimpleConnectionPool(
                 self.min_conn,
                 self.max_conn,
-                host=self.host,
-                port=self.port,
-                database=self.database,
-                user=self.user,
-                password=self.password
+                **pool_config
             )
             logger.info(f"Database connection pool initialized for {self.database}")
         except Exception as e:
@@ -266,6 +280,26 @@ class DatabaseConnection:
             
         except Exception as e:
             logger.error(f"Error getting symbols: {str(e)}")
+            self.return_connection(conn)
+            return []
+
+    def get_feature_pairs(self) -> List[tuple]:
+        """
+        Get all unique stationary feature pairs from the features table.
+        
+        Returns:
+            List of (symbol_a, symbol_b) tuples
+        """
+        try:
+            conn = self.get_connection()
+            query = "SELECT DISTINCT symbol_a, symbol_b FROM features ORDER BY symbol_a, symbol_b"
+            df = pd.read_sql(query, conn)
+            self.return_connection(conn)
+            pairs = [(row['symbol_a'], row['symbol_b']) for _, row in df.iterrows()]
+            logger.info(f"Found {len(pairs)} feature pairs in database")
+            return pairs
+        except Exception as e:
+            logger.error(f"Error getting feature pairs: {str(e)}")
             self.return_connection(conn)
             return []
     
@@ -680,6 +714,203 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"Error getting table counts: {str(e)}")
             return counts
+
+    def get_active_production_model(self, model_name: str, symbol: str) -> Optional[Dict[str, Any]]:
+        try:
+            conn = self.get_connection()
+            query = (
+                "SELECT * FROM model_registry "
+                "WHERE model_name = %s AND symbol = %s AND stage = 'Production' AND is_active = TRUE "
+                "ORDER BY promoted_at DESC LIMIT 1"
+            )
+            df = pd.read_sql(query, conn, params=[model_name, symbol])
+            self.return_connection(conn)
+            if df.empty:
+                return None
+            return df.iloc[0].to_dict()
+        except Exception as e:
+            logger.error(f"Error querying active production model: {str(e)}")
+            self.return_connection(conn)
+            return None
+
+    def get_production_models(self) -> list[Dict[str, Any]]:
+        try:
+            conn = self.get_connection()
+            query = "SELECT * FROM model_registry WHERE stage = 'Production' AND is_active = TRUE ORDER BY promoted_at DESC"
+            df = pd.read_sql(query, conn)
+            self.return_connection(conn)
+            return df.to_dict(orient='records')
+        except Exception as e:
+            logger.error(f"Error querying production models: {str(e)}")
+            self.return_connection(conn)
+            return []
+
+    def save_model_registry_entry(
+        self,
+        model_name: str,
+        mlflow_run_id: str,
+        mlflow_version: int,
+        symbol: str,
+        stage: str,
+        trained_at: datetime,
+        promoted_at: Optional[datetime],
+        in_sample_sharpe: float,
+        oos_sharpe: Optional[float],
+        feature_names: list[str],
+        is_active: bool,
+    ) -> bool:
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            if is_active:
+                cursor.execute(
+                    "UPDATE model_registry SET is_active = FALSE WHERE model_name = %s AND symbol = %s AND is_active = TRUE",
+                    (model_name, symbol),
+                )
+            cursor.execute(
+                "INSERT INTO model_registry (model_name, mlflow_run_id, mlflow_version, symbol, stage, trained_at, promoted_at, in_sample_sharpe, oos_sharpe, feature_names, is_active) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    model_name,
+                    mlflow_run_id,
+                    mlflow_version,
+                    symbol,
+                    stage,
+                    trained_at,
+                    promoted_at,
+                    in_sample_sharpe,
+                    oos_sharpe,
+                    json.dumps(feature_names),
+                    is_active,
+                ),
+            )
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving model registry entry: {str(e)}")
+            try:
+                conn.rollback()
+                cursor.close()
+                self.return_connection(conn)
+            except Exception:
+                pass
+            return False
+
+    def get_recent_drift_report(self, model_name: str, symbol: str, since: datetime) -> Optional[Dict[str, Any]]:
+        try:
+            conn = self.get_connection()
+            query = (
+                "SELECT * FROM drift_reports "
+                "WHERE model_name = %s AND symbol = %s AND detected_at >= %s "
+                "ORDER BY detected_at DESC LIMIT 1"
+            )
+            df = pd.read_sql(query, conn, params=[model_name, symbol, since])
+            self.return_connection(conn)
+            if df.empty:
+                return None
+            return df.iloc[0].to_dict()
+        except Exception as e:
+            logger.error(f"Error querying recent drift report: {str(e)}")
+            self.return_connection(conn)
+            return None
+
+    def insert_drift_report(self, report: Dict[str, Any]) -> bool:
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO drift_reports (model_name, symbol, detected_at, features_checked, features_drifted, max_psi, mean_psi, drift_detected, severity, recommended_action, raw_psi_scores) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    report.get('model_name'),
+                    report.get('symbol'),
+                    report.get('detected_at'),
+                    report.get('features_checked'),
+                    json.dumps(report.get('features_drifted', [])),
+                    report.get('max_psi'),
+                    report.get('mean_psi'),
+                    report.get('drift_detected'),
+                    report.get('severity'),
+                    report.get('recommended_action'),
+                    json.dumps(report.get('raw_psi_scores', {})),
+                ),
+            )
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return True
+        except Exception as e:
+            logger.error(f"Error inserting drift report: {str(e)}")
+            try:
+                conn.rollback()
+                cursor.close()
+                self.return_connection(conn)
+            except Exception:
+                pass
+            return False
+
+    def block_model(self, model_name: str, symbol: str, reason: str) -> bool:
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO model_blocks (model_name, symbol, reason, blocked_at) VALUES (%s, %s, NOW())",
+                (model_name, symbol, reason),
+            )
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return True
+        except Exception as e:
+            logger.error(f"Error blocking model: {str(e)}")
+            try:
+                conn.rollback()
+                cursor.close()
+                self.return_connection(conn)
+            except Exception:
+                pass
+            return False
+
+    def unblock_model(self, model_name: str, symbol: str) -> bool:
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM model_blocks WHERE model_name = %s AND symbol = %s",
+                (model_name, symbol),
+            )
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return True
+        except Exception as e:
+            logger.error(f"Error unblocking model: {str(e)}")
+            try:
+                conn.rollback()
+                cursor.close()
+                self.return_connection(conn)
+            except Exception:
+                pass
+            return False
+
+    def get_block_status(self, model_name: str, symbol: str) -> Optional[Dict[str, Any]]:
+        try:
+            conn = self.get_connection()
+            query = (
+                "SELECT * FROM model_blocks WHERE model_name = %s AND symbol = %s "
+                "ORDER BY blocked_at DESC LIMIT 1"
+            )
+            df = pd.read_sql(query, conn, params=[model_name, symbol])
+            self.return_connection(conn)
+            if df.empty:
+                return None
+            return df.iloc[0].to_dict()
+        except Exception as e:
+            logger.error(f"Error querying block status: {str(e)}")
+            self.return_connection(conn)
+            return None
 
     def close_pool(self):
         """Close all connections in the pool."""

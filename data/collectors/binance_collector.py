@@ -1,264 +1,255 @@
 """
 Binance data collector using CCXT.
 
-This module fetches OHLCV (Open, High, Low, Close, Volume) data from Binance
-and handles rate limiting, error management, and data validation.
+This module fetches OHLCV candles from Binance and validates them before they
+are returned to the pipeline. All API calls are retry-safe and logged.
 """
 
+from __future__ import annotations
+
 import ccxt
-import pandas as pd
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+import pandas as pd
+from tenacity import (
+    RetryError,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+)
+
+from config.logging_config import get_logger
+from data.models import CollectionResult, validate_ohlcv_batch
+
+logger = get_logger(__name__)
+_retry_logger = logging.getLogger(__name__)
+
+DEFAULT_TIMEFRAME = '1d'
+TIMEFRAME_TO_MS = {
+    '1m': 60 * 1000,
+    '5m': 5 * 60 * 1000,
+    '15m': 15 * 60 * 1000,
+    '1h': 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000,
+}
+VALID_TIMEFRAMES = set(TIMEFRAME_TO_MS)
 
 
 class BinanceCollector:
-    """Fetches market data from Binance exchange."""
-    
-    def __init__(self, testnet: bool = False, rate_limit_ms: int = 50):
-        """
-        Initialize Binance collector.
-        
-        Args:
-            testnet: Use testnet (False = mainnet)
-            rate_limit_ms: Milliseconds to wait between API calls
-        """
+    """Fetches market data from Binance exchange with retries and validation."""
+
+    def __init__(self, testnet: bool = False, rate_limit_ms: int = 200):
         self.testnet = testnet
         self.rate_limit_ms = rate_limit_ms
-        self.client = None
-        self.last_call_time = 0
+        self.client: Optional[ccxt.binance] = None
+        self.last_call_time = 0.0
+        self.last_collection_df: pd.DataFrame = pd.DataFrame()
         self._initialize_client()
-        
-    def _initialize_client(self):
-        """Initialize CCXT Binance client."""
+
+    def _initialize_client(self) -> None:
         try:
-            self.client = ccxt.binance({
-                'enableRateLimit': True,
-                'rateLimit': self.rate_limit_ms,
-                'sandbox': self.testnet
-            })
-            logger.info(f"Binance client initialized (testnet={self.testnet})")
-        except Exception as e:
-            logger.error(f"Failed to initialize Binance client: {str(e)}")
+            self.client = ccxt.binance(
+                {
+                    'enableRateLimit': True,
+                    'rateLimit': self.rate_limit_ms,
+                    'sandbox': self.testnet,
+                }
+            )
+            logger.info('Binance client initialized', testnet=self.testnet)
+        except Exception as exc:
+            logger.error('Failed to initialize Binance client', error=str(exc))
             raise
-    
-    def _respect_rate_limit(self):
-        """Respect rate limiting between API calls."""
+
+    def _respect_rate_limit(self) -> None:
         elapsed = time.time() - self.last_call_time
-        wait_time = max(0, (self.rate_limit_ms / 1000) - elapsed)
-        if wait_time > 0:
+        wait_time = max(0.0, (self.rate_limit_ms / 1000.0) - elapsed)
+        if wait_time > 0.0:
             time.sleep(wait_time)
         self.last_call_time = time.time()
-    
-    def get_symbols(self) -> List[str]:
-        """
-        Get all available trading symbols on Binance.
-        
-        Returns:
-            List of symbols in format 'BTC/USDT'
-        """
-        try:
-            self._respect_rate_limit()
-            # Load markets first to populate symbols
-            if not self.client.symbols:
-                self.client.load_markets()
-            symbols = self.client.symbols
-            if symbols:
-                logger.info(f"Retrieved {len(symbols)} symbols from Binance")
-                return symbols
-            else:
-                logger.warning("No symbols retrieved from Binance")
-                return []
-        except Exception as e:
-            logger.error(f"Error fetching symbols: {str(e)}")
-            return []
-    
-    def fetch_ohlcv(
+
+    @retry(
+        retry=retry_if_exception_type((
+            ccxt.NetworkError,
+            ccxt.RequestTimeout,
+            ccxt.RateLimitExceeded,
+            ccxt.ExchangeNotAvailable,
+        )),
+        wait=wait_exponential(multiplier=2, max=60),
+        stop=stop_after_attempt(5),
+        before_sleep=before_sleep_log(_retry_logger, logging.WARNING),
+        reraise=True,
+    )
+    def _fetch_ohlcv(self, symbol: str, timeframe: str, since: Optional[int], limit: int) -> List[List[Any]]:
+        self._respect_rate_limit()
+        return self.client.fetch_ohlcv(symbol, timeframe, since, limit)
+
+    def fetch_ohlcv_safe(
         self,
         symbol: str,
-        timeframe: str = '1d',
-        limit: int = 100,
-        since: Optional[int] = None
-    ) -> pd.DataFrame:
-        """
-        Fetch OHLCV data for a symbol.
-        
-        Args:
-            symbol: Trading pair (e.g., 'BTC/USDT')
-            timeframe: Candle timeframe ('1m', '5m', '15m', '1h', '4h', '1d', '1w')
-            limit: Number of candles to fetch (max 1000 per call)
-            since: Unix timestamp in milliseconds (for pagination)
-            
-        Returns:
-            DataFrame with columns: timestamp, open, high, low, close, volume
-        """
+        timeframe: str = DEFAULT_TIMEFRAME,
+        limit: int = 500,
+        since: Optional[int] = None,
+    ) -> tuple[list[Dict[str, Any]], list[str]]:
+        if timeframe not in VALID_TIMEFRAMES:
+            raise ValueError(f'Unsupported timeframe: {timeframe}')
+
         try:
-            self._respect_rate_limit()
-            
-            logger.info(f"Fetching {limit} {timeframe} candles for {symbol}")
-            ohlcv = self.client.fetch_ohlcv(symbol, timeframe, since, limit)
-            
-            if not ohlcv:
-                logger.warning(f"No data returned for {symbol}")
-                return pd.DataFrame()
-            
-            # Convert to DataFrame
-            df = pd.DataFrame(
-                ohlcv,
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            raw_candles = self._fetch_ohlcv(symbol, timeframe, since, limit)
+        except RetryError as exc:
+            last_attempt = exc.last_attempt
+            error = last_attempt.exception()
+            logger.error(
+                'Binance request failed after retries',
+                symbol=symbol,
+                timeframe=timeframe,
+                attempts=last_attempt.attempt_number,
+                error=str(error),
             )
-            
-            # Convert timestamp from milliseconds to datetime
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df['symbol'] = symbol
-            
-            logger.info(f"Successfully fetched {len(df)} candles for {symbol}")
-            return df
-            
-        except ccxt.NetworkError as e:
-            logger.error(f"Network error fetching {symbol}: {str(e)}")
-            return pd.DataFrame()
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error fetching {symbol}: {str(e)}")
-            return pd.DataFrame()
-        except Exception as e:
-            logger.error(f"Unexpected error fetching {symbol}: {str(e)}")
-            return pd.DataFrame()
-    
-    def fetch_ohlcv_history(
+            raise error
+        except Exception as exc:
+            logger.error(
+                'Binance request failed',
+                symbol=symbol,
+                timeframe=timeframe,
+                error=str(exc),
+            )
+            raise
+
+        if not raw_candles:
+            logger.warning(
+                'No candles returned from Binance',
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+                since=since,
+            )
+            return [], []
+
+        rows: list[Dict[str, Any]] = []
+        for candle in raw_candles:
+            rows.append(
+                {
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'timestamp': datetime.fromtimestamp(candle[0] / 1000.0, timezone.utc),
+                    'open': float(candle[1]),
+                    'high': float(candle[2]),
+                    'low': float(candle[3]),
+                    'close': float(candle[4]),
+                    'volume': float(candle[5]),
+                }
+            )
+
+        valid_records, errors = validate_ohlcv_batch(rows)
+        logger.info(
+            'Fetched OHLCV batch',
+            symbol=symbol,
+            timeframe=timeframe,
+            batch_size=len(rows),
+            records_valid=len(valid_records),
+            records_rejected=len(errors),
+        )
+
+        valid_dicts = [record.model_dump() for record in valid_records]
+        return valid_dicts, errors
+
+    def collect_symbol(
         self,
         symbol: str,
-        timeframe: str = '1d',
-        start_date: datetime = None,
-        end_date: datetime = None
-    ) -> pd.DataFrame:
-        """
-        Fetch historical OHLCV data for extended periods.
-        
-        Uses pagination to fetch data across the entire time range.
-        Binance API limit is 1000 candles per call.
-        
-        Args:
-            symbol: Trading pair
-            timeframe: Candle timeframe
-            start_date: Start date (default: 1 year ago)
-            end_date: End date (default: today)
-            
-        Returns:
-            DataFrame with all historical data
-        """
-        if start_date is None:
-            start_date = datetime.utcnow() - timedelta(days=365)
-        if end_date is None:
-            end_date = datetime.utcnow()
-        
-        logger.info(f"Fetching {symbol} history from {start_date} to {end_date}")
-        
-        all_data = []
-        current_time = int(start_date.timestamp() * 1000)  # Convert to milliseconds
-        end_time = int(end_date.timestamp() * 1000)
-        
-        # Determine candle duration in milliseconds
-        timeframe_ms = {
-            '1m': 60 * 1000,
-            '5m': 5 * 60 * 1000,
-            '15m': 15 * 60 * 1000,
-            '1h': 60 * 60 * 1000,
-            '4h': 4 * 60 * 60 * 1000,
-            '1d': 24 * 60 * 60 * 1000,
-            '1w': 7 * 24 * 60 * 60 * 1000
-        }
-        
-        candle_duration = timeframe_ms.get(timeframe, 24 * 60 * 60 * 1000)
-        
-        while current_time < end_time:
+        timeframe: str = DEFAULT_TIMEFRAME,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+    ) -> CollectionResult:
+        if timeframe not in VALID_TIMEFRAMES:
+            raise ValueError(f'Unsupported timeframe: {timeframe}')
+
+        if from_date is None:
+            from_date = datetime.now(timezone.utc) - timedelta(days=365)
+        if to_date is None:
+            to_date = datetime.now(timezone.utc)
+        if from_date.tzinfo is None:
+            from_date = from_date.replace(tzinfo=timezone.utc)
+        if to_date.tzinfo is None:
+            to_date = to_date.replace(tzinfo=timezone.utc)
+
+        started_at = datetime.now(timezone.utc)
+        self.last_collection_df = pd.DataFrame()
+        records_fetched = 0
+        records_rejected = 0
+        records_inserted = 0
+        errors: list[str] = []
+
+        since = int(from_date.timestamp() * 1000)
+        until_ms = int(to_date.timestamp() * 1000)
+        batch_limit = 500
+        all_rows: list[Dict[str, Any]] = []
+
+        while since <= until_ms:
             try:
-                df = self.fetch_ohlcv(symbol, timeframe, 1000, current_time)
-                
-                if df.empty:
-                    logger.warning(f"No data for {symbol} at {datetime.fromtimestamp(current_time/1000)}")
-                    break
-                
-                all_data.append(df)
-                
-                # Move to next batch (1000 candles)
-                current_time = int(df['timestamp'].iloc[-1].timestamp() * 1000) + candle_duration
-                
-                # Log progress
-                logger.info(f"Fetched up to {df['timestamp'].iloc[-1].date()} for {symbol}")
-                
-            except Exception as e:
-                logger.error(f"Error during history fetch: {str(e)}")
+                batch_rows, batch_errors = self.fetch_ohlcv_safe(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    limit=batch_limit,
+                    since=since,
+                )
+            except Exception as exc:
+                errors.append(str(exc))
                 break
-        
-        if all_data:
-            result = pd.concat(all_data, ignore_index=True)
-            result = result.drop_duplicates(subset=['symbol', 'timestamp']).sort_values('timestamp')
-            logger.info(f"Total records fetched for {symbol}: {len(result)}")
-            return result
-        else:
-            logger.warning(f"No data fetched for {symbol}")
-            return pd.DataFrame()
-    
-    def validate_data(self, df: pd.DataFrame) -> bool:
-        """
-        Validate OHLCV data quality.
-        
-        Args:
-            df: DataFrame with OHLCV data
-            
-        Returns:
-            True if data is valid, False otherwise
-        """
-        if df.empty:
-            logger.warning("Empty DataFrame provided for validation")
-            return False
-        
-        required_columns = {'timestamp', 'open', 'high', 'low', 'close', 'volume', 'symbol'}
-        if not required_columns.issubset(df.columns):
-            logger.error(f"Missing required columns. Have: {df.columns.tolist()}")
-            return False
-        
-        # Check for negative prices (data corruption)
-        if (df[['open', 'high', 'low', 'close']] < 0).any().any():
-            logger.error("Negative prices detected")
-            return False
-        
-        # Check logical consistency: high >= low
-        if (df['high'] < df['low']).any():
-            logger.error("High < Low detected")
-            return False
-        
-        # Check logical consistency: high >= close >= low
-        if (df['high'] < df['close']).any() or (df['close'] < df['low']).any():
-            logger.error("OHLC logical inconsistency detected")
-            return False
-        
-        # Check for zero volume (can be valid but unusual)
-        zero_volume = (df['volume'] == 0).sum()
-        if zero_volume > 0:
-            logger.warning(f"{zero_volume} candles with zero volume")
-        
-        logger.info("Data validation passed")
-        return True
-    
-    def get_market_info(self, symbol: str) -> Dict:
-        """
-        Get market information for a symbol.
-        
-        Args:
-            symbol: Trading pair
-            
-        Returns:
-            Dictionary with market info (limits, precision, etc.)
-        """
+
+            batch_count = len(batch_rows) + len(batch_errors)
+            records_fetched += batch_count
+            records_rejected += len(batch_errors)
+            errors.extend(batch_errors)
+            all_rows.extend(batch_rows)
+
+            if not batch_rows:
+                break
+
+            last_timestamp = batch_rows[-1]['timestamp']
+            next_since = int(last_timestamp.timestamp() * 1000) + TIMEFRAME_TO_MS[timeframe]
+            if next_since <= since:
+                break
+            since = next_since
+
+            if since > until_ms:
+                break
+
+        if all_rows:
+            self.last_collection_df = pd.DataFrame(all_rows)
+            records_inserted = len(self.last_collection_df)
+
+        completed_at = datetime.now(timezone.utc)
+        result = CollectionResult(
+            symbol=symbol,
+            timeframe=timeframe,
+            records_fetched=records_fetched,
+            records_inserted=records_inserted,
+            records_rejected=records_rejected,
+            errors=errors,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+
+        logger.info(
+            'Completed symbol collection',
+            symbol=symbol,
+            timeframe=timeframe,
+            records_fetched=records_fetched,
+            records_inserted=records_inserted,
+            records_rejected=records_rejected,
+            duration_seconds=(completed_at - started_at).total_seconds(),
+        )
+        return result
+
+    def get_market_info(self, symbol: str) -> Dict[str, Any]:
+        self._respect_rate_limit()
         try:
-            self._respect_rate_limit()
             market = self.client.market(symbol)
-            
             return {
                 'symbol': symbol,
                 'base': market.get('base'),
@@ -268,6 +259,6 @@ class BinanceCollector:
                 'max_amount': market.get('limits', {}).get('amount', {}).get('max'),
                 'min_cost': market.get('limits', {}).get('cost', {}).get('min'),
             }
-        except Exception as e:
-            logger.error(f"Error fetching market info for {symbol}: {str(e)}")
+        except Exception as exc:
+            logger.error('Error getting market info', symbol=symbol, error=str(exc))
             return {}

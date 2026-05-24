@@ -89,7 +89,9 @@ def persist_evaluation_run(db, results: Dict, backtest_id: str) -> Dict[str, int
         counts["trades"] = 0
 
     # --- portfolio (daily equity curve, keyed by backtest_id) ---
-    portfolio_symbol = f"ACCOUNT|{backtest_id}"
+    portfolio_symbol = f"ACCOUNT|{backtest_id[-12:]}"
+    if len(portfolio_symbol) > 20:
+        portfolio_symbol = portfolio_symbol[-20:]
     db.delete_portfolio_for_symbol(portfolio_symbol)
     portfolio_rows = []
     for ts, equity in results.get("daily_equity", []):
