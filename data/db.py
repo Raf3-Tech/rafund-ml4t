@@ -13,7 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import execute_values
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 from config.logging_config import get_logger
@@ -742,6 +742,34 @@ class DatabaseConnection:
             return df.to_dict(orient='records')
         except Exception as e:
             logger.error(f"Error querying production models: {str(e)}")
+            self.return_connection(conn)
+            return []
+
+    def get_all_model_registry_entries(self) -> list[Dict[str, Any]]:
+        try:
+            conn = self.get_connection()
+            query = "SELECT * FROM model_registry ORDER BY model_name, symbol, promoted_at DESC NULLS LAST"
+            df = pd.read_sql(query, conn)
+            self.return_connection(conn)
+            return df.to_dict(orient='records')
+        except Exception as e:
+            logger.error(f"Error querying model registry entries: {str(e)}")
+            self.return_connection(conn)
+            return []
+
+    def get_latest_drift_reports(self) -> list[Dict[str, Any]]:
+        try:
+            conn = self.get_connection()
+            query = (
+                "SELECT DISTINCT ON (model_name, symbol) model_name, symbol, severity, detected_at "
+                "FROM drift_reports "
+                "ORDER BY model_name, symbol, detected_at DESC"
+            )
+            df = pd.read_sql(query, conn)
+            self.return_connection(conn)
+            return df.to_dict(orient='records')
+        except Exception as e:
+            logger.error(f"Error querying latest drift reports: {str(e)}")
             self.return_connection(conn)
             return []
 

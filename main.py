@@ -16,10 +16,14 @@ import sys
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 import os
 import pandas as pd
 
 from config.logging_config import get_logger
+from data.db import DatabaseConnection
+from models.blocker import ModelBlocker
+from models.predict import benchmark_predict
 
 # Configure logging
 log_dir = Path('logs')
@@ -785,6 +789,94 @@ def run_live_trading():
     return False
 
 
+def _load_model_status_table(db: DatabaseConnection) -> tuple[list[dict], dict]:
+    rows = db.get_all_model_registry_entries()
+    drift_reports = db.get_latest_drift_reports()
+    drift_map = {(row['model_name'], row['symbol']): row for row in drift_reports}
+    results = []
+    summary = {'healthy': 0, 'warning': 0, 'blocked': 0, 'staging': 0}
+
+    blocker = ModelBlocker(db)
+    for entry in rows:
+        model_name = entry.get('model_name')
+        symbol = entry.get('symbol')
+        stage = entry.get('stage') or 'UNKNOWN'
+        version = entry.get('mlflow_version') or 0
+        trained_at = entry.get('trained_at')
+        oos_sharpe = entry.get('oos_sharpe')
+        if isinstance(trained_at, str):
+            try:
+                trained_at = datetime.fromisoformat(trained_at)
+            except ValueError:
+                trained_at = None
+
+        age_days = None
+        if trained_at:
+            age_days = int((datetime.utcnow() - trained_at).days)
+
+        drift_entry = drift_map.get((model_name, symbol), {})
+        drift_severity = drift_entry.get('severity')
+        block_status = blocker.is_blocked(model_name, symbol)
+
+        if stage != 'Production':
+            status = '— STAGING'
+            summary['staging'] += 1
+        elif block_status.blocked:
+            status = '✗ BLOCKED'
+            summary['blocked'] += 1
+        elif drift_severity == 'warning':
+            status = '⚠ WARNING'
+            summary['warning'] += 1
+        else:
+            status = '✓ HEALTHY'
+            summary['healthy'] += 1
+
+        results.append({
+            'model_name': model_name,
+            'symbol': symbol,
+            'version': version,
+            'stage': stage,
+            'age_days': age_days,
+            'drift': drift_severity or 'none',
+            'blocked': 'YES' if block_status.blocked else 'NO',
+            'last_sharpe': oos_sharpe if oos_sharpe is not None else 0.0,
+            'status': status,
+        })
+        logger.debug('model_status_row', **results[-1])
+
+    return results, summary
+
+
+def run_model_status() -> int:
+    db = get_db_connection()
+    models, summary = _load_model_status_table(db)
+
+    if not models:
+        print('No registered models found.')
+        db.close_pool()
+        return 1
+
+    header = (
+        f"{'MODEL NAME':35} | {'SYMBOL':10} | {'VERSION':7} | {'STAGE':10} | {'AGE (DAYS)':10} | {'DRIFT':8} | {'BLOCKED':7} | {'LAST SHARPE':11} | STATUS"
+    )
+    print(header)
+    print('-' * len(header))
+    for row in models:
+        print(
+            f"{row['model_name'][:35]:35} | {row['symbol'][:10]:10} | {row['version']:7} | {row['stage'][:10]:10} | "
+            f"{row['age_days'] if row['age_days'] is not None else '-':10} | {row['drift'][:8]:8} | {row['blocked']:7} | "
+            f"{row['last_sharpe']:11.2f} | {row['status']}"
+        )
+
+    print()
+    print(
+        f"{summary['healthy']} models healthy, {summary['warning']} warning, "
+        f"{summary['blocked']} blocked, {summary['staging']} staging"
+    )
+    db.close_pool()
+    return 1 if summary['warning'] or summary['blocked'] else 0
+
+
 def main():
     """Main ML4T entry point."""
     
@@ -808,10 +900,13 @@ Examples:
         'mode',
         nargs='?',
         default='collect',
-        choices=['collect', 'features', 'signals', 'backtest', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live'],
+        choices=['collect', 'features', 'signals', 'backtest', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live', 'benchmark', 'models'],
         help='Operation mode (default: collect)'
     )
-    parser.add_argument('--symbol', help='Single symbol to backfill, e.g. BTC/USDT')
+    parser.add_argument('submode', nargs='?', help='Subcommand for the selected mode')
+    parser.add_argument('--model', help='Model type for benchmark, e.g. factor_model')
+    parser.add_argument('--symbol', help='Symbol for benchmark, e.g. BTC/USDT')
+    parser.add_argument('--runs', type=int, default=100, help='Number of benchmark prediction runs')
     parser.add_argument('--all', action='store_true', help='Backfill all configured symbols')
     parser.add_argument('--from', dest='date_from', help='Start date (YYYY-MM-DD) for backfill')
     parser.add_argument('--to', dest='date_to', help='End date (YYYY-MM-DD) for backfill')
@@ -846,6 +941,18 @@ Examples:
                 date_to=date_to,
                 all_symbols=args.all,
             )
+        elif args.mode == 'benchmark':
+            if not args.model or not args.symbol:
+                logger.error('--model and --symbol are required for benchmark')
+                return 1
+            benchmark_predict(args.model, args.symbol, n_runs=args.runs)
+            success = True
+        elif args.mode == 'models':
+            if args.submode != 'status':
+                logger.error('Unknown models subcommand. Use: python main.py models status')
+                return 1
+            exit_code = run_model_status()
+            return exit_code
         elif args.mode == 'pipeline':
             success = run_full_pipeline()
         elif args.mode == 'bootstrap':

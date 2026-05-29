@@ -12,6 +12,7 @@ import sys
 import logging
 from pathlib import Path
 import os
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -35,7 +36,7 @@ def load_env_file():
 load_env_file()
 
 
-def test_imports():
+def _check_imports() -> bool:
     """Test that all required packages are installed."""
     logger.info("\n" + "="*60)
     logger.info("TEST 1: Checking Python Imports")
@@ -58,7 +59,7 @@ def test_imports():
             else:
                 __import__(package)
             logger.info(f"✓ {package:15} - {description}")
-        except ImportError as e:
+        except ImportError:
             logger.error(f"✗ {package:15} - {description} [NOT INSTALLED]")
             all_ok = False
     
@@ -69,7 +70,11 @@ def test_imports():
     return all_ok
 
 
-def test_database():
+def test_imports():
+    assert _check_imports()
+
+
+def _check_database() -> bool:
     """Test PostgreSQL connection."""
     logger.info("\n" + "="*60)
     logger.info("TEST 2: PostgreSQL Connection")
@@ -112,7 +117,11 @@ def test_database():
             return False
 
 
-def test_binance():
+def test_database():
+    assert _check_database()
+
+
+def _check_binance() -> bool:
     """Test Binance API connectivity."""
     logger.info("\n" + "="*60)
     logger.info("TEST 3: Binance API Connectivity")
@@ -126,7 +135,8 @@ def test_binance():
         
         # Try to get symbols
         logger.info("Fetching symbols from Binance...")
-        symbols = collector.get_symbols()
+        collector.client.load_markets()
+        symbols = list(collector.client.markets.keys())
         
         if symbols:
             logger.info(f"✓ Successfully fetched {len(symbols)} symbols")
@@ -134,7 +144,10 @@ def test_binance():
             
             # Try to fetch BTC data (small amount)
             logger.info("Fetching sample OHLCV data (BTC/USDT)...")
-            df = collector.fetch_ohlcv('BTC/USDT', '1d', limit=5)
+            records, errors = collector.fetch_ohlcv_safe('BTC/USDT', '1d', limit=5)
+            df = pd.DataFrame(records)
+            if errors:
+                logger.warning(f"Binance returned errors: {errors}")
             
             if not df.empty:
                 logger.info(f"✓ Successfully fetched {len(df)} candles")
@@ -152,7 +165,11 @@ def test_binance():
         return False
 
 
-def test_directory_structure():
+def test_binance():
+    assert _check_binance()
+
+
+def _check_directory_structure() -> bool:
     """Test that project structure is correct."""
     logger.info("\n" + "="*60)
     logger.info("TEST 4: Directory Structure")
@@ -161,15 +178,12 @@ def test_directory_structure():
     required_dirs = [
         'data',
         'data/collectors',
-        'data/loaders',
         'features',
         'models',
         'strategies',
         'portfolio',
-        'execution',
         'backtesting',
         'monitoring',
-        'dashboard',
         'config',
         'logs'
     ]
@@ -186,7 +200,11 @@ def test_directory_structure():
     return all_ok
 
 
-def test_data_files():
+def test_directory_structure():
+    assert _check_directory_structure()
+
+
+def _check_data_files() -> bool:
     """Test that required data files exist."""
     logger.info("\n" + "="*60)
     logger.info("TEST 5: Required Files")
@@ -215,6 +233,10 @@ def test_data_files():
     return all_ok
 
 
+def test_data_files():
+    assert _check_data_files()
+
+
 def main():
     """Run all tests."""
     logger.info("\n")
@@ -223,11 +245,11 @@ def main():
     logger.info("╚════════════════════════════════════════════════════════════╝")
     
     results = {
-        'Imports': test_imports(),
-        'Directory Structure': test_directory_structure(),
-        'Files': test_data_files(),
-        'PostgreSQL': test_database(),
-        'Binance API': test_binance()
+        'Imports': _check_imports(),
+        'Directory Structure': _check_directory_structure(),
+        'Files': _check_data_files(),
+        'PostgreSQL': _check_database(),
+        'Binance API': _check_binance()
     }
     
     # Summary

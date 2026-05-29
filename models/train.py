@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -78,14 +78,14 @@ class ModelTrainer:
 
         run_id = ""
         model_version = 0
-        trained_at = datetime.utcnow()
+        trained_at = datetime.now(timezone.utc)
 
         with log_training_run(run_name) as run:
             run_id = run.info.run_id
             mlflow.set_tag('phase', '3')
             mlflow.set_tag('strategy', model_type)
             mlflow.set_tag('symbol', symbol)
-            mlflow.log_params({
+            params = {
                 'model_type': model_type,
                 'symbol': symbol,
                 'timeframe': self.settings.timeframe,
@@ -93,7 +93,15 @@ class ModelTrainer:
                 'train_end_date': str(training_df.index.max().date()),
                 'feature_count': len(feature_names),
                 'training_rows': len(training_df),
-            })
+                'lookback_period': getattr(self.settings, 'lookback', None),
+                'entry_threshold': getattr(self.settings, 'entry_threshold', None),
+                'exit_threshold': getattr(self.settings, 'exit_threshold', None),
+                'leg_allocation_pct': getattr(self.settings, 'leg_allocation_pct', None),
+                'commission': getattr(self.settings, 'commission', None),
+                'stop_loss_spread_pct': getattr(self.settings, 'stop_loss_spread_pct', None),
+                'max_holding_days': getattr(self.settings, 'max_holding_days', None),
+            }
+            mlflow.log_params({k: v for k, v in params.items() if v is not None})
             mlflow.log_metrics({
                 'in_sample_sharpe': float(in_sample_sharpe),
                 'in_sample_max_drawdown': float(in_sample_drawdown),
@@ -111,7 +119,7 @@ class ModelTrainer:
             model_version = int(version.version)
             mlflow.set_tag('mlflow_model_version', str(model_version))
             mlflow.set_tag('stage', 'Staging')
-            trained_at = datetime.utcnow()
+            trained_at = datetime.now(timezone.utc)
 
         logger.info(
             'model_training_completed',

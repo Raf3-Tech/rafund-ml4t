@@ -48,3 +48,15 @@ data:
 monitoring:
   log_level: INFO
   log_file: ./logs/ml4t.log
+
+retraining:
+  schedule_cron: "0 2 * * 0"
+  drift_check_interval_minutes: 60
+  symbols:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - BNB/USDT
+  models:
+    - factor_model
+    - stat_arb

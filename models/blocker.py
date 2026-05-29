@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import structlog
@@ -32,8 +32,10 @@ class ModelBlocker:
         trained_at = active_model.get('trained_at')
         if isinstance(trained_at, str):
             trained_at = datetime.fromisoformat(trained_at)
+        if trained_at and trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=timezone.utc)
 
-        age_days = int((datetime.utcnow() - trained_at).days) if trained_at else None
+        age_days = int((datetime.now(timezone.utc) - trained_at).days) if trained_at else None
         if age_days is not None and age_days > self.max_model_age_days:
             return BlockStatus(
                 blocked=True,
@@ -43,7 +45,7 @@ class ModelBlocker:
                 safe_to_trade=False,
             )
 
-        since = datetime.utcnow() - timedelta(hours=2)
+        since = datetime.now(timezone.utc) - timedelta(hours=2)
         drift_report = self.db.get_recent_drift_report(model_name, symbol, since)
         last_drift_severity = drift_report.get('severity') if drift_report else None
         if last_drift_severity == 'critical':

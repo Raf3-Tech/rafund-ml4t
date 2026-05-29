@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -129,7 +129,7 @@ class RetrainingScheduler:
         logger.info('retraining_scheduler_started', jobs=[job.id for job in self.scheduler.get_jobs()])
 
     def _load_current_distribution(self, symbol: str, feature_names: list[str]) -> pd.DataFrame:
-        cutoff = datetime.utcnow() - timedelta(hours=24)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         columns = ', '.join(feature_names)
         query = (
             f"SELECT timestamp, {columns} FROM features "
@@ -146,4 +146,4 @@ class RetrainingScheduler:
         return df[feature_names].copy()
 
     def _health_check(self) -> None:
-        logger.info('scheduler_alive', timestamp=datetime.utcnow().isoformat())
+        logger.info('scheduler_alive', timestamp=datetime.now(timezone.utc).isoformat())

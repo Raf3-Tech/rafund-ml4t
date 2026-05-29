@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List
 
 import numpy as np
@@ -119,7 +119,7 @@ class FeatureDriftDetector:
 
         report = DriftReport(
             symbol=symbol,
-            detected_at=datetime.utcnow(),
+            detected_at=datetime.now(timezone.utc),
             features_checked=len(raw_scores),
             features_drifted=features_drifted,
             max_psi=max_psi,

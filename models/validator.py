@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import mlflow
@@ -76,7 +76,13 @@ class ModelValidator:
         self.db = db
         self.splitter = splitter
         self.engine_config = engine_config
-        self.client = MlflowClient()
+        self._client = None
+
+    @property
+    def client(self) -> MlflowClient:
+        if self._client is None:
+            self._client = MlflowClient()
+        return self._client
 
     def validate_for_promotion(
         self,
@@ -89,7 +95,7 @@ class ModelValidator:
         if validation_df.empty:
             reason = "No validation data available"
             logger.warning(reason, symbol=symbol)
-            return ValidationDecision(False, reason, 0.0, 0.0, None, False, candidate_meta.run_id, datetime.utcnow())
+            return ValidationDecision(False, reason, 0.0, 0.0, None, False, candidate_meta.run_id, datetime.now(timezone.utc))
 
         strategy = CandidateModelStrategy(model, candidate_meta.feature_names)
         runner = WalkForwardRunner(strategy, self.splitter, self.engine_config)
@@ -132,7 +138,7 @@ class ModelValidator:
                 symbol=symbol,
                 stage='Production',
                 trained_at=candidate_meta.trained_at,
-                promoted_at=datetime.utcnow(),
+                promoted_at=datetime.now(timezone.utc),
                 in_sample_sharpe=candidate_meta.in_sample_sharpe,
                 oos_sharpe=candidate_sharpe,
                 feature_names=candidate_meta.feature_names,
@@ -174,7 +180,7 @@ class ModelValidator:
             incumbent_sharpe=incumbent_sharpe,
             regression_detected=regression_detected,
             run_id=candidate_meta.run_id,
-            validated_at=datetime.utcnow(),
+            validated_at=datetime.now(timezone.utc),
         )
 
     def promote(self, candidate_meta: ModelMetadata, symbol: str, timeframe: str) -> ValidationDecision:
