@@ -96,6 +96,31 @@ class FeatureDriftDetector:
 
         return df[feature_names].copy()
 
+    def load_current_distribution(
+        self,
+        db: DatabaseConnection,
+        symbol: str,
+        feature_names: list[str],
+        lookback_hours: int = 24,
+    ) -> pd.DataFrame:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+        columns = ", ".join(feature_names)
+        query = (
+            f"SELECT timestamp, {columns} FROM features "
+            "WHERE (symbol_a = %s OR symbol_b = %s) "
+            "AND timestamp >= %s ORDER BY timestamp"
+        )
+        conn = db.get_connection()
+        try:
+            df = pd.read_sql(query, conn, params=[symbol, symbol, cutoff])
+        finally:
+            db.return_connection(conn)
+
+        if df.empty:
+            return pd.DataFrame(columns=feature_names)
+
+        return df[feature_names].copy()
+
     def detect(self, symbol: str, reference_df: pd.DataFrame, current_df: pd.DataFrame) -> DriftReport:
         raw_scores: Dict[str, float] = {}
         for feature in reference_df.columns:

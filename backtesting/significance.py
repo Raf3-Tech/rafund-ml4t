@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -25,6 +25,7 @@ def test_strategy_significance(
     fold_returns: List[pd.Series],
     n_permutations: int = 1000,
     alpha: float = 0.05,
+    seed: Optional[int] = None,
 ) -> SignificanceResult:
     if not fold_returns:
         raise ValueError("fold_returns must contain at least one return series")
@@ -38,19 +39,29 @@ def test_strategy_significance(
     t_stat, p_value = ttest_1samp(all_returns, 0.0, nan_policy="omit")
 
     actual_sharpe = mean_oos_return / std_oos_return * np.sqrt(252) if std_oos_return > 0 else 0.0
-    permuted_sharpes = []
-    for _ in range(n_permutations):
-        permuted = all_returns.sample(frac=1.0, replace=False).reset_index(drop=True)
-        perm_mean = permuted.mean()
-        perm_std = permuted.std(ddof=1)
-        permuted_sharpes.append(float(perm_mean / perm_std * np.sqrt(252)) if perm_std > 0 else 0.0)
 
-    permuted_sharpes = np.array(permuted_sharpes)
-    permutation_p_value = float(
-        (np.sum(np.abs(permuted_sharpes) >= abs(actual_sharpe)) + 1) / (n_permutations + 1)
-    )
+    # Sign-flip permutation test for a positive edge. Reordering the returns
+    # leaves the mean and std unchanged, so the previous order-shuffle was a
+    # no-op (every permuted Sharpe equalled the actual one). Under the null of
+    # returns symmetric about zero, randomly flipping each return's sign gives a
+    # proper reference distribution for the realised Sharpe.
+    returns_arr = all_returns.to_numpy(dtype=float)
+    n = returns_arr.size
+    rng = np.random.default_rng(seed)
+    if n < 2 or std_oos_return == 0.0:
+        permutation_p_value = 1.0
+    else:
+        signs = rng.choice((-1.0, 1.0), size=(n_permutations, n))
+        permuted = returns_arr * signs
+        perm_mean = permuted.mean(axis=1)
+        perm_std = permuted.std(axis=1, ddof=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            permuted_sharpes = np.where(perm_std > 0, perm_mean / perm_std * np.sqrt(252), 0.0)
+        permutation_p_value = float(
+            (np.sum(permuted_sharpes >= actual_sharpe) + 1) / (n_permutations + 1)
+        )
 
-    significant = (p_value < alpha) and (permutation_p_value < alpha)
+    significant = bool((p_value < alpha) and (permutation_p_value < alpha) and (mean_oos_return > 0))
 
     if significant:
         interpretation = f"Strategy returns are statistically significant (p={p_value:.3f}). Proceed to Phase 4."

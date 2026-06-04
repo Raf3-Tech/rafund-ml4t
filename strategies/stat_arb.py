@@ -236,7 +236,75 @@ class StatArbStrategy:
                 entry_z = None
                 entry_spread = None
                 position_type = None
-            
+
             prev_signal = current_signal
-        
+
         return pd.DataFrame(trades)
+
+
+class WalkForwardStatArb:
+    """Walk-forward-compatible adapter for the stat-arb pair strategy.
+
+    Implements the contract expected by
+    :class:`~backtesting.walk_forward.WalkForwardRunner`:
+
+      - ``prepare(train_df)``: fit the hedge ratio and the fixed spread baseline
+        (mean/std) on the in-sample training fold.
+      - ``generate_signals(test_df)``: z-score the out-of-sample spread against
+        the *frozen* baseline and emit per-bar target positions.
+
+    Input frames must contain ``timestamp``, ``price_a`` and ``price_b`` columns
+    (the aligned pair format used by :class:`backtesting.engine.BacktestEngine`).
+    Output is a DataFrame of ``timestamp``/``position_a``/``position_b`` holding
+    the carried target position on every bar (not just at crossings), so the
+    engine keeps the position open between entry and exit thresholds.
+    """
+
+    def __init__(self, entry_threshold: float = 2.0, exit_threshold: float = 0.5):
+        self.entry_threshold = entry_threshold
+        self.exit_threshold = exit_threshold
+        self.hedge_ratio: float = 1.0
+        self.baseline_mean: float = 0.0
+        self.baseline_std: float = 1.0
+
+    @staticmethod
+    def _spread(price_a: pd.Series, price_b: pd.Series, hedge_ratio: float) -> pd.Series:
+        return np.log(price_a) - hedge_ratio * np.log(price_b)
+
+    def prepare(self, train_df: pd.DataFrame) -> None:
+        log_a = np.log(train_df["price_a"].astype(float))
+        log_b = np.log(train_df["price_b"].astype(float))
+        # OLS hedge ratio of log(A) on log(B); fall back to 1.0 if degenerate.
+        if log_b.std() > 0:
+            self.hedge_ratio = float(np.polyfit(log_b, log_a, 1)[0])
+        else:
+            self.hedge_ratio = 1.0
+        spread = log_a - self.hedge_ratio * log_b
+        self.baseline_mean = float(spread.mean())
+        std = float(spread.std())
+        self.baseline_std = std if std > 0 else 1.0
+
+    def generate_signals(self, test_df: pd.DataFrame) -> pd.DataFrame:
+        spread = self._spread(
+            test_df["price_a"].astype(float),
+            test_df["price_b"].astype(float),
+            self.hedge_ratio,
+        )
+        z = (spread - self.baseline_mean) / self.baseline_std
+
+        positions = []
+        target = 0  # carried target spread position: +1 long spread, -1 short spread
+        for z_val in z:
+            if target == 0:
+                if z_val > self.entry_threshold:
+                    target = -1   # spread rich -> short A / long B
+                elif z_val < -self.entry_threshold:
+                    target = 1    # spread cheap -> long A / short B
+            elif abs(z_val) < self.exit_threshold:
+                target = 0
+            positions.append(target)
+
+        out = pd.DataFrame({"timestamp": test_df["timestamp"].reset_index(drop=True)})
+        out["position_a"] = positions
+        out["position_b"] = [-p for p in positions]
+        return out

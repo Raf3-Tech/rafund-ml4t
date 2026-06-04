@@ -80,10 +80,12 @@ class MetricsCalculator:
         excess_returns = returns - risk_free_rate / 252
         downside = returns[returns < 0]
         downside_std = downside.std()
-        
-        if downside_std == 0:
+
+        # No (or single) downside observation -> std is NaN; treat as zero
+        # downside risk rather than propagating NaN.
+        if pd.isna(downside_std) or downside_std == 0:
             return 0
-        
+
         return excess_returns.mean() / downside_std * np.sqrt(252)
     
     @staticmethod

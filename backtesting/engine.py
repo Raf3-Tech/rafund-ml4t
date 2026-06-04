@@ -375,8 +375,15 @@ class BacktestEngine:
                             None,
                             target_notional,
                         )
-                else:
+                elif np.sign(target_position) != np.sign(self.position_a):
                     self._close_position(getattr(row, "price", None), None)
+                    if not self.prop_firm_state.daily_halt:
+                        self._open_position(
+                            "LONG" if target_position > 0 else "SHORT",
+                            getattr(row, "price", None),
+                            None,
+                            target_notional,
+                        )
             else:
                 if self.position_a != 0.0 or self.position_b != 0.0:
                     self._close_position(getattr(row, "price_a", None), getattr(row, "price_b", None))
@@ -419,7 +426,7 @@ class BacktestEngine:
             "total_return": total_return,
             "total_return_pct": total_return * 100,
             "sharpe_ratio": sharpe,
-            "max_drawdown_pct": worst_drawdown * 100,
+            "max_drawdown_pct": abs(worst_drawdown) * 100,
             "num_trades": len(self.trades),
             "win_rate": self._compute_win_rate(),
             "equity_curve": self.equity_curve,

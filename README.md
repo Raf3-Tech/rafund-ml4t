@@ -57,8 +57,7 @@ ml4t/
 │   ├── db.py               # PostgreSQL database connection
 │   ├── schema.sql          # Database schema
 │   ├── collectors/         # Exchange data collectors
-│   │   ├── binance_collector.py
-│   │   └── collect_market_data.py
+│   │   └── binance_collector.py
 │   ├── clear_database.py   # Database maintenance
 │   └── verify_data.py      # Data validation
 │
@@ -228,7 +227,7 @@ DB_PASSWORD=your_secure_password
 ### Step 6: Verify Setup
 
 ```bash
-python test_setup.py
+pytest tests/test_setup.py
 ```
 
 You should see:
@@ -302,7 +301,7 @@ Use analysis tools to validate strategy performance before considering real trad
 
 ### Database Configuration
 
-Edit `SETUP_CONFIG.md` for detailed database setup options.
+Configure the database via `.env` / `DATABASE_URL` (see Installation above), or construct a connection directly:
 
 ```python
 from data.db import DatabaseConnection
@@ -444,7 +443,7 @@ pytest
 pytest --cov=.
 
 # Run specific test file
-pytest tests/test_backtest.py -v
+pytest tests/test_window_approaches.py -v
 ```
 
 ### Code Style
@@ -465,10 +464,9 @@ flake8 .
 
 ### Documentation
 
-- See `QUICKSTART.md` for quick setup guide
-- See `SETUP_CONFIG.md` for detailed configuration
-- See `BUGFIXES_SUMMARY.md` for recent fixes
-- See `CODE_CHANGES.md` for code modifications
+- See `CHANGELOG.md` for recent fixes and version history
+- See `docs/ANALYSIS_ROLLING_WINDOW_PROBLEM.md` for the rolling-window bug analysis
+- See `backtesting/AUDIT.md` for the backtesting engine audit
 
 ---
 
@@ -588,6 +586,13 @@ For the latest updates and documentation, visit the project repository.
 - Backtesting engine with accurate metrics
 - Statistical arbitrage strategy
 - Performance analytics
+- Walk-forward OOS validation + significance testing (`python main.py validate`)
+- Model retraining/validation cycle (`python main.py retrain`) and feature-drift checks (`python main.py drift`)
+
+📚 **Library-only utilities** (importable helpers, not wired to a CLI command):
+- `portfolio/optimizer.py` (`PortfolioOptimizer`) — position sizing / capital allocation
+- `portfolio/risk.py` (`RiskManager`) — VaR, CVaR, max drawdown, position limits
+- `monitoring/metrics.py` (`MetricsCalculator`) — returns, Sharpe/Sortino/Calmar, win rate
 
 ⏳ **Planned Future Components:**
 - Live trading execution

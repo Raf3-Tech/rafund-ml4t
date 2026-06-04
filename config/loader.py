@@ -118,3 +118,12 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def load_config() -> Dict[str, Any]:
+    """Return the raw parsed ``settings.yaml`` dict (no .env overrides applied).
+
+    Used by components that consume nested config sections directly, such as the
+    retraining scheduler's ``retraining`` block.
+    """
+    return _load_yaml()

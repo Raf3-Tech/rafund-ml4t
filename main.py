@@ -380,6 +380,169 @@ def run_backtest():
         return False
 
 
+def _aligned_pair_frame(db, symbol_a: str, symbol_b: str) -> Optional[pd.DataFrame]:
+    """Load and align two symbols into a [timestamp, price_a, price_b] frame.
+
+    This is the input format expected by the generic ``BacktestEngine`` and the
+    walk-forward validation framework (distinct from the concatenated frame the
+    evaluation engine consumes).
+    """
+    pa = db.get_prices(symbol_a, None, None)
+    pb = db.get_prices(symbol_b, None, None)
+    if pa.empty or pb.empty:
+        return None
+    left = pa[['timestamp', 'close']].rename(columns={'close': 'price_a'})
+    right = pb[['timestamp', 'close']].rename(columns={'close': 'price_b'})
+    merged = pd.merge(left, right, on='timestamp', how='inner').sort_values('timestamp')
+    return merged.reset_index(drop=True) if not merged.empty else None
+
+
+def run_validation_cmd():
+    """Walk-forward out-of-sample validation of the stat-arb pair strategy."""
+    logger.info("=" * 80)
+    logger.info("STARTING WALK-FORWARD VALIDATION")
+    logger.info("=" * 80)
+
+    try:
+        from backtesting.validation import run_validation
+        from strategies.stat_arb import WalkForwardStatArb
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        pairs = db.get_feature_pairs()
+        if not pairs:
+            pair_a = os.getenv('EVAL_PAIR_A', 'BTC/USDT')
+            pair_b = os.getenv('EVAL_PAIR_B', 'ETH/USDT')
+            logger.warning("No feature pairs found; falling back to %s / %s", pair_a, pair_b)
+            pairs = [(pair_a, pair_b)]
+
+        any_results = False
+        for idx, (pair_a, pair_b) in enumerate(pairs, start=1):
+            prices = _aligned_pair_frame(db, pair_a, pair_b)
+            if prices is None:
+                logger.warning("Skipping %s/%s: insufficient aligned price data", pair_a, pair_b)
+                continue
+
+            logger.info("[%d/%d] Validating %s / %s (%d aligned bars)",
+                        idx, len(pairs), pair_a, pair_b, len(prices))
+            strategy = WalkForwardStatArb(entry_threshold=2.0, exit_threshold=0.5)
+            result = run_validation(
+                prices,
+                strategy,
+                strategy_name=f"statarb_{pair_a.replace('/', '')}_{pair_b.replace('/', '')}",
+            )
+
+            wf = result.walk_forward
+            agg = wf.aggregate
+            sig = result.significance
+            logger.info("=" * 80)
+            logger.info("VALIDATION RESULT: %s / %s", pair_a, pair_b)
+            logger.info("  Folds:               %d", len(wf.folds))
+            logger.info("  Mean OOS Sharpe:     %.2f", agg.mean_oos_sharpe)
+            logger.info("  Worst OOS Drawdown:  %.2f%%", agg.worst_oos_drawdown)
+            logger.info("  Folds Profitable:    %.0f%%", agg.pct_folds_profitable)
+            logger.info("  Total OOS Trades:    %d", agg.total_oos_trades)
+            logger.info("  Walk-forward gate:   %s — %s",
+                        "PASS" if wf.passed_gate else "FAIL", wf.gate_reason)
+            if sig is not None:
+                logger.info("  Significance:        p=%.4f (%s)",
+                            sig.p_value, "significant" if sig.significant else "not significant")
+            logger.info("=" * 80)
+            any_results = True
+
+        db.close_pool()
+        if not any_results:
+            logger.error("No pairs could be validated (no aligned price data)")
+            return False
+        return True
+
+    except Exception as e:
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        return False
+
+
+def run_retrain_cmd():
+    """Run a single model retraining + walk-forward validation cycle."""
+    logger.info("=" * 80)
+    logger.info("STARTING RETRAINING CYCLE")
+    logger.info("=" * 80)
+
+    try:
+        from models.retraining_scheduler import run_retraining_cycle
+        from config.loader import load_config
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        config = load_config()
+        results = run_retraining_cycle(db, config)
+        logger.info("Retraining cycle finished: %d candidate(s) processed", len(results))
+        for r in results:
+            logger.info("  %s", r)
+        db.close_pool()
+        return True
+
+    except Exception as e:
+        logger.error(f"Retraining error: {str(e)}", exc_info=True)
+        return False
+
+
+def run_drift_cmd(symbol: Optional[str], model_name: Optional[str]):
+    """Run a feature-drift check for production model(s)."""
+    logger.info("=" * 80)
+    logger.info("STARTING DRIFT CHECK")
+    logger.info("=" * 80)
+
+    try:
+        from models.retraining_scheduler import run_drift_check
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        targets = []
+        if model_name and symbol:
+            targets = [{'model_name': model_name, 'symbol': symbol}]
+        else:
+            targets = db.get_all_model_registry_entries()
+            targets = [t for t in targets if (t.get('stage') == 'Production')]
+            if symbol:
+                targets = [t for t in targets if t.get('symbol') == symbol]
+
+        if not targets:
+            logger.warning("No production models found to check for drift")
+            db.close_pool()
+            return False
+
+        checked = 0
+        for entry in targets:
+            report = run_drift_check(db, entry, entry.get('symbol'))
+            if report is None:
+                logger.warning("  %s/%s: insufficient data for drift check",
+                               entry.get('model_name'), entry.get('symbol'))
+                continue
+            logger.info("  %s/%s: severity=%s action=%s",
+                        entry.get('model_name'), entry.get('symbol'),
+                        report.severity, report.recommended_action)
+            checked += 1
+
+        db.close_pool()
+        return checked > 0
+
+    except Exception as e:
+        logger.error(f"Drift check error: {str(e)}", exc_info=True)
+        return False
+
+
 def calculate_features():
     """Calculate and save features for all symbols and pairs."""
     logger.info("=" * 80)
@@ -889,6 +1052,9 @@ Examples:
   python main.py features             # Calculate features
   python main.py signals              # Generate signals
   python main.py backtest             # Run backtest
+  python main.py validate             # Walk-forward OOS validation + significance
+  python main.py retrain              # Retrain + validate models (one cycle)
+  python main.py drift                # Feature-drift check for production models
   python main.py pipeline             # Collect data, backtest to date, persist all tables
   python main.py bootstrap            # Same as pipeline (full infrastructure setup)
   python main.py paper                # Run paper trading
@@ -900,7 +1066,7 @@ Examples:
         'mode',
         nargs='?',
         default='collect',
-        choices=['collect', 'features', 'signals', 'backtest', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live', 'benchmark', 'models'],
+        choices=['collect', 'features', 'signals', 'backtest', 'validate', 'retrain', 'drift', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live', 'benchmark', 'models'],
         help='Operation mode (default: collect)'
     )
     parser.add_argument('submode', nargs='?', help='Subcommand for the selected mode')
@@ -928,6 +1094,12 @@ Examples:
             success = generate_signals()
         elif args.mode == 'backtest':
             success = run_backtest()
+        elif args.mode == 'validate':
+            success = run_validation_cmd()
+        elif args.mode == 'retrain':
+            success = run_retrain_cmd()
+        elif args.mode == 'drift':
+            success = run_drift_cmd(args.symbol, args.model)
         elif args.mode == 'backfill':
             if not args.date_from:
                 logger.error('--from is required for backfill')
