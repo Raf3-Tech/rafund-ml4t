@@ -3,7 +3,11 @@ on:
   push:
     branches: [main]
 jobs:
-  hello:
+  hello-ubuntu:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo "hello from ubuntu-22.04"
+  hello-latest:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "hello from runner"
+      - run: echo "hello from ubuntu-latest"
