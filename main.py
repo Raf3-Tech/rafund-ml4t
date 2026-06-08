@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 import os
 import pandas as pd
+from dotenv import load_dotenv
 
 from config.logging_config import get_logger
 from data.db import DatabaseConnection
@@ -40,17 +41,11 @@ logging.basicConfig(
 
 logger = get_logger(__name__)
 
-# Load .env file manually
-def load_env_file():
-    """Load .env file manually without dotenv library."""
-    env_path = Path('.env')
-    if env_path.exists():
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    key, value = line.split('=', 1)
-                    os.environ[key.strip()] = value.strip()
+# Load .env via python-dotenv (handles quotes/comments/export; real env wins).
+# Anchored to this file's directory so it works regardless of the CWD.
+def load_env_file() -> None:
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+
 
 load_env_file()
 
@@ -63,7 +58,7 @@ def get_db_connection():
         port=int(os.getenv('DB_PORT', 5432)),
         database=os.getenv('DB_NAME', 'rafund'),
         user=os.getenv('DB_USER', 'postgres'),
-        password=os.getenv('DB_PASSWORD', 'postgres'),
+        password=os.getenv('DB_PASSWORD'),
     )
 
 
@@ -406,7 +401,9 @@ def run_validation_cmd():
     try:
         from backtesting.validation import run_validation
         from strategies.stat_arb import WalkForwardStatArb
+        from config.loader import get_settings
 
+        cfg = get_settings()
         db = get_db_connection()
         if not db.test_connection():
             logger.error("Database connection failed")
@@ -429,7 +426,13 @@ def run_validation_cmd():
 
             logger.info("[%d/%d] Validating %s / %s (%d aligned bars)",
                         idx, len(pairs), pair_a, pair_b, len(prices))
-            strategy = WalkForwardStatArb(entry_threshold=2.0, exit_threshold=0.5)
+            strategy = WalkForwardStatArb(
+                entry_threshold=2.0,
+                exit_threshold=0.5,
+                entropy_threshold=cfg.entropy_threshold if cfg.entropy_enabled else None,
+                entropy_window=cfg.entropy_window,
+                entropy_embedding=cfg.entropy_embedding,
+            )
             result = run_validation(
                 prices,
                 strategy,
@@ -559,7 +562,7 @@ def calculate_features():
             port=int(os.getenv('DB_PORT', 5432)),
             database=os.getenv('DB_NAME', 'rafund'),
             user=os.getenv('DB_USER', 'postgres'),
-            password=os.getenv('DB_PASSWORD', 'postgres')
+            password=os.getenv('DB_PASSWORD')
         )
         
         symbols = db.get_symbols_with_data()
@@ -662,77 +665,76 @@ def calculate_features():
 
 
 def generate_signals():
-    """Generate and save trading signals."""
+    """Generate and save trading signals via the strategy class (single signal code path).
+
+    Phase 1 fix: all threshold logic lives in StatArbPairsStrategy.signals_to_db_format().
+    This function is a thin orchestration wrapper — no thresholds hardcoded here.
+    """
     logger.info("=" * 80)
     logger.info("GENERATING SIGNALS")
     logger.info("=" * 80)
-    
+
     try:
-        from data.db import DatabaseConnection
-        from strategies.factor_model import FactorStrategy
-        from datetime import datetime
-        
-        db = DatabaseConnection(
-            host=os.getenv('DB_HOST', 'localhost'),
-            port=int(os.getenv('DB_PORT', 5432)),
-            database=os.getenv('DB_NAME', 'rafund'),
-            user=os.getenv('DB_USER', 'postgres'),
-            password=os.getenv('DB_PASSWORD', 'postgres')
-        )
-        
-        # Get all features from database
-        conn = db.get_connection()
-        features_df = pd.read_sql("SELECT * FROM features ORDER BY timestamp", conn)
-        db.return_connection(conn)
-        
-        if features_df.empty:
-            logger.warning("No features found in database. Run feature calculation first.")
+        from strategies.stat_arb import StatArbPairsStrategy
+        from config.loader import get_settings
+
+        cfg = get_settings()
+        db = get_db_connection()
+
+        if not db.test_connection():
+            logger.error("Database connection failed")
             db.close_pool()
             return False
-        
-        logger.info(f"Loaded {len(features_df)} feature records")
-        logger.info(f"Symbols in features: {features_df[['symbol_a', 'symbol_b']].drop_duplicates().shape[0]} pairs")
-        
-        # Generate signals from features
+
+        symbols = db.get_symbols_with_data()
+        if not symbols:
+            logger.warning("No price data found. Run: python main.py collect first.")
+            db.close_pool()
+            return False
+
+        logger.info(f"Generating signals for {len(symbols)} symbols")
+
+        strategy = StatArbPairsStrategy()
+        params = {
+            "entry_z": cfg.entry_threshold,
+            "exit_z": cfg.exit_threshold,
+            "lookback": cfg.lookback,
+        }
+
+        pairs = db.get_feature_pairs()
+        if not pairs:
+            logger.warning("No valid feature pairs found. Run features first.")
+            db.close_pool()
+            return False
+
+        logger.info(f"Processing {len(pairs)} pair(s) with entry_z={params['entry_z']}, exit_z={params['exit_z']}")
         signals_list = []
-        
-        for pair in features_df.groupby(['symbol_a', 'symbol_b']):
-            pair_data = pair[1].copy()
-            pair_data = pair_data.sort_values('timestamp')
-            
-            # Create signals based on z-score
-            pair_data['signal'] = 'HOLD'
-            pair_data.loc[pair_data['z_score'] > 1.5, 'signal'] = 'BUY'   # Long signal
-            pair_data.loc[pair_data['z_score'] < -1.5, 'signal'] = 'SELL'  # Short signal
-            pair_data.loc[
-                (pair_data['z_score'] <= 1.5) & (pair_data['z_score'] >= -1.5),
-                'signal'
-            ] = 'HOLD'
-            
-            # Position sizes
-            pair_data['position_a'] = pair_data['signal'].apply(
-                lambda x: 1 if x == 'BUY' else (-1 if x == 'SELL' else 0)
-            )
-            pair_data['position_b'] = pair_data['signal'].apply(
-                lambda x: -1 if x == 'BUY' else (1 if x == 'SELL' else 0)
-            ) * pair_data['hedge_ratio']
-            
-            signals_list.append(pair_data[['symbol_a', 'symbol_b', 'timestamp', 'signal', 
-                                           'z_score', 'position_a', 'position_b']])
-        
-        if signals_list:
-            all_signals = pd.concat(signals_list, ignore_index=True)
-            
-            # Log signal distribution
-            signal_counts = all_signals['signal'].value_counts()
-            logger.info(f"Signal distribution: {dict(signal_counts)}")
-            
-            inserted = db.insert_signals(all_signals)
-            logger.info(f"Generated and saved {inserted} signals")
-        
+
+        for sym_a, sym_b in pairs:
+            pa = db.get_prices(sym_a, None, None)
+            pb = db.get_prices(sym_b, None, None)
+            if pa.empty or pb.empty:
+                logger.warning(f"[SKIP] {sym_a}/{sym_b}: missing price data")
+                continue
+            db_signals = strategy.signals_to_db_format(pa, pb, params, sym_a, sym_b)
+            if not db_signals.empty:
+                signals_list.append(db_signals)
+
+        if not signals_list:
+            logger.warning("No signals generated — check feature pairs and price data.")
+            db.close_pool()
+            return False
+
+        all_signals = pd.concat(signals_list, ignore_index=True)
+        signal_counts = all_signals["signal"].value_counts()
+        logger.info(f"Signal distribution: {dict(signal_counts)}")
+
+        inserted = db.insert_signals(all_signals)
+        logger.info(f"Generated and saved {inserted} signals")
+
         db.close_pool()
         return True
-        
+
     except Exception as e:
         logger.error(f"Signal generation error: {str(e)}", exc_info=True)
         return False
@@ -1040,18 +1042,166 @@ def run_model_status() -> int:
     return 1 if summary['warning'] or summary['blocked'] else 0
 
 
+def run_engine_cmd(strategy_filter: Optional[str] = None, symbol_filter: Optional[str] = None) -> bool:
+    """Run the walk-forward window engine across all strategies and symbols."""
+    logger.info("=" * 80)
+    logger.info("STARTING WALK-FORWARD ENGINE")
+    logger.info("=" * 80)
+    if strategy_filter:
+        logger.info("Strategy filter: %s", strategy_filter)
+    if symbol_filter:
+        logger.info("Symbol filter: %s", symbol_filter)
+
+    try:
+        from backtesting.window_engine import WalkForwardWindowEngine
+        from strategies.ema_crossover import EMACrossover
+        from strategies.macd import MACDStrategy
+        from strategies.supertrend import SupertrendStrategy
+        from strategies.donchian_breakout import DonchianBreakout
+        from strategies.bollinger_reversion import BollingerReversion
+        from strategies.rsi_extremes import RSIExtremes
+        from strategies.atr_volatility_breakout import ATRVolatilityBreakout
+        from strategies.keltner_squeeze import KeltnerSqueeze
+        from strategies.dca import DCAStrategy
+        from strategies.hodl_rebalance import HODLRebalance
+        from strategies.funding_rate_arb import FundingRateArb
+        from strategies.stat_arb import StatArbPairsStrategy
+        from config.loader import get_settings
+
+        cfg = get_settings()
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        symbols = db.get_symbols_with_data()
+        if not symbols:
+            logger.error("No price data found. Run: python main.py collect first.")
+            db.close_pool()
+            return False
+
+        strategies = [
+            EMACrossover(),
+            MACDStrategy(),
+            SupertrendStrategy(),
+            DonchianBreakout(),
+            BollingerReversion(),
+            RSIExtremes(),
+            ATRVolatilityBreakout(),
+            KeltnerSqueeze(),
+            DCAStrategy(),
+            HODLRebalance(),
+            StatArbPairsStrategy(),   # pairs — engine routes via generate_signals_pair
+            FundingRateArb(),         # funding — engine routes via 8h funding_rates data
+        ]
+
+        engine = WalkForwardWindowEngine(
+            db=db,
+            strategies=strategies,
+            symbols=symbols,
+            commission=cfg.commission,
+        )
+
+        results = engine.run(strategy_filter=strategy_filter, symbol_filter=symbol_filter)
+        logger.info("Engine run complete — %d results generated", len(results))
+        db.close_pool()
+        return len(results) > 0
+
+    except Exception as e:
+        logger.error("Engine error: %s", str(e), exc_info=True)
+        return False
+
+
+def run_leaderboard_cmd_wrapper(tier: Optional[str] = None) -> bool:
+    """Print the current leaderboard from engine_results."""
+    try:
+        from monitoring.leaderboard import run_leaderboard_cmd
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        result = run_leaderboard_cmd(db, tier=tier)
+        db.close_pool()
+        return result
+
+    except Exception as e:
+        logger.error("Leaderboard error: %s", str(e), exc_info=True)
+        return False
+
+
+def run_train_classifier_cmd() -> bool:
+    """Train the regime ML classifier on current engine_results data."""
+    logger.info("=" * 80)
+    logger.info("TRAINING REGIME CLASSIFIER")
+    logger.info("=" * 80)
+    try:
+        from models.regime_classifier import train_classifier
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        success = train_classifier(db)
+        db.close_pool()
+        return success
+
+    except Exception as e:
+        logger.error("Classifier training error: %s", str(e), exc_info=True)
+        return False
+
+
+def run_collect_funding_cmd() -> bool:
+    """Collect 8-hour funding rate data from Binance perpetual futures."""
+    logger.info("=" * 80)
+    logger.info("COLLECTING FUNDING RATES")
+    logger.info("=" * 80)
+    try:
+        from data.collectors.binance_funding_collector import BinanceFundingCollector
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        collector = BinanceFundingCollector(
+            rate_limit_ms=int(os.getenv('RATE_LIMIT_MS', 200))
+        )
+        inserted = collector.collect_all(db)
+        logger.info("Funding rate collection complete — %d rows inserted", inserted)
+        db.close_pool()
+        return True
+
+    except Exception as e:
+        logger.error("Funding rate collection error: %s", str(e), exc_info=True)
+        return False
+
+
 def main():
     """Main ML4T entry point."""
-    
+
     parser = argparse.ArgumentParser(
         description='ML4T - Machine Learning for Trading System',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python main.py collect              # Collect market data
+  python main.py collect --funding    # Also collect 8h funding rates
   python main.py features             # Calculate features
-  python main.py signals              # Generate signals
+  python main.py signals              # Generate signals (single code path via strategy class)
   python main.py backtest             # Run backtest
+  python main.py engine               # Walk-forward engine: all strategies x all symbols
+  python main.py engine --strategy ema_crossover  # One strategy only
+  python main.py engine --symbol BTC/USDT         # One symbol only
+  python main.py leaderboard          # Print strategy leaderboard from engine_results
+  python main.py leaderboard --tier conservative   # Conservative tier only
+  python main.py train-classifier     # Train regime ML classifier (need 200+ engine_results rows)
   python main.py validate             # Walk-forward OOS validation + significance
   python main.py retrain              # Retrain + validate models (one cycle)
   python main.py drift                # Feature-drift check for production models
@@ -1061,17 +1211,24 @@ Examples:
   python main.py live                 # Run live trading (DANGER!)
         """
     )
-    
+
     parser.add_argument(
         'mode',
         nargs='?',
         default='collect',
-        choices=['collect', 'features', 'signals', 'backtest', 'validate', 'retrain', 'drift', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live', 'benchmark', 'models'],
+        choices=[
+            'collect', 'features', 'signals', 'backtest', 'validate', 'retrain',
+            'drift', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live',
+            'benchmark', 'models', 'engine', 'leaderboard', 'train-classifier',
+        ],
         help='Operation mode (default: collect)'
     )
     parser.add_argument('submode', nargs='?', help='Subcommand for the selected mode')
     parser.add_argument('--model', help='Model type for benchmark, e.g. factor_model')
-    parser.add_argument('--symbol', help='Symbol for benchmark, e.g. BTC/USDT')
+    parser.add_argument('--symbol', help='Symbol filter, e.g. BTC/USDT')
+    parser.add_argument('--strategy', help='Strategy filter for engine mode, e.g. ema_crossover')
+    parser.add_argument('--tier', help='Leaderboard tier filter: conservative, standard, permissive')
+    parser.add_argument('--funding', action='store_true', help='Collect funding rates (for collect mode)')
     parser.add_argument('--runs', type=int, default=100, help='Number of benchmark prediction runs')
     parser.add_argument('--all', action='store_true', help='Backfill all configured symbols')
     parser.add_argument('--from', dest='date_from', help='Start date (YYYY-MM-DD) for backfill')
@@ -1079,21 +1236,32 @@ Examples:
     parser.add_argument('--timeframe', help='Candle timeframe for backfill (default from config)')
 
     args = parser.parse_args()
-    
+
     logger.info("=" * 80)
     logger.info(f"ML4T System Started - {datetime.now().isoformat()}")
     logger.info(f"Mode: {args.mode.upper()}")
     logger.info("=" * 80)
-    
+
     try:
         if args.mode == 'collect':
             success = collect_data()
+            if success and args.funding:
+                success = run_collect_funding_cmd()
         elif args.mode == 'features':
             success = calculate_features()
         elif args.mode == 'signals':
             success = generate_signals()
         elif args.mode == 'backtest':
             success = run_backtest()
+        elif args.mode == 'engine':
+            success = run_engine_cmd(
+                strategy_filter=args.strategy,
+                symbol_filter=args.symbol,
+            )
+        elif args.mode == 'leaderboard':
+            success = run_leaderboard_cmd_wrapper(tier=args.tier)
+        elif args.mode == 'train-classifier':
+            success = run_train_classifier_cmd()
         elif args.mode == 'validate':
             success = run_validation_cmd()
         elif args.mode == 'retrain':
@@ -1136,18 +1304,18 @@ Examples:
         else:
             logger.error(f"Unknown mode: {args.mode}")
             success = False
-        
+
         if success:
             logger.info("[SUCCESS] Operation completed successfully")
             return 0
         else:
             logger.error("[FAILED] Operation failed")
             return 1
-    
+
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
         return 1
-    
+
     finally:
         logger.info(f"ML4T System shutdown - {datetime.now().isoformat()}")
         logger.info("=" * 80)

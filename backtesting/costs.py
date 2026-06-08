@@ -1,4 +1,4 @@
-"""Transaction cost modelling for RAFund ML4T backtesting."""
+"""Transaction cost modelling for Raf3nd ML4T backtesting."""
 
 from __future__ import annotations
 

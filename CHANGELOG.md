@@ -154,8 +154,8 @@ BacktestEngineV2(
 
 **Tables:**
 - `prices` - OHLCV data with timestamps
-- Schema defined in `data/schema.sql`
-- PostgreSQL connection via `data/db.py`
+- Schema defined and migrated via Alembic (`alembic upgrade head`); `data/schema.sql` is a reference overview only
+- PostgreSQL connection via `data/db.py` (URL resolved by `config.loader.build_database_url`)
 
 ---
 

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAFund ML4T - Drift Detail</title>
+  <style>
+    body {
+      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; padding: 24px; background: #f5f6f8; color: #1b1f24;
+    }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
+    a.back { display: inline-block; margin-bottom: 16px; color: #2563eb; text-decoration: none; font-size: 14px; }
+    a.back:hover { text-decoration: underline; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
+    .sev-none { background: #16a34a; }
+    .sev-warning { background: #d97706; }
+    .sev-critical { background: #dc2626; }
+    .sev-unknown { background: #6b7280; }
+    .summary {
+      background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); border-radius: 6px;
+      padding: 12px 16px; margin: 12px 0 18px; font-size: 14px;
+    }
+    .summary dt { color: #6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+    .summary dd { margin: 2px 0 12px; }
+    .summary dd:last-child { margin-bottom: 0; }
+    .chart { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); border-radius: 6px; padding: 12px; }
+    .empty { color: #6b7280; font-style: italic; padding: 10px 12px; }
+    .error { color: #b91c1c; font-weight: 600; padding: 10px 12px; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/">&larr; back to dashboard</a>
+
+  <h1>Drift Detail</h1>
+  <div class="subtitle">
+    {% if model %}Model: <strong>{{ model }}</strong>{% endif %}
+    {% if symbol %} &middot; Symbol: <strong>{{ symbol }}</strong>{% endif %}
+  </div>
+
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% elif report is none %}
+  <div class="empty">No drift data available.</div>
+  {% else %}
+  <div class="summary">
+    <dt>Severity</dt>
+    <dd><span class="pill sev-{{ report.severity }}">{{ report.severity }}</span></dd>
+    <dt>Max PSI</dt>
+    <dd>{{ '%.4f'|format(report.max_psi) if report.max_psi is not none else '-' }}</dd>
+    <dt>Recommended Action</dt>
+    <dd>{{ report.recommended_action }}</dd>
+    <dt>Features Drifted</dt>
+    <dd>
+      {% if report.features_drifted %}{{ report.features_drifted|join(', ') }}{% else %}none{% endif %}
+    </dd>
+    <dt>Detected At</dt>
+    <dd>{{ report.detected_at if report.detected_at is not none else '-' }}</dd>
+  </div>
+
+  {% if chart_html %}
+  <div class="chart">{{ chart_html|safe }}</div>
+  {% endif %}
+  {% endif %}
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAFund ML4T - Ops Dashboard</title>
+  <style>
+    body {
+      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; padding: 24px; background: #f5f6f8; color: #1b1f24;
+    }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 16px; margin: 28px 0 10px; }
+    .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
+    .actions { margin: 16px 0; }
+    button {
+      font-size: 14px; padding: 8px 14px; margin-right: 8px; border: 0;
+      border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    button:disabled { background: #9ca3af; cursor: default; }
+    table {
+      border-collapse: collapse; width: 100%; background: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden;
+    }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eceef1; font-size: 13px; }
+    th { background: #f0f2f5; font-weight: 600; }
+    tr.blocked { background: #fde8e8; }
+    tr.safe { background: #e7f6ec; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
+    .sev-none { background: #16a34a; }
+    .sev-warning { background: #d97706; }
+    .sev-critical { background: #dc2626; }
+    .sev-unknown { background: #6b7280; }
+    .status-blocked { color: #b91c1c; font-weight: 600; }
+    .status-safe { color: #15803d; font-weight: 600; }
+    .empty { color: #6b7280; font-style: italic; padding: 10px 12px; }
+    pre {
+      background: #11161c; color: #d6e2ef; padding: 12px; border-radius: 6px;
+      overflow: auto; font-size: 12px; max-height: 320px; margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>RAFund ML4T - Ops Dashboard</h1>
+  <div class="subtitle">Model lifecycle status, drift monitoring, and on-demand actions.</div>
+
+  <div class="actions">
+    <button id="btn-retrain" onclick="postAction('/api/retrain', {})">Retrain now</button>
+    <button id="btn-drift" onclick="runDriftCheck()">Check drift</button>
+  </div>
+  <pre id="result" style="display:none;"></pre>
+
+  <h2>Production Models</h2>
+  {% if model_rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Model</th><th>Symbol</th><th>Stage</th><th>Age (days)</th>
+        <th>OOS Sharpe</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in model_rows %}
+      <tr class="{% if row.blocked %}blocked{% elif row.safe_to_trade %}safe{% endif %}">
+        <td>{{ row.model_name }}</td>
+        <td>{{ row.symbol }}</td>
+        <td>{{ row.stage }}</td>
+        <td>{{ row.age_days if row.age_days is not none else '-' }}</td>
+        <td>{{ '%.3f'|format(row.oos_sharpe) if row.oos_sharpe is not none else '-' }}</td>
+        <td>
+          {% if row.blocked %}
+            <span class="status-blocked">BLOCKED{% if row.block_reason %} ({{ row.block_reason }}){% endif %}</span>
+          {% elif row.safe_to_trade %}
+            <span class="status-safe">SAFE TO TRADE</span>
+          {% else %}
+            <span>not tradeable</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No production models found.</div>
+  {% endif %}
+
+  <h2>Drift Status</h2>
+  {% if drift_rows %}
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Symbol</th><th>Severity</th><th>Detected At</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for row in drift_rows %}
+      <tr>
+        <td>{{ row.model_name }}</td>
+        <td>{{ row.symbol }}</td>
+        <td><span class="pill sev-{{ row.severity }}">{{ row.severity }}</span></td>
+        <td>{{ row.detected_at if row.detected_at is not none else '-' }}</td>
+        <td><a href="/drift?model={{ row.model_name|urlencode }}&symbol={{ row.symbol|urlencode }}">details</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No drift reports found.</div>
+  {% endif %}
+
+  <script>
+    function showResult(data) {
+      const el = document.getElementById('result');
+      el.style.display = 'block';
+      el.textContent = (typeof data === 'string') ? data : JSON.stringify(data, null, 2);
+    }
+
+    async function postAction(url, body) {
+      const buttons = document.querySelectorAll('button');
+      buttons.forEach(b => b.disabled = true);
+      showResult('Running ' + url + ' ...');
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {})
+        });
+        const data = await resp.json();
+        showResult(data);
+      } catch (err) {
+        showResult('Error: ' + err);
+      } finally {
+        buttons.forEach(b => b.disabled = false);
+      }
+    }
+
+    function runDriftCheck() {
+      const model = prompt('Model name?');
+      if (!model) return;
+      const symbol = prompt('Symbol?');
+      if (!symbol) return;
+      postAction('/api/drift-check', { model: model, symbol: symbol });
+    }
+  </script>
+</body>
+</html>

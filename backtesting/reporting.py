@@ -1,4 +1,4 @@
-"""Equity curve reporting for RAFund ML4T walk-forward validation."""
+"""Equity curve reporting for Raf3nd ML4T walk-forward validation."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pandas as pd
 import structlog
 
 from backtesting.walk_forward import WalkForwardResult
+from config.constants import PERIODS_PER_YEAR
 
 logger = structlog.get_logger(__name__)
 
@@ -52,7 +53,7 @@ def generate_equity_report(
     combined["rolling_sharpe"] = (
         combined["daily_return"].rolling(window=30, min_periods=5).mean()
         / combined["daily_return"].rolling(window=30, min_periods=5).std()
-        * np.sqrt(252)
+        * np.sqrt(PERIODS_PER_YEAR)
     )
     combined["drawdown_pct"] = (
         combined["equity"] / combined["equity"].cummax() - 1.0

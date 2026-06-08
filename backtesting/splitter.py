@@ -1,4 +1,4 @@
-"""Walk-forward validation splitter for RAFund ML4T.
+"""Walk-forward validation splitter for Raf3nd ML4T.
 
 This module provides a reusable time-series splitter that constructs train/test
 folds using a rolling, walk-forward window. Each fold's test window begins
@@ -42,11 +42,25 @@ class TimeSeriesSplitter:
         test_months: int = 3,
         step_months: int = 1,
         min_train_months: int = 6,
+        anchored: bool = False,
     ) -> None:
+        """
+        Args:
+            train_months: Length of each training window (rolling mode only).
+            test_months: Length of each out-of-sample test window.
+            step_months: How far successive test windows advance.
+            min_train_months: Folds whose training span is shorter are skipped.
+            anchored: When True use an EXPANDING (anchored) walk-forward — every
+                fold trains from the dataset's first date and the training window
+                grows each step. When False (default) use a fixed-length ROLLING
+                training window that slides forward. Test windows never overlap
+                and always strictly post-date their training window in both modes.
+        """
         self.train_months = train_months
         self.test_months = test_months
         self.step_months = step_months
         self.min_train_months = min_train_months
+        self.anchored = anchored
 
     def split(self, df: pd.DataFrame, date_col: str = "timestamp") -> list[Dict[str, object]]:
         if date_col not in df.columns:
@@ -67,12 +81,23 @@ class TimeSeriesSplitter:
 
         folds: list[Dict[str, object]] = []
         fold_idx = 0
-        fold_start = first_date
         previous_test_end: Timestamp | None = None
+        anchored = self.anchored
+
+        # Rolling: the train window slides (fold_start advances).
+        # Anchored: train_start is pinned to first_date and train_end expands.
+        fold_start = first_date
+        train_end = first_date + train_offset - pd.Timedelta(days=1)
 
         while True:
-            train_end = fold_start + train_offset - pd.Timedelta(days=1)
-            test_start = train_end + pd.Timedelta(days=1)
+            if anchored:
+                cur_train_start = first_date
+                cur_train_end = train_end
+            else:
+                cur_train_start = fold_start
+                cur_train_end = fold_start + train_offset - pd.Timedelta(days=1)
+
+            test_start = cur_train_end + pd.Timedelta(days=1)
             test_end = test_start + test_offset - pd.Timedelta(days=1)
 
             if test_end > last_date:
@@ -81,22 +106,25 @@ class TimeSeriesSplitter:
             if previous_test_end is not None and test_start <= previous_test_end:
                 raise ValueError("Split configuration produces overlapping test periods")
 
-            train_df = df[(df[date_col] >= fold_start) & (df[date_col] <= train_end)]
+            train_df = df[(df[date_col] >= cur_train_start) & (df[date_col] <= cur_train_end)]
             test_df = df[(df[date_col] >= test_start) & (df[date_col] <= test_end)]
 
             if len(train_df) == 0 or len(test_df) == 0:
                 break
 
-            actual_train_months = (train_end.to_period("M") - fold_start.to_period("M")).n + 1
+            actual_train_months = (cur_train_end.to_period("M") - cur_train_start.to_period("M")).n + 1
             if actual_train_months < self.min_train_months:
-                fold_start += step_offset
+                if anchored:
+                    train_end += step_offset
+                else:
+                    fold_start += step_offset
                 continue
 
             fold_idx += 1
             fold_info = {
                 "fold": fold_idx,
-                "train_start": fold_start,
-                "train_end": train_end,
+                "train_start": cur_train_start,
+                "train_end": cur_train_end,
                 "test_start": test_start,
                 "test_end": test_end,
                 "train_df": train_df,
@@ -109,8 +137,9 @@ class TimeSeriesSplitter:
             logger.info(
                 "walk_forward_fold",
                 fold=fold_idx,
-                train_start=str(fold_start.date()),
-                train_end=str(train_end.date()),
+                anchored=anchored,
+                train_start=str(cur_train_start.date()),
+                train_end=str(cur_train_end.date()),
                 test_start=str(test_start.date()),
                 test_end=str(test_end.date()),
                 train_rows=len(train_df),
@@ -118,11 +147,17 @@ class TimeSeriesSplitter:
             )
 
             previous_test_end = test_end
-            next_start = fold_start + step_offset
-            if next_start <= test_end:
-                fold_start = test_end + pd.Timedelta(days=1)
+            if anchored:
+                # Expand: grow train_end by one step, but never so little that the
+                # next test window would overlap the one we just emitted.
+                next_train_end = train_end + step_offset
+                train_end = next_train_end if next_train_end > test_end else test_end
             else:
-                fold_start = next_start
+                next_start = fold_start + step_offset
+                if next_start <= test_end:
+                    fold_start = test_end + pd.Timedelta(days=1)
+                else:
+                    fold_start = next_start
 
         return folds
 

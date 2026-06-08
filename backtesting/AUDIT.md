@@ -1,5 +1,5 @@
 """
-Backtesting Engine Audit for RAFund ML4T
+Backtesting Engine Audit for Raf3nd ML4T
 
 This audit reviews the existing backtest implementation in `backtesting/engine_eval.py`.
 The current project does not contain `backtesting/engine.py`, so the engine behavior is based on the specialized evaluation engine present today.

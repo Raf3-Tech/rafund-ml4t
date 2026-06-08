@@ -1,4 +1,4 @@
-"""Model blocking and stale/drift gate enforcement for RAFund ML4T."""
+"""Model blocking and stale/drift gate enforcement for Raf3nd ML4T."""
 
 from __future__ import annotations
 

@@ -1,0 +1,19 @@
+"""Project-wide numerical constants.
+
+Centralizes conventions that must stay consistent across the backtest engine,
+significance testing, model training, portfolio analytics, and monitoring.
+"""
+
+from __future__ import annotations
+
+# Annualization factor for return statistics (Sharpe, Sortino, volatility).
+#
+# Raf3nd trades crypto, which is a 24/7/365 market — there are ~365 return
+# observations per year on daily bars, not the ~252 trading days used for
+# equities. Annualizing with 252 understates the volatility scaling and
+# mis-calibrates every Sharpe gate. Use this constant everywhere instead of a
+# hard-coded literal so the convention is single-sourced and auditable.
+PERIODS_PER_YEAR: int = 365
+
+# Default annual risk-free rate used when computing excess-return Sharpe/Sortino.
+RISK_FREE_RATE_ANNUAL: float = 0.0

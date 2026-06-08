@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from config.constants import PERIODS_PER_YEAR
 from portfolio.optimizer import PortfolioOptimizer
 from portfolio.risk import RiskManager
 
@@ -185,5 +186,5 @@ def test_calculate_portfolio_volatility_annualizes():
     rm = RiskManager()
     returns = pd.Series([0.01, -0.01, 0.02, -0.02, 0.0])
     vol = rm.calculate_portfolio_volatility(returns)
-    assert vol == pytest.approx(returns.std() * np.sqrt(252))
+    assert vol == pytest.approx(returns.std() * np.sqrt(PERIODS_PER_YEAR))
     assert vol > 0

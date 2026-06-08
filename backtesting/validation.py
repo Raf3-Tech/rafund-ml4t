@@ -1,4 +1,4 @@
-"""Single-entry walk-forward validation for RAFund ML4T.
+"""Single-entry walk-forward validation for Raf3nd ML4T.
 
 This module ties the individual backtesting building blocks together behind one
 callable, :func:`run_validation`:

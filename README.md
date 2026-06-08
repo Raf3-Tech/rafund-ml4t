@@ -55,7 +55,7 @@ ml4t/
 │
 ├── data/                    # Data collection and storage
 │   ├── db.py               # PostgreSQL database connection
-│   ├── schema.sql          # Database schema
+│   ├── schema.sql          # Schema overview (REFERENCE ONLY; Alembic is canonical)
 │   ├── collectors/         # Exchange data collectors
 │   │   └── binance_collector.py
 │   ├── clear_database.py   # Database maintenance
@@ -187,58 +187,72 @@ alembic upgrade head
 ### Step 4: Install Python Dependencies
 
 ```bash
-pip install -r requirements.txt
+source venv/bin/activate            # if not already active
+pip install -r requirements.txt     # or: pip install -r requirements.lock  (pinned — see "Reproducible installs")
 ```
 
-source venv/bin/activate
-```
+> **Schema:** Alembic is the single source of truth — always provision with
+> `alembic upgrade head` (Step 3). Do **not** load `data/schema.sql`; it is a
+> reference overview only and has drifted from the migrations.
 
-### Step 3: Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Step 4: Set Up PostgreSQL
-
-```bash
-# Create database
-createdb rafund
-
-# Load schema
-psql -U postgres -d rafund -f data/schema.sql
-```
-
-### Step 5: Configure Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-# Database Configuration
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=rafund
-DB_USER=postgres
-DB_PASSWORD=your_secure_password
-```
-
-> **Security Note:** Never commit `.env` to version control. Add it to `.gitignore`.
-
-### Step 6: Verify Setup
+### Step 5: Verify Setup
 
 ```bash
 pytest tests/test_setup.py
 ```
 
-You should see:
-```
-✓ Imports                       PASS
-✓ Directory Structure           PASS
-✓ Files                         PASS
-✓ PostgreSQL                    PASS
-✓ Binance API                   PASS
+You should see all checks pass (imports, directory structure, files, PostgreSQL, Binance API).
 
-✓ All tests passed! System is ready.
+---
+
+## Deploying to a hosted database (e.g. Supabase)
+
+The whole DB target is controlled by a single variable, so going from local
+Postgres to a hosted one is just a config change — no code edits.
+
+1. **Set `DATABASE_URL`** (in `.env` or the environment). It takes precedence
+   over the `DB_*` vars and is read identically by the app, the SQLAlchemy
+   engine, and Alembic.
+
+   ```bash
+   # Supabase: use the Session pooler / direct connection on :5432,
+   # NOT the transaction pooler on :6543 (this app holds a persistent pool).
+   DATABASE_URL=postgresql://postgres:<password>@db.<ref>.supabase.co:5432/postgres?sslmode=require
+   ```
+   - `sslmode=require` is mandatory for Supabase/most hosted Postgres.
+   - The direct connection is IPv6-only without the IPv4 add-on; the pooler is IPv4.
+   - **`DATABASE_URL` must be URL form** (`postgresql://user:pass@host:port/db`).
+     A libpq keyword DSN (`host=... dbname=...`) is **not supported** and will
+     fail the engine/migrations — providers give you URL form, so use it. Using
+     DSN form is unsupported by design; if it breaks, that's on the operator.
+
+2. **Provision the schema** on the fresh database:
+   ```bash
+   alembic upgrade head
+   ```
+
+3. **Bootstrap data** (code ships, data does not — it is re-fetched, fully reproducible):
+   ```bash
+   python main.py collect      # pull OHLCV from Binance (public)
+   python main.py features     # compute features
+   ```
+
+4. **Run / validate**:
+   ```bash
+   python main.py validate
+   ```
+
+> Using discrete `DB_*` vars against a hosted DB instead of `DATABASE_URL`?
+> Also set `DB_SSLMODE=require`.
+
+### Reproducible installs
+
+`requirements.txt` uses minimum bounds for readability. For a byte-for-byte
+reproducible environment (the versions this code was verified against), install
+from the lockfile instead:
+
+```bash
+pip install -r requirements.lock
 ```
 
 ---

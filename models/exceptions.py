@@ -1,4 +1,4 @@
-"""Custom exceptions for RAFund ML4T model lifecycle management."""
+"""Custom exceptions for Raf3nd ML4T model lifecycle management."""
 
 from __future__ import annotations
 

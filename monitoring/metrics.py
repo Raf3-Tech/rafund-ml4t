@@ -8,6 +8,8 @@ for strategy evaluation and risk monitoring.
 import pandas as pd
 import numpy as np
 
+from config.constants import PERIODS_PER_YEAR
+
 
 class MetricsCalculator:
     """Calculate and track performance metrics."""
@@ -77,7 +79,7 @@ class MetricsCalculator:
         Returns:
             Sortino Ratio
         """
-        excess_returns = returns - risk_free_rate / 252
+        excess_returns = returns - risk_free_rate / PERIODS_PER_YEAR
         downside = returns[returns < 0]
         downside_std = downside.std()
 
@@ -86,7 +88,7 @@ class MetricsCalculator:
         if pd.isna(downside_std) or downside_std == 0:
             return 0
 
-        return excess_returns.mean() / downside_std * np.sqrt(252)
+        return excess_returns.mean() / downside_std * np.sqrt(PERIODS_PER_YEAR)
     
     @staticmethod
     def calculate_calmar_ratio(returns: pd.Series) -> float:
@@ -99,7 +101,7 @@ class MetricsCalculator:
         Returns:
             Calmar Ratio
         """
-        annual_return = returns.mean() * 252
+        annual_return = returns.mean() * PERIODS_PER_YEAR
         
         cumulative = (1 + returns).cumprod()
         running_max = cumulative.expanding().max()
@@ -133,7 +135,7 @@ class MetricsCalculator:
         mean_daily_return = returns.mean()
         std_daily_return = returns.std()
         
-        sharpe_ratio = (mean_daily_return / std_daily_return) * np.sqrt(252)
+        sharpe_ratio = (mean_daily_return / std_daily_return) * np.sqrt(PERIODS_PER_YEAR)
         
         # Optional: subtract risk-free rate component
         # This is a simplified version; strict formula would be:

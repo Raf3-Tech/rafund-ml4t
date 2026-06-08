@@ -1,4 +1,4 @@
-"""Generic backtest engine for RAFund ML4T.
+"""Generic backtest engine for Raf3nd ML4T.
 
 This engine enforces prop-firm rules in real time during the trading loop.
 It supports single-asset signals and paired-leg positions when appropriate.
@@ -15,6 +15,7 @@ import pandas as pd
 import structlog
 
 from backtesting.costs import TransactionCostModel
+from config.constants import PERIODS_PER_YEAR
 
 logger = structlog.get_logger(__name__)
 
@@ -99,15 +100,33 @@ class BacktestEngine:
             initial_capital=self.initial_capital,
         )
 
+    @staticmethod
+    def _valid(p: Optional[float]) -> Optional[float]:
+        """Return p only if it is a finite, non-NaN number; otherwise None.
+
+        np.nan is not None, so ``is not None`` guards do not catch NaN prices.
+        Any arithmetic with NaN propagates NaN silently, which corrupts equity,
+        daily_start_equity, and every prop-firm guard that uses them.
+        """
+        if p is None:
+            return None
+        try:
+            return p if np.isfinite(p) else None
+        except (TypeError, ValueError):
+            return None
+
     def _compute_equity(self, price_a: Optional[float], price_b: Optional[float], price: Optional[float]) -> float:
         equity = self.cash
-        if self.position_a and price_a is not None:
-            equity += self.position_a * price_a
-        if self.position_b and price_b is not None:
-            equity += self.position_b * price_b
-        if not self.position_a and not self.position_b and price is not None and hasattr(self, 'position'):
-            # legacy single-asset support if necessary
-            pass
+        # Single-asset positions are tracked in position_a and opened against the
+        # `price` column; fall back to it when there is no explicit price_a leg.
+        # Use _valid() so that NaN prices (not None, but still unusable) fall back
+        # correctly instead of propagating NaN into the equity figure.
+        effective_price_a = self._valid(price_a) or self._valid(price)
+        if self.position_a and effective_price_a is not None:
+            equity += self.position_a * effective_price_a
+        valid_price_b = self._valid(price_b)
+        if self.position_b and valid_price_b is not None:
+            equity += self.position_b * valid_price_b
         return equity
 
     def _current_notional(self, price_a: Optional[float], price_b: Optional[float]) -> float:
@@ -138,10 +157,11 @@ class BacktestEngine:
             self._record_halt(self.current_date or pd.Timestamp.now(tz=timezone.utc), "DRAW_DOWN_FLOOR", equity)
             logger.warning("drawdown_floor_breach", equity=equity, threshold=self.initial_capital * (1.0 - self.drawdown_limit_pct))
 
-        if equity - self.daily_start_equity if self.daily_start_equity is not None else 0.0 <= -self.initial_capital * self.daily_loss_limit_pct:
+        daily_pnl = (equity - self.daily_start_equity) if self.daily_start_equity is not None else 0.0
+        if daily_pnl <= -self.initial_capital * self.daily_loss_limit_pct:
             self.prop_firm_state.daily_halt = True
             self._record_halt(self.current_date or pd.Timestamp.now(tz=timezone.utc), "DAILY_LOSS_LIMIT", equity)
-            logger.warning("daily_loss_limit_reached", equity=equity, daily_pnl=equity - (self.daily_start_equity or equity))
+            logger.warning("daily_loss_limit_reached", equity=equity, daily_pnl=daily_pnl)
 
         profit = equity - self.initial_capital
         if not self.prop_firm_state.step1_unlocked and profit >= self.initial_capital * self.step1_profit_pct:
@@ -162,6 +182,10 @@ class BacktestEngine:
         target_notional: float,
         beta: Optional[float] = None,
     ) -> None:
+        # Sanitize prices before any use — NaN prices must not produce NaN quantities.
+        price_a = self._valid(price_a)
+        price_b = self._valid(price_b)
+
         equity = self._compute_equity(price_a, price_b, None)
         if equity <= 0:
             return
@@ -175,7 +199,6 @@ class BacktestEngine:
                 equity=equity,
             )
             target_notional = max_notional
-            self.prop_firm_state.daily_halt = False
 
         if price_a is not None and price_b is not None:
             # Pair trading legs split evenly across both assets.
@@ -196,7 +219,11 @@ class BacktestEngine:
             self.entry_price_b = tx_b["executed_price"]
             self.entry_side = side
             self.entry_timestamp = self.current_date
-            self.cash -= tx_a["total_cost"] + tx_b["total_cost"]
+            # Fully-funded cash accounting (symmetric with _close_position):
+            # buying a leg pays its notional, shorting a leg receives it; the
+            # commission is charged on top. Slippage is already in executed_price.
+            self.cash -= self.position_a * tx_a["executed_price"] + tx_a["commission"]
+            self.cash -= self.position_b * tx_b["executed_price"] + tx_b["commission"]
             self.trades.append(
                 {
                     "timestamp": self.current_date,
@@ -223,7 +250,8 @@ class BacktestEngine:
             self.entry_price_a = tx["executed_price"]
             self.entry_side = side
             self.entry_timestamp = self.current_date
-            self.cash -= tx["total_cost"]
+            # Fully-funded cash accounting (symmetric with _close_position).
+            self.cash -= self.position_a * tx["executed_price"] + tx["commission"]
             self.trades.append(
                 {
                     "timestamp": self.current_date,
@@ -323,22 +351,38 @@ class BacktestEngine:
         prev_equity: Optional[float] = None
         for row in merged.itertuples(index=False):
             row_ts = pd.Timestamp(row.timestamp)
+            # Sanitize all prices at ingestion. _valid() maps NaN/inf → None so
+            # every downstream guard that checks ``is not None`` now also catches
+            # bad float values without further changes to the accounting logic.
+            price_a = self._valid(getattr(row, "price_a", None))
+            price_b = self._valid(getattr(row, "price_b", None))
+            price   = self._valid(getattr(row, "price", None))
+
+            # For single-asset data the tradable price lives in `price`; route it
+            # to the price_a leg so closes mark-to-market and realize P&L.
+            # _valid() ensures NaN price_a now correctly falls back to `price`.
+            close_price_a = price_a if price_a is not None else price
+            close_price_b = price_b
+
             if self.current_date is None or row_ts.date() != self.current_date.date():
                 self.current_date = row_ts
-                self.daily_start_equity = self._compute_equity(
-                    getattr(row, "price_a", None), getattr(row, "price_b", None), getattr(row, "price", None)
-                )
+                new_day_equity = self._compute_equity(price_a, price_b, price)
+                # Guard: if every price for every open leg is missing on the day
+                # boundary, _compute_equity returns self.cash (finite), so this
+                # cannot write NaN into daily_start_equity after the _valid() fix.
+                # Keep an explicit isfinite check as belt-and-suspenders so that
+                # daily_start_equity is never contaminated.
+                if np.isfinite(new_day_equity):
+                    self.daily_start_equity = new_day_equity
                 self.prop_firm_state.daily_halt = False
 
-            equity = self._compute_equity(
-                getattr(row, "price_a", None), getattr(row, "price_b", None), getattr(row, "price", None)
-            )
+            equity = self._compute_equity(price_a, price_b, price)
             self.prop_firm_state.daily_pnl = equity - self.daily_start_equity
 
             self._update_propfirm(equity)
             if self.prop_firm_state.account_failed:
                 if self.position_a != 0.0 or self.position_b != 0.0:
-                    self._close_position(getattr(row, "price_a", None), getattr(row, "price_b", None))
+                    self._close_position(close_price_a, close_price_b)
                 break
 
             target_position_a = getattr(row, "position_a", 0.0)
@@ -353,17 +397,17 @@ class BacktestEngine:
                     if not self.prop_firm_state.daily_halt:
                         self._open_position(
                             "LONG" if target_position_a > 0 else "SHORT",
-                            getattr(row, "price_a", None),
-                            getattr(row, "price_b", None),
+                            price_a,
+                            price_b,
                             target_notional,
                         )
                 elif np.sign(target_position_a) != np.sign(self.position_a) or np.sign(target_position_b) != np.sign(self.position_b):
-                    self._close_position(getattr(row, "price_a", None), getattr(row, "price_b", None))
+                    self._close_position(price_a, price_b)
                     if not self.prop_firm_state.daily_halt:
                         self._open_position(
                             "LONG" if target_position_a > 0 else "SHORT",
-                            getattr(row, "price_a", None),
-                            getattr(row, "price_b", None),
+                            price_a,
+                            price_b,
                             target_notional,
                         )
             elif target_position != 0.0:
@@ -371,26 +415,24 @@ class BacktestEngine:
                     if not self.prop_firm_state.daily_halt:
                         self._open_position(
                             "LONG" if target_position > 0 else "SHORT",
-                            getattr(row, "price", None),
+                            price,
                             None,
                             target_notional,
                         )
                 elif np.sign(target_position) != np.sign(self.position_a):
-                    self._close_position(getattr(row, "price", None), None)
+                    self._close_position(price, None)
                     if not self.prop_firm_state.daily_halt:
                         self._open_position(
                             "LONG" if target_position > 0 else "SHORT",
-                            getattr(row, "price", None),
+                            price,
                             None,
                             target_notional,
                         )
             else:
                 if self.position_a != 0.0 or self.position_b != 0.0:
-                    self._close_position(getattr(row, "price_a", None), getattr(row, "price_b", None))
+                    self._close_position(close_price_a, close_price_b)
 
-            equity = self._compute_equity(
-                getattr(row, "price_a", None), getattr(row, "price_b", None), getattr(row, "price", None)
-            )
+            equity = self._compute_equity(price_a, price_b, price)
             daily_return = float(equity / prev_equity - 1.0) if prev_equity is not None and prev_equity > 0 else 0.0
             self.equity_curve.append(
                 {
@@ -415,7 +457,7 @@ class BacktestEngine:
         daily_returns = equity_series.pct_change().dropna()
         mean_return = daily_returns.mean() if len(daily_returns) else 0.0
         std_return = daily_returns.std() if len(daily_returns) else 0.0
-        sharpe = (mean_return / std_return * np.sqrt(252)) if std_return > 0 else 0.0
+        sharpe = (mean_return / std_return * np.sqrt(PERIODS_PER_YEAR)) if std_return > 0 else 0.0
         worst_drawdown = ((equity_series - equity_series.cummax()) / equity_series.cummax()).min() if len(equity_series) else 0.0
         final_equity = equity_series.iloc[-1] if len(equity_series) else self.cash
         total_return = (final_equity - self.initial_capital) / self.initial_capital

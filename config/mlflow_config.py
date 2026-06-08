@@ -1,4 +1,4 @@
-"""MLflow configuration and run utilities for RAFund ML4T."""
+"""MLflow configuration and run utilities for Raf3nd ML4T."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""ML model training with MLflow integration for RAFund ML4T."""
+"""ML model training with MLflow integration for Raf3nd ML4T."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 
+from config.constants import PERIODS_PER_YEAR
 from config.loader import get_settings
 from config.mlflow_config import configure_mlflow, log_training_run
 from data.db import DatabaseConnection
@@ -150,11 +151,7 @@ class ModelTrainer:
             "SELECT timestamp, symbol_a, symbol_b, spread, spread_mean, spread_std, z_score, hedge_ratio "
             "FROM features WHERE symbol_a = %s OR symbol_b = %s ORDER BY timestamp"
         )
-        conn = self.db.get_connection()
-        try:
-            df = pd.read_sql(query, conn, params=[symbol, symbol])
-        finally:
-            self.db.return_connection(conn)
+        df = self.db.read_sql(query, [symbol, symbol])
 
         if df.empty:
             return pd.DataFrame()
@@ -165,13 +162,30 @@ class ModelTrainer:
         if df.empty:
             return pd.DataFrame()
 
-        df['target'] = df['z_score'].shift(-1)
+        # Target = forward change in the (normalized) spread, NOT the next z-score level.
+        # The backtest goes LONG the spread on a positive prediction, so the model's sign
+        # must point where the spread is actually headed. The next z-score level is dominated
+        # by persistence (its sign ~= the current z), which is anti-correlated with a
+        # mean-reverting spread's next move -- i.e. the old target traded reversion backwards.
+        # Forward spread change aligns the model's sign with realized PnL: a linear model
+        # learns Δspread ≈ -k·z, so it goes long when the spread is below its mean.
+        df['target'] = df['spread'].shift(-1) - df['spread']
         df = df.dropna(subset=['target'])
         return df
 
     def _resolve_feature_names(self, df: pd.DataFrame) -> list[str]:
-        candidates = ['spread', 'spread_mean', 'spread_std', 'z_score', 'hedge_ratio']
-        return [col for col in candidates if col in df.columns]
+        # De-duplicated, low-collinearity feature set.
+        #
+        # The raw table is highly redundant: z_score == (spread - spread_mean) / spread_std,
+        # so spread/spread_mean/z_score are mutually deterministic, and hedge_ratio is
+        # near-constant per pair (it is used for position sizing, not prediction). Feeding
+        # all five inflates multicollinearity and corrupts feature-importance. We keep:
+        #   * z_score    -- the standardized mean-reversion signal, and
+        #   * spread_std -- the volatility regime, which is NOT recoverable from z_score alone.
+        candidates = ['z_score', 'spread_std']
+        names = [col for col in candidates if col in df.columns]
+        # Defensive fallback: never return an empty feature set.
+        return names or [col for col in df.columns if col in {'z_score', 'spread'}]
 
     def _time_series_split(
         self, X: pd.DataFrame, y: pd.Series
@@ -190,7 +204,7 @@ class ModelTrainer:
             return 0.0
         mean = float(np.mean(returns))
         std = float(np.std(returns, ddof=1))
-        return float((mean / std * np.sqrt(252)) if std > 0 else 0.0)
+        return float((mean / std * np.sqrt(PERIODS_PER_YEAR)) if std > 0 else 0.0)
 
     def _compute_max_drawdown(self, y_true: pd.Series, y_pred: np.ndarray) -> float:
         returns = np.sign(y_pred) * y_true.values

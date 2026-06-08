@@ -1,5 +1,8 @@
 """
-Persist backtest / evaluation outputs into PostgreSQL per schema.sql.
+Persist backtest / evaluation outputs into PostgreSQL.
+
+Schema is owned by Alembic (see ``alembic/versions/``); ``data/schema.sql`` is a
+reference overview only.
 """
 
 import logging

@@ -7,6 +7,8 @@ This module handles risk calculations, monitoring, and constraints.
 import pandas as pd
 import numpy as np
 
+from config.constants import PERIODS_PER_YEAR
+
 
 class RiskManager:
     """Risk management and monitoring."""
@@ -71,8 +73,8 @@ class RiskManager:
         Returns:
             Sharpe Ratio
         """
-        excess_returns = returns - risk_free_rate / 252  # Convert annual to daily
-        return excess_returns.mean() / excess_returns.std() * np.sqrt(252)
+        excess_returns = returns - risk_free_rate / PERIODS_PER_YEAR  # annual -> per-period
+        return excess_returns.mean() / excess_returns.std() * np.sqrt(PERIODS_PER_YEAR)
     
     def check_position_limits(self, positions: dict, capital: float, max_allocation: float = 0.2) -> bool:
         """
@@ -102,4 +104,4 @@ class RiskManager:
         Returns:
             Annualized volatility
         """
-        return returns.std() * np.sqrt(252)
+        return returns.std() * np.sqrt(PERIODS_PER_YEAR)

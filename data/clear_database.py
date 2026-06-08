@@ -9,17 +9,21 @@ import logging
 import sys
 from pathlib import Path
 
+from psycopg2 import sql
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.db import DatabaseConnection
+from data.db import CORE_TABLES, DatabaseConnection
 
-# Configure logging
+# Configure logging (ensure the log directory exists first)
+_LOG_PATH = Path(__file__).parent.parent / 'logs' / 'data_operations.log'
+_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/data_operations.log'),
+        logging.FileHandler(str(_LOG_PATH)),
         logging.StreamHandler()
     ]
 )
@@ -41,8 +45,14 @@ def clear_database(db: DatabaseConnection) -> bool:
         conn = db.get_connection()
         cursor = conn.cursor()
         
-        # Tables to clear (order matters due to constraints)
+        # Tables to clear (order matters due to constraints). Validate against the
+        # shared allowlist so the identifiers interpolated below are always known.
+        # Includes the model-lifecycle tables so a reset reaches a known baseline
+        # instead of leaving stale registry/drift/block rows behind.
         tables = [
+            'model_blocks',
+            'drift_reports',
+            'model_registry',
             'backtest_results',
             'portfolio',
             'trades',
@@ -50,6 +60,9 @@ def clear_database(db: DatabaseConnection) -> bool:
             'features',
             'prices'
         ]
+        unknown = [t for t in tables if t not in CORE_TABLES]
+        if unknown:
+            raise ValueError(f"Refusing to clear unknown tables: {unknown}")
         
         logger.info("="*80)
         logger.info("CLEARING DATABASE TABLES")
@@ -58,7 +71,7 @@ def clear_database(db: DatabaseConnection) -> bool:
         for table in tables:
             try:
                 # Delete all data from the table
-                cursor.execute(f"DELETE FROM {table};")
+                cursor.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
                 deleted = cursor.rowcount
                 logger.info(f"[OK] Cleared {table}: {deleted} rows deleted")
             except Exception as e:
@@ -77,7 +90,7 @@ def clear_database(db: DatabaseConnection) -> bool:
         logger.info("="*80)
         
         for table in tables:
-            cursor.execute(f"SELECT COUNT(*) FROM {table};")
+            cursor.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table)))
             count = cursor.fetchone()[0]
             logger.info(f"{table}: {count} rows")
         

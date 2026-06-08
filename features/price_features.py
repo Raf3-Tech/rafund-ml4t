@@ -81,18 +81,27 @@ def calculate_rsq(y: pd.Series, y_pred: pd.Series) -> float:
 def calculate_spread_features(
     prices_a: pd.Series,
     prices_b: pd.Series,
-    window: int = 20
+    window: int = 20,
+    include_entropy: bool = True,
+    entropy_window: int = 30,
+    entropy_embedding: int = 3,
+    entropy_threshold: float = 0.95,
 ) -> pd.DataFrame:
     """
     Calculate spread-based features for pairs trading.
-    
+
     Args:
         prices_a: Price series for asset A
         prices_b: Price series for asset B
         window: Rolling window for mean/std calculations
-        
+        include_entropy: Append causal permutation-entropy features (Phase 1)
+        entropy_window: Rolling window for permutation entropy
+        entropy_embedding: Ordinal-pattern embedding dimension
+        entropy_threshold: PE level above which a regime is "high" / untradeable
+
     Returns:
-        DataFrame with spread, mean, std, and z-score
+        DataFrame with spread, mean, std, z-score, hedge_ratio and (optionally)
+        the permutation-entropy columns perm_entropy/entropy_rank/entropy_regime.
     """
     # Align series
     df = pd.DataFrame({
@@ -115,23 +124,53 @@ def calculate_spread_features(
     df['spread_std'] = df['spread'].rolling(window).std()
     
     # Z-score
+    # Guard against divide-by-zero: when the rolling spread_std is 0 (a flat /
+    # constant spread over the window) the raw division produces inf/-inf/NaN
+    # which would propagate into signals and any model trained on these
+    # features. A zero std means no measurable deviation, so the z-score is 0.0.
+    # Warm-up rows (where spread_mean/spread_std are NaN because the rolling
+    # window isn't full yet) keep their NaN, matching the existing convention.
     df['z_score'] = (df['spread'] - df['spread_mean']) / df['spread_std']
+    df['z_score'] = df['z_score'].mask(df['spread_std'] == 0, 0.0)
     
-    # Calculate hedge ratio using cointegration
-    try:
-        log_returns_a = np.log(df['price_a'] / df['price_a'].shift(1)).dropna()
-        log_returns_b = np.log(df['price_b'] / df['price_b'].shift(1)).dropna()
-        
-        # Simple regression to find hedge ratio
-        covariance = np.cov(log_returns_a, log_returns_b)[0, 1]
-        variance_b = np.var(log_returns_b)
-        hedge_ratio = covariance / variance_b if variance_b > 0 else 1.0
-    except:
-        hedge_ratio = 1.0
-    
+    # Hedge ratio (β) via an EXPANDING, strictly causal estimate.
+    #
+    # LEAKAGE FIX: the previous implementation computed a single cov/var over
+    # the ENTIRE series and broadcast it to every row. That injects future
+    # information (look-ahead) into a feature that is used both for model
+    # training and for position sizing, and it produces a zero-variance column
+    # whose feature importance is meaningless. Here β at row t is estimated
+    # from only the returns observed up to and including t (expanding window),
+    # so no row ever sees the future. Warm-up rows (insufficient history) and
+    # degenerate (zero-variance B) windows fall back to a unit hedge ratio.
+    log_returns_a = np.log(df['price_a'] / df['price_a'].shift(1))
+    log_returns_b = np.log(df['price_b'] / df['price_b'].shift(1))
+    min_obs = max(2, window)
+    cov_ab = log_returns_a.expanding(min_periods=min_obs).cov(log_returns_b)
+    var_b = log_returns_b.expanding(min_periods=min_obs).var()
+    hedge_ratio = (cov_ab / var_b).where(var_b > 0).fillna(1.0)
     df['hedge_ratio'] = hedge_ratio
-    
-    return df[['spread', 'spread_mean', 'spread_std', 'z_score', 'hedge_ratio']]
+
+    out_cols = ['spread', 'spread_mean', 'spread_std', 'z_score', 'hedge_ratio']
+
+    if include_entropy:
+        # Causal permutation-entropy features on the spread (Phase 1, alpha
+        # roadmap). Local import keeps the dependency lazy and avoids any
+        # import-order coupling within the features package.
+        from features.permutation_entropy import entropy_features
+
+        ent = entropy_features(
+            df['spread'],
+            window=entropy_window,
+            embedding_dimension=entropy_embedding,
+            threshold=entropy_threshold,
+        )
+        df['perm_entropy'] = ent['perm_entropy']
+        df['entropy_rank'] = ent['entropy_rank']
+        df['entropy_regime'] = ent['entropy_regime']
+        out_cols += ['perm_entropy', 'entropy_rank', 'entropy_regime']
+
+    return df[out_cols]
 
 
 def calculate_momentum_features(prices: pd.Series, window: int = 20) -> pd.DataFrame:

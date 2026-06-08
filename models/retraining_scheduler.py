@@ -1,4 +1,4 @@
-"""Automated model retraining and drift scheduling for RAFund ML4T."""
+"""Automated model retraining and drift scheduling for Raf3nd ML4T."""
 
 from __future__ import annotations
 
@@ -105,7 +105,12 @@ class RetrainingScheduler:
             splitter_config = self.config.get('walk_forward', {})
             splitter = TimeSeriesSplitter(**splitter_config) if splitter_config else TimeSeriesSplitter()
 
-            validator = ModelValidator(self.db, splitter, self.config)
+            # The validator forwards this to WalkForwardRunner -> BacktestEngine(**engine_config),
+            # so it must contain ONLY BacktestEngine kwargs. Pass the dedicated 'engine' sub-config
+            # (empty -> BacktestEngine defaults), never the whole retraining config, whose
+            # models/symbols/timeframe keys are not valid engine kwargs.
+            engine_config = self.config.get('engine', {})
+            validator = ModelValidator(self.db, splitter, engine_config)
             decision = validator.validate_for_promotion(meta, symbol, self.config.get('timeframe', '1d'))
             if decision.approved:
                 logger.info('model_promoted_to_production', model_name=meta.model_name, symbol=symbol)

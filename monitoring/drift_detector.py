@@ -1,4 +1,4 @@
-"""Feature drift detection for RAFund ML4T."""
+"""Feature drift detection for Raf3nd ML4T."""
 
 from __future__ import annotations
 
@@ -85,11 +85,7 @@ class FeatureDriftDetector:
             "AND timestamp >= %s AND timestamp < %s "
             "ORDER BY timestamp"
         )
-        conn = db.get_connection()
-        try:
-            df = pd.read_sql(query, conn, params=[symbol, symbol, start_date, end_date])
-        finally:
-            db.return_connection(conn)
+        df = db.read_sql(query, [symbol, symbol, start_date, end_date])
 
         if df.empty:
             return pd.DataFrame(columns=feature_names)
@@ -110,11 +106,7 @@ class FeatureDriftDetector:
             "WHERE (symbol_a = %s OR symbol_b = %s) "
             "AND timestamp >= %s ORDER BY timestamp"
         )
-        conn = db.get_connection()
-        try:
-            df = pd.read_sql(query, conn, params=[symbol, symbol, cutoff])
-        finally:
-            db.return_connection(conn)
+        df = db.read_sql(query, [symbol, symbol, cutoff])
 
         if df.empty:
             return pd.DataFrame(columns=feature_names)

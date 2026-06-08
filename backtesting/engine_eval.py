@@ -19,6 +19,7 @@ from backtesting.evaluation_rules import (
     EvaluationTracker,
     PropFirmRules,
 )
+from config.constants import PERIODS_PER_YEAR
 from strategies.stat_arb import StatArbStrategy
 
 logger = logging.getLogger(__name__)
@@ -95,58 +96,21 @@ class EvaluationBacktestEngine:
         self.entry_date = None
 
     def generate_pair_signals(self, pair_df: pd.DataFrame) -> pd.DataFrame:
-        """Build daily signal series from spread z-score."""
-        training_end = min(self.lookback, len(pair_df))
-        log_a = np.log(pair_df["close_a"])
-        log_b = np.log(pair_df["close_b"])
-        beta = _hedge_ratio_from_training(log_a, log_b, training_end)
+        """Build the daily signal series via the single signal authority.
 
-        spread = self.strategy.calculate_spread(
-            pair_df["close_a"], pair_df["close_b"], beta
-        )
-        z = self.strategy.calculate_z_score(spread, training_end_idx=training_end)
-        train_spread = spread.iloc[:training_end]
-        spread_mean = float(train_spread.mean())
-        spread_std = float(train_spread.std()) if train_spread.std() > 0 else 1.0
-
-        out = pair_df[["timestamp", "close_a", "close_b"]].copy()
-        out["z_score"] = z.values
-        out["spread"] = spread.values
-        out["spread_mean"] = spread_mean
-        out["spread_std"] = spread_std
-        out["hedge_ratio"] = beta
-        return out
+        Delegates to ``StatArbStrategy.signals_from_pair_prices`` so the backtest
+        and the ``python main.py signals`` command share one code path (Rule 1).
+        """
+        return self.strategy.signals_from_pair_prices(pair_df)
 
     @staticmethod
     def signals_for_database(signals_df: pd.DataFrame, symbol_a: str, symbol_b: str) -> pd.DataFrame:
-        """Map z-scores to DB signal_type enum rows."""
-        rows = []
-        for _, row in signals_df.iterrows():
-            z = row["z_score"]
-            if pd.isna(z):
-                sig = "HOLD"
-            elif z < -2.0:
-                sig = "BUY"
-            elif z > 2.0:
-                sig = "SELL"
-            elif abs(z) <= 0.5:
-                sig = "CLOSE"
-            else:
-                sig = "HOLD"
-            pos_a = 1 if sig == "BUY" else (-1 if sig == "SELL" else 0)
-            pos_b = int(round(-pos_a * row["hedge_ratio"])) if pos_a else 0
-            rows.append(
-                {
-                    "symbol_a": symbol_a,
-                    "symbol_b": symbol_b,
-                    "timestamp": row["timestamp"],
-                    "signal": sig,
-                    "z_score": float(z) if pd.notna(z) else None,
-                    "position_a": pos_a,
-                    "position_b": pos_b,
-                }
-            )
-        return pd.DataFrame(rows)
+        """Map the strategy's stateful signal column to DB signal_type rows.
+
+        Delegates to ``StatArbStrategy.to_db_signals`` (the single mapper), so the
+        persisted signal distribution matches the signals command exactly.
+        """
+        return StatArbStrategy.to_db_signals(signals_df, symbol_a, symbol_b)
 
     def _equity(self, price_a: float, price_b: float) -> float:
         eq = self.cash
@@ -332,7 +296,7 @@ class EvaluationBacktestEngine:
         daily_returns = equity_series.pct_change().dropna()
         mean_dr = daily_returns.mean() if len(daily_returns) else 0.0
         std_dr = daily_returns.std() if len(daily_returns) else 0.0
-        sharpe = (mean_dr / std_dr * np.sqrt(252)) if std_dr > 0 else 0.0
+        sharpe = (mean_dr / std_dr * np.sqrt(PERIODS_PER_YEAR)) if std_dr > 0 else 0.0
 
         if len(equity_series) >= 2:
             cummax = equity_series.cummax()

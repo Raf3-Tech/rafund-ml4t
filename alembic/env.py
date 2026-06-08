@@ -1,18 +1,32 @@
 import os
+import sys
 from logging.config import fileConfig
+from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
 
+# Make the project importable and load .env so migrations resolve the database
+# the SAME way the application does (DATABASE_URL or DB_* components).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+load_dotenv(_PROJECT_ROOT / ".env", override=False)
+
+from config.loader import build_database_url  # noqa: E402
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-database_url = os.getenv('DATABASE_URL')
+database_url = build_database_url(for_sqlalchemy=True)
 if database_url:
-    config.set_main_option('sqlalchemy.url', database_url)
+    # Alembic stores the URL via configparser, which treats '%' as interpolation
+    # syntax — URL-escaped characters in the password (e.g. %2A) would crash it.
+    # Escaping '%' -> '%%' round-trips back to the literal URL when read.
+    config.set_main_option('sqlalchemy.url', database_url.replace('%', '%%'))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

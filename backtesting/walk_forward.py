@@ -1,4 +1,4 @@
-"""Walk-forward validation runner for RAFund ML4T.
+"""Walk-forward validation runner for Raf3nd ML4T.
 
 This module executes the backtest engine over a series of train/test folds and
 aggregates out-of-sample performance metrics for validation gate reporting.

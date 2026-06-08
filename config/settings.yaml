@@ -38,6 +38,14 @@ strategy:
   leg_allocation_pct: 0.18
   stop_loss_spread_pct: 0.03
   max_holding_days: 30
+  # Phase 1 (alpha roadmap): permutation-entropy tradeability filter.
+  # Entries are suppressed when the spread's normalized permutation entropy is
+  # >= entropy_threshold (i.e. a noisy / unpredictable regime). Set
+  # entropy_enabled: false to disable the gate entirely.
+  entropy_enabled: true
+  entropy_threshold: 0.95   # calibrated to daily-spread PE (median ~0.93)
+  entropy_window: 30
+  entropy_embedding: 3
 
 backtesting:
   commission: 0.001
@@ -52,11 +60,23 @@ monitoring:
 retraining:
   schedule_cron: "0 2 * * 0"
   drift_check_interval_minutes: 60
+  # Only these symbols have feature rows in the `features` table
+  # (pairs ADA/USDT<->DOT/USDT and ADA/USDT<->LINK/USDT). The previous
+  # BTC/ETH/SOL/BNB entries had zero feature rows so every training job
+  # produced no data.
   symbols:
-    - BTC/USDT
-    - ETH/USDT
-    - SOL/USDT
-    - BNB/USDT
+    - ADA/USDT
+    - DOT/USDT
+    - LINK/USDT
   models:
     - factor_model
     - stat_arb
+  # TimeSeriesSplitter params (months). With daily ('1d') data the default
+  # 12/3/6 splitter needs >=15 months of span; sized here against the
+  # validation window (see validator._load_validation_data, 24 months)
+  # so each symbol yields >=1 walk-forward fold.
+  walk_forward:
+    train_months: 6
+    test_months: 3
+    step_months: 3
+    min_train_months: 6

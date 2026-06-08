@@ -1,4 +1,4 @@
-"""Model inference, blocking, and latency tracking for RAFund ML4T."""
+"""Model inference, blocking, and latency tracking for Raf3nd ML4T."""
 
 from __future__ import annotations
 

@@ -1,0 +1,245 @@
+# CI pipeline for rafund-ml4t (Python 3.12 quant-trading repo)
+#
+# Job DAG:
+#
+#     lint ─┐
+#           ├─► coverage ──► build
+#     unit ─┤
+#           └─► integration ─┘
+#
+#   - lint + unit run in parallel (fast feedback, no DB needed)
+#   - coverage + integration run after both succeed
+#   - build runs last (package import smoke + byte-compile)
+#
+# NOTE ON REPO PREREQUISITES (see also the "Prerequisites" section in the PR/report):
+#   * `config/constants.py` currently has a stray `</content>` tag on its last
+#     line (corrupted file) which is a hard SyntaxError. Until that single line
+#     is removed, ~10 test modules fail to import and `compileall` fails, so the
+#     unit / coverage / build jobs below will be RED. Fix that first.
+#   * pytest-cov is already in requirements.txt (good).
+#   * There is no pyproject.toml / setup.py, so this repo is run-as-source (not a
+#     pip-installable package). The build job therefore does an import smoke test
+#     + compileall rather than `pip install .`.
+#   * There is no [tool.ruff] / ruff.toml / [tool.pytest] config and no pytest
+#     markers. To make lint meaningfully enforced and integration tests
+#     selectable, add a `[tool.ruff]` section + a `pytest.ini`/pyproject with
+#     `markers = ["integration: ..."]`. Until then, lint is advisory
+#     (continue-on-error) and integration selects DB tests by keyword.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # LINT — advisory (continue-on-error). ruff is NOT in requirements.txt, so we
+  # install it here. Flip `continue-on-error` to false (or delete it) once the
+  # repo adds a [tool.ruff] config and the existing lint debt is cleaned up, to
+  # make lint a BLOCKING gate.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff lint
+        run: ruff check . --exclude venv
+
+      - name: Ruff format check
+        run: ruff format --check . --exclude venv
+
+  # ---------------------------------------------------------------------------
+  # UNIT — the bulk of the suite; tests mock the DB so no Postgres is needed.
+  # BLOCKING. The integration-only / live-DB tests are deselected by keyword so
+  # this job stays offline and deterministic.
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Unit tests (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        env:
+          # Force JSON structured logs in CI so output is machine-parseable.
+          LOG_FORMAT: json
+          LOG_LEVEL: WARNING
+        run: |
+          pytest -q --maxfail=1 \
+            -k "not integration and not retraining_integration"
+
+  # ---------------------------------------------------------------------------
+  # INTEGRATION — spins up Postgres 16 as a service, runs Alembic migrations,
+  # then runs DB-touching tests. The repo has FEW true live-DB tests (most mock
+  # psycopg2), so this is marked allowed-to-be-partial via continue-on-error:
+  # the Postgres service + migrations are wired correctly, but a green/empty
+  # result here must not block the pipeline. Tighten once real integration
+  # tests + an `integration` pytest marker exist.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Integration tests (Postgres)
+    runs-on: ubuntu-latest
+    needs: [lint, unit]
+    continue-on-error: true
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rafund
+          POSTGRES_PASSWORD: rafund_ci
+          POSTGRES_DB: rafund
+        ports:
+          - 5432:5432
+        # Health check so the job waits until Postgres accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U rafund -d rafund"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://rafund:rafund_ci@localhost:5432/rafund
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: rafund
+      DB_USER: rafund
+      DB_PASSWORD: rafund_ci
+      LOG_FORMAT: json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Alembic migrations
+        run: alembic upgrade head
+
+      - name: Run DB-touching tests
+        run: |
+          # Select integration-style tests by keyword (no marker exists yet).
+          # `|| true`-style tolerance is handled by continue-on-error above.
+          pytest -q -k "integration or db or database or retraining_integration"
+
+  # ---------------------------------------------------------------------------
+  # COVERAGE — full offline suite under coverage. Reports to the run summary and
+  # uploads the XML artifact.
+  #
+  # TARGET coverage: 80% (the goal for this codebase).
+  # ENFORCED gate:   --cov-fail-under=60  (realistic current floor).
+  #
+  # Why 60 and not 80: today the *collectable* offline suite sits well below 80%
+  # (and the constants.py SyntaxError zeroes out 10 modules entirely). 60 is a
+  # ratchet that passes once constants.py is fixed; raise it toward 80 as
+  # coverage improves. Bump this number — don't lower it — over time.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage (gate 60% / target 80%)
+    runs-on: ubuntu-latest
+    needs: [lint, unit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        env:
+          LOG_FORMAT: json
+          LOG_LEVEL: WARNING
+        run: |
+          pytest -q \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=60 \
+            -k "not integration and not retraining_integration"
+
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # BUILD — final gate. No pyproject/setup.py exists, so this is an import smoke
+  # test of every top-level package + a full byte-compile of the tree. This is
+  # what catches the kind of corruption currently in config/constants.py.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build / import smoke
+    runs-on: ubuntu-latest
+    needs: [integration, coverage]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile entire source tree
+        run: python -m compileall -q config data features models monitoring portfolio strategies backtesting main.py
+
+      - name: Import smoke test (top-level packages)
+        run: |
+          python -c "import config, data, features, models, monitoring, portfolio, strategies, backtesting; print('import smoke OK')"

@@ -182,10 +182,9 @@ def test_run_drift_check_insufficient_data_returns_none():
 # --------------------------------------------------------------------------- #
 # FeatureDriftDetector.load_current_distribution
 # --------------------------------------------------------------------------- #
-@patch("monitoring.drift_detector.pd.read_sql")
-def test_load_current_distribution_selects_feature_columns(read_sql):
+def test_load_current_distribution_selects_feature_columns():
     db = MagicMock()
-    read_sql.return_value = pd.DataFrame(
+    db.read_sql.return_value = pd.DataFrame(
         {
             "timestamp": pd.date_range("2024-01-01", periods=3, freq="h"),
             "spread": [1.0, 2.0, 3.0],
@@ -198,13 +197,12 @@ def test_load_current_distribution_selects_feature_columns(read_sql):
 
     assert list(result.columns) == ["spread", "z_score"]
     assert len(result) == 3
-    db.return_connection.assert_called_once()
+    db.read_sql.assert_called_once()
 
 
-@patch("monitoring.drift_detector.pd.read_sql")
-def test_load_current_distribution_empty_returns_named_columns(read_sql):
+def test_load_current_distribution_empty_returns_named_columns():
     db = MagicMock()
-    read_sql.return_value = pd.DataFrame()
+    db.read_sql.return_value = pd.DataFrame()
     detector = FeatureDriftDetector(model_name="m")
 
     result = detector.load_current_distribution(db, "BTC/USDT", ["spread"])
