@@ -4,6 +4,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from config.constants import PERIODS_PER_YEAR
 from backtesting.window_engine import (
@@ -14,6 +15,7 @@ from backtesting.window_engine import (
     WalkForwardWindowEngine,
     classify_passes,
     compute_regime,
+    compute_regime_slope,
     expand_param_grid,
     generate_windows,
     _compute_metrics_from_signals,
@@ -234,3 +236,85 @@ def test_engine_routes_single_pairs_and_funding():
     assert any("|" in r.symbol for r in res)
     assert all(np.isfinite(r.sharpe_ratio) for r in res)
     assert all(r.max_drawdown_pct <= 100.0001 for r in res)
+
+
+# ── compute_regime_slope ──────────────────────────────────────────────────────
+
+def test_slope_regime_detects_uptrend():
+    n = 300
+    close = pd.Series(np.linspace(100, 300, n))  # clean uptrend
+    df = pd.DataFrame({"close": close, "high": close * 1.01, "low": close * 0.99})
+    trend, vol, direction = compute_regime_slope(df, window=20)
+    assert 0.0 <= trend <= 1.0, "slope_trend must be in [0, 1]"
+    assert trend > 0.0, "Clean uptrend must produce non-zero slope trend"
+    assert direction == "bull"
+
+
+def test_slope_regime_safe_on_zero_crossing_series():
+    """Funding rates oscillate around zero — compute_regime_slope must not crash."""
+    n = 300
+    rate = pd.Series(np.sin(np.linspace(0, 20 * np.pi, n)) * 0.01)  # zero-crossing
+    df = pd.DataFrame({"close": rate})
+    trend, vol, direction = compute_regime_slope(df, window=20)
+    assert np.isfinite(trend)
+    assert np.isfinite(vol)
+    assert direction in ("bull", "bear", "neutral")
+
+
+def test_slope_regime_negative_values_safe():
+    """Series with negative values (e.g. negative funding rates) must not crash."""
+    n = 200
+    close = pd.Series(np.linspace(-0.05, 0.05, n))
+    df = pd.DataFrame({"close": close})
+    trend, vol, direction = compute_regime_slope(df, window=20)
+    assert np.isfinite(trend)
+    assert np.isfinite(vol)
+
+
+def test_slope_regime_returns_neutral_on_too_short_series():
+    df = pd.DataFrame({"close": [1.0, 2.0, 3.0]})  # 3 < window=20
+    trend, vol, direction = compute_regime_slope(df, window=20)
+    assert (trend, vol, direction) == (0.0, 0.0, "neutral")
+
+
+def test_slope_regime_flat_has_low_trend():
+    n = 300
+    close = pd.Series([100.0] * n)  # perfectly flat
+    df = pd.DataFrame({"close": close})
+    trend, vol, direction = compute_regime_slope(df, window=20)
+    # A completely flat series has 0 pct-change std → tanh(0) = 0
+    assert trend == pytest.approx(0.0, abs=0.01)
+
+
+# ── Leaderboard → mutation feedback loop ─────────────────────────────────────
+
+def test_ranked_mutation_grid_prioritises_high_sharpe_params():
+    """Params with higher historical Sharpe should appear first in the ranked grid."""
+    import pytest
+    from strategies.ema_crossover import EMACrossover
+
+    strat = EMACrossover()
+
+    class FakeDB:
+        def read_sql(self, query, *args, **kwargs):
+            # Simulate leaderboard showing fast=50,slow=200 did well historically
+            return pd.DataFrame([{
+                "strategy_name": "EMA Crossover",
+                "symbol": "BTC/USDT",
+                "params": '{"fast": 50, "slow": 200}',
+                "avg_sharpe": 2.5,
+            }])
+        def get_prices(self, *a, **k): return None
+        def get_feature_pairs(self): return []
+        def get_funding_rates(self, *a): return None
+        def insert_engine_results(self, rows): pass
+
+    engine = WalkForwardWindowEngine(db=FakeDB(), strategies=[strat], symbols=["BTC/USDT"])
+    # Force cache to be loaded
+    engine._leaderboard_cache = engine._load_leaderboard_cache()
+
+    ranked = engine._ranked_mutation_grid(strat, "BTC/USDT", tried_params=set())
+    # The highest-scoring combo (fast=50, slow=200) should come first
+    assert ranked[0] == {"fast": 50, "slow": 200}, (
+        "Historically best params should be ranked first in mutation order."
+    )

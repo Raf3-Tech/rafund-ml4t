@@ -28,27 +28,41 @@ def test_optimizer_defaults():
 
 def test_calculate_position_size_long():
     opt = PortfolioOptimizer(max_position_size=0.2)
-    # capital 100k, max alloc 20k, price 100 -> 200 units, long
+    # capital 100k, max alloc 20k, price 100 -> 200.0 units, long
     size = opt.calculate_position_size(signal=1, price=100.0, capital=100000)
-    assert size == 200
+    assert size == pytest.approx(200.0)
 
 
 def test_calculate_position_size_short_is_negative():
     opt = PortfolioOptimizer(max_position_size=0.2)
     size = opt.calculate_position_size(signal=-1, price=100.0, capital=100000)
-    assert size == -200
+    assert size == pytest.approx(-200.0)
 
 
 def test_calculate_position_size_flat_signal_is_zero():
     opt = PortfolioOptimizer()
-    assert opt.calculate_position_size(signal=0, price=50.0, capital=100000) == 0
+    assert opt.calculate_position_size(signal=0, price=50.0, capital=100000) == pytest.approx(0.0)
 
 
-def test_calculate_position_size_floors_units():
+def test_calculate_position_size_fractional_btc():
+    """Crypto: $5k account at 20% allocation with BTC ~$60k must return fractional units, not 0."""
     opt = PortfolioOptimizer(max_position_size=0.2)
-    # 20000 / 3 = 6666.67 -> int truncates to 6666
+    size = opt.calculate_position_size(signal=1, price=60000.0, capital=5000)
+    # 5000 * 0.2 / 60000 ≈ 0.01666667 BTC
+    assert size == pytest.approx(0.01666667, rel=1e-5)
+    assert size > 0, "Fractional position must be positive; integer truncation would give 0."
+
+
+def test_calculate_position_size_fractional_precision():
+    opt = PortfolioOptimizer(max_position_size=0.2)
+    # 20000 / 3 = 6666.66666... -> rounded to 8dp: 6666.66666667
     size = opt.calculate_position_size(signal=1, price=3.0, capital=100000)
-    assert size == 6666
+    assert size == pytest.approx(6666.66666667, rel=1e-6)
+
+
+def test_calculate_position_size_zero_price_returns_zero():
+    opt = PortfolioOptimizer()
+    assert opt.calculate_position_size(signal=1, price=0.0, capital=100000) == 0.0
 
 
 def test_allocate_capital_basic():
@@ -56,8 +70,8 @@ def test_allocate_capital_basic():
     prices = pd.Series({'AAA': 100.0, 'BBB': 50.0})
     signals = pd.Series({'AAA': 1, 'BBB': -1})
     positions = opt.allocate_capital(prices, signals, capital=100000)
-    assert positions['AAA'] == 200   # 20000/100
-    assert positions['BBB'] == -400  # -(20000/50)
+    assert positions['AAA'] == pytest.approx(200.0)   # 20000/100
+    assert positions['BBB'] == pytest.approx(-400.0)  # -(20000/50)
 
 
 def test_allocate_capital_skips_unknown_asset():
@@ -88,12 +102,12 @@ def test_rebalance_produces_required_trades():
     opt = PortfolioOptimizer(max_position_size=0.2)
     prices = pd.Series({'AAA': 100.0, 'BBB': 50.0})
     target_signals = pd.Series({'AAA': 1, 'BBB': 0})
-    current = {'AAA': 50, 'CCC': 30}
+    current = {'AAA': 50.0, 'CCC': 30.0}
     trades = opt.rebalance(current, target_signals, prices, capital=100000)
-    # target AAA = 200, current 50 -> +150
-    assert trades['AAA'] == 150
-    # CCC held but no target -> liquidate -30
-    assert trades['CCC'] == -30
+    # target AAA = 200.0, current 50.0 -> +150.0
+    assert trades['AAA'] == pytest.approx(150.0)
+    # CCC held but no target -> liquidate -30.0
+    assert trades['CCC'] == pytest.approx(-30.0)
     # BBB target 0 (flat signal), current 0 -> no trade entry
     assert 'BBB' not in trades
 
@@ -102,7 +116,7 @@ def test_rebalance_no_trades_when_aligned():
     opt = PortfolioOptimizer(max_position_size=0.2)
     prices = pd.Series({'AAA': 100.0})
     target_signals = pd.Series({'AAA': 1})
-    current = {'AAA': 200}  # already at target
+    current = {'AAA': 200.0}  # already at target
     trades = opt.rebalance(current, target_signals, prices, capital=100000)
     assert trades == {}
 

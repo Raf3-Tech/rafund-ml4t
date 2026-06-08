@@ -178,7 +178,7 @@ GATE RULE).
 
 | # | Item | File | Status |
 |---|---|---|---|
-| E1 | Implement fractional crypto sizing in `PortfolioOptimizer` — replace `int(value/price)` with `round(value/price, 8)` | `portfolio/optimizer.py:41` | ⏳ |
+| E1 | Implement fractional crypto sizing in `PortfolioOptimizer` — replace `int(value/price)` with `round(value/price, 8)` | `portfolio/optimizer.py:41` | ✅ DONE (session research-impl) |
 | E2 | Add Kelly sizing (fractional, capped at 0.25) to `RiskManager` | `portfolio/risk.py` | ⏳ |
 | E3 | Add volatility targeting position scalar | `portfolio/risk.py` | ⏳ |
 | E4 | Wire `RiskManager.check_position_limits` into the engine's `_open_position` | `backtesting/engine.py` | ⏳ |
@@ -205,7 +205,7 @@ GATE RULE).
 
 ---
 
-## Spec completion status  (updated 2026-06-07, session "opus-audit")
+## Spec completion status  (updated 2026-06-08, session "research-impl")
 
 | Phase | Component | Status | Notes |
 |---|---|---|---|
@@ -218,13 +218,19 @@ GATE RULE).
 | 6 | Funding data | ✅ done | Collector + `funding_rates` table + `funding_rate_arb.py` + `db.get_funding_rates`. **Engine now schedules it** on 8h data (no longer orphaned). |
 | — | Schema / migration | ✅ done | Alembic `0003` (canonical). `engine_results` + `funding_rates`. |
 | — | CLI | ✅ done | `engine` (+filters), `leaderboard` (+`--tier`), `train-classifier`, `collect --funding` wired. |
-| — | Tests for new code | ⚠️ partial | Added: signal-path unification, strategy contract, window-engine internals (30 tests). **Still missing:** leaderboard, funding collector, regime classifier, end-to-end engine run. |
+| — | Tests for new code | ⚠️ partial | Added: signal-path unification, strategy contract, window-engine internals (30 tests), EMA verification (9), ensemble (17), slope-regime (5), leaderboard feedback (1). **Still missing:** leaderboard, funding collector, regime classifier, end-to-end engine run. |
+| — | Research synthesis | ✅ done | `docs/RESEARCH_SYNTHESIS.md` — CryptoTrade, IEEE 11513234/11035368, HMM, funding arb, Kelly, DSR. |
+| — | Fractional sizing | ✅ **FIXED** | `portfolio/optimizer.py`: `round(value/price, 8)` — crypto positions no longer truncate to 0 on a $5k account. |
+| — | Leaderboard → mutation feedback | ✅ done | `WalkForwardWindowEngine._ranked_mutation_grid` — historically high-Sharpe param combos tried first during mutation. |
+| — | Ensemble signal layer | ✅ done | `monitoring/ensemble.py` — majority-vote composite signal (Trust-The-Majority pattern). Not wired into engine (Rule 1). |
+| — | Slope-based regime | ✅ done | `compute_regime_slope()` in `window_engine.py` — safe for zero/negative series; `tanh`-normalised [0,1] trend. |
 
 **Headline:** Phases 1–6 are now functionally complete and the suite is green
-(261 passed). Phase 1 unified; Phase 3 carry/annualization/NaN bugs fixed and pairs
-+ funding wired into the engine. **Remaining:** reuse `BacktestEngine` instead of the
-engine's private P&L loop (architectural, optional); tests for leaderboard/funding
-collector/classifier; a real end-to-end engine run against a populated DB.
+(295 passed, up from 261). Research-driven improvements implemented this session:
+fractional sizing fix (P0), EMA verification + tests (P0), leaderboard→mutation
+feedback (P1), ensemble signal layer (P1), slope-based regime (P1), research
+synthesis doc (P2). **Remaining:** reuse `BacktestEngine` (architectural);
+leaderboard/funding collector/classifier tests; first real engine run vs DB.
 
 ---
 
@@ -232,26 +238,36 @@ collector/classifier; a real end-to-end engine run against a populated DB.
 
 1. ~~Unify the pairs signal path (Phase 1).~~ ✅ DONE (session opus-audit).
 2. ~~√365 Sharpe + NaN guard + cadence-aware funding annualization.~~ ✅ DONE.
-3. ~~Run pairs strategies in the engine via `generate_signals_pair`.~~ ✅ DONE —
-   `window_engine._run_pairs_strategy` + `_run_pair_window`, two-leg mark-to-market.
-4. ~~Run funding strategies in the engine on 8h data.~~ ✅ DONE —
-   `_run_funding_strategy`, additive-income P&L, `db.get_funding_rates` added.
-5. **Reuse `BacktestEngine`** (single-asset marked-to-market + fractional sizing are
-   now fixed) instead of the window engine's private P&L loops — removes the remaining
-   P&L fork (single-asset, pairs, and funding each have their own mark-to-market loop).
-   Optional/architectural; current loops are tested and produce sane results.
-6. **Tests** still needed for: leaderboard scoring/tiers, funding collector pagination,
+3. ~~Run pairs strategies in the engine via `generate_signals_pair`.~~ ✅ DONE.
+4. ~~Run funding strategies in the engine on 8h data.~~ ✅ DONE.
+5. ~~Leaderboard → mutation feedback loop.~~ ✅ DONE (session research-impl) —
+   `_ranked_mutation_grid` tries historically best params first.
+6. **Reuse `BacktestEngine`** instead of the window engine's private P&L loops —
+   removes the P&L fork. Optional/architectural; current loops are tested.
+7. **Tests** still needed for: leaderboard scoring/tiers, funding collector pagination,
    regime classifier gate, and an end-to-end engine run against a temp DB.
-7. **First real run + tuning.** Run `python main.py engine` against the populated DB,
-   then `leaderboard`. Synthetic funding Sharpe looked very high (clean sine input) —
-   sanity-check on real noisy funding data; consider slippage in the funding P&L.
+8. **First real run + tuning.** Run `python main.py engine` against the populated DB,
+   then `leaderboard`. Synthetic funding Sharpe was very high (clean sine input) —
+   **must sanity-check on real noisy Binance funding data**; consider slippage.
+9. **`regime_method` selector** — `compute_regime_slope` exists but is not wired as a
+   selectable option in `_run_window` / `_run_pair_window`. Add a `regime_method` param
+   to `WalkForwardWindowEngine.__init__` and route accordingly.
+10. **Full Kelly fraction sizing** — `portfolio/optimizer.py` now uses fractional units
+    but still allocates a fixed `max_position_size` fraction. Wire Kelly fraction using
+    leaderboard win_rate + avg_sharpe for per-strategy optimal sizing.
+11. **Deflated/Probabilistic Sharpe** in promotion gate — wire into
+    `backtesting/significance.py` + `models/validator.py`; require PSR ≥ benchmark.
+12. **Ensemble wired into engine** — `monitoring/ensemble.py` is a standalone layer.
+    Wire as an optional signal layer in the CLI (`python main.py signals --ensemble`).
+13. **R:R structural enforcement in EMA** — the exit-on-reverse-crossover is the
+    canonical exit. Structural stop/target would fork the P&L loop (Rule 1 violation)
+    unless implemented as a `max_hold_bars` or ATR-based stop within the strategy.
 
 ---
 
 ## Active claims  (edit before you touch a file; remove when done)
 
-- _(none — single active session as of 2026-06-07. The earlier concurrent-editor
-  collision is resolved: the user confirmed they stopped editing.)_
+- _(none — session research-impl completed 2026-06-08.)_
 
 ---
 
@@ -274,6 +290,34 @@ collector/classifier; a real end-to-end engine run against a populated DB.
 ---
 
 ## Session log  (newest first)
+
+### 2026-06-08 — session "research-impl" (claude-sonnet-4-6) — COMPLETE
+**Phase worked:** P0/P1 research-driven improvements (not a lettered phase)
+**DB health check:** SKIPPED — offline implementation session (no live DB queries)
+**engine_results row count at session start:** unknown (no DB connection)
+**Literature read:** CryptoTrade EMNLP 2024 (abstract); IEEE 11513234 DRL+LLM (abstract via search);
+  IEEE 11035368 EMA (metrics via search); HMM regime BTC 2024-2026; funding arb Sharpe benchmarks;
+  Kelly criterion; Deflated/Probabilistic Sharpe.  Full synthesis: `docs/RESEARCH_SYNTHESIS.md`.
+**Files changed:** `portfolio/optimizer.py`, `backtesting/window_engine.py`,
+  `monitoring/ensemble.py` (new), `tests/test_portfolio.py`, `tests/test_ema_crossover.py` (new),
+  `tests/test_ensemble.py` (new), `tests/test_window_engine.py`, `docs/RESEARCH_SYNTHESIS.md` (new).
+**Tests added:** 34 new tests (9 EMA, 17 ensemble, 5 slope-regime, 1 leaderboard-feedback, 3 fractional sizing)
+**Suite result:** 295 passed, 1 xpassed (was 261 passed, 1 xpassed — no regressions)
+**Changes implemented:**
+  P0: Fractional crypto sizing (`round(value/price, 8)` in optimizer.py — fixes $5k/BTC = 0 units bug)
+  P0: EMA crossover verified correct vs IEEE 11035368; 9 tests pinning signal logic
+  P0: `compute_regime` zero-guard in ATR computation (funding rate zero-crossing safety)
+  P1: Leaderboard→mutation feedback: `_ranked_mutation_grid` sorts by historical Sharpe first
+  P1: `monitoring/ensemble.py` — Trust-The-Majority majority-vote composite signal (not engine-wired)
+  P1: `compute_regime_slope()` — slope-based regime safe for zero/negative series
+  P2: `docs/RESEARCH_SYNTHESIS.md` — full gap analysis, per-paper findings, accessibility log
+**Bugs discovered and logged:** None new (fractional sizing bug was pre-existing/documented in RISK_ENGINE_AUDIT.md)
+**Blocking issues found:** IEEE 11513234 and 11035368 full papers paywalled; CryptoTrade PDF unreadable;
+  key metrics obtained via web search. ResearchGate for EMA paper returned 403.
+**Resume point for next session:** Phase A (prop-firm bug fixes) — A1 daily-loss parenthesization
+  in `backtesting/engine.py:139`, then A2/A3/A4, then A5 (xfails green). Also gap #8: first real
+  engine run vs populated DB to sanity-check FundingRateArb Sharpe.
+**Session limit hit:** no
 
 ### 2026-06-08 — session "playbook-update" (Claude) — COMPLETE
 **Phase worked:** none (docs only)

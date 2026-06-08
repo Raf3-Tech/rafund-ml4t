@@ -24,21 +24,27 @@ class PortfolioOptimizer:
         self.max_position_size = max_position_size
         self.positions = {}
         
-    def calculate_position_size(self, signal: int, price: float, capital: float) -> int:
+    def calculate_position_size(self, signal: int, price: float, capital: float) -> float:
         """
         Calculate position size based on signal and capital.
-        
+
+        Crypto assets trade in fractional units (e.g. 0.00100000 BTC), so this
+        method returns a float rounded to 8 decimal places rather than an integer.
+        Using ``int(value / price)`` would truncate to 0 units on a $5k account at
+        BTC prices (~$60k), silently leaving the position unfilled.
+
         Args:
             signal: Trading signal (1 for long, -1 for short)
             price: Asset price
             capital: Available capital
-            
+
         Returns:
-            Position size (number of units)
+            Position size in fractional units (positive = long, negative = short)
         """
+        if price <= 0:
+            return 0.0
         max_allocation = capital * self.max_position_size
-        position_value = max_allocation
-        position_size = int(position_value / price)
+        position_size = round(max_allocation / price, 8)
         return signal * position_size
     
     def allocate_capital(self, prices: pd.Series, signals: pd.Series, capital: float) -> dict:

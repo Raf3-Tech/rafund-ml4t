@@ -175,7 +175,11 @@ def compute_regime(df: pd.DataFrame) -> Tuple[float, float, str]:
     tr = pd.concat(
         [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
     ).max(axis=1)
-    atr_pct = float((tr / close).mean() * 100) if not close.isna().all() else 0.0
+    # Guard against zero close values (funding rates can cross through zero).
+    safe_close = close.where(close != 0, other=np.nan)
+    atr_pct = float((tr / safe_close).mean() * 100) if not close.isna().all() else 0.0
+    if not np.isfinite(atr_pct):
+        atr_pct = 0.0
 
     # Direction: overall total return positive or negative
     first_valid = close.dropna().iloc[0] if not close.dropna().empty else 1.0
@@ -183,6 +187,86 @@ def compute_regime(df: pd.DataFrame) -> Tuple[float, float, str]:
     direction = "bull" if last_valid >= first_valid else "bear"
 
     return round(r_squared, 4), round(atr_pct, 4), direction
+
+
+def compute_regime_slope(
+    df: pd.DataFrame,
+    window: int = 20,
+) -> Tuple[float, float, str]:
+    """Slope-based regime detector, safe for non-positive series (e.g. funding rates).
+
+    Instead of R² of a linear fit on log-prices (which is undefined for zero/negative
+    close values), this computes the normalised rolling slope (velocity) of percentage
+    changes.  This makes it safe for any numeric series including funding rates that
+    oscillate around zero.
+
+    Trend metric: mean of the absolute rolling slope (rate of change / std-dev of
+    returns), capped to [0, 1].  A value near 1.0 means the series is strongly
+    directional over the window; near 0.0 means mean-reverting / flat.
+
+    Volatility, direction:  identical to ``compute_regime`` (ATR-pct and first/last
+    comparison), so the two detectors are directly comparable on the other two axes.
+
+    Parameters
+    ----------
+    df:
+        DataFrame with a ``close`` column and optionally ``high``/``low``.
+    window:
+        Look-back window for the rolling slope estimate (bars; default 20).
+
+    Returns
+    -------
+    (slope_trend, atr_pct, direction)
+        slope_trend  – float in [0, 1] (normalised absolute slope strength).
+        atr_pct      – same as compute_regime.
+        direction    – "bull", "bear", or "neutral".
+
+    Notes
+    -----
+    Intended as a drop-in alternative to ``compute_regime`` for series where
+    log() is undefined.  Select via ``regime_method="slope"`` (not yet wired
+    into the engine — see AGENTS.md gap P2-6).
+    """
+    close = df["close"].astype(float).reset_index(drop=True)
+    if len(close) < max(5, window):
+        return 0.0, 0.0, "neutral"
+
+    # Percentage-change based slope — safe for any sign of close
+    pct = close.pct_change().fillna(0.0)
+    roll_mean = pct.rolling(window, min_periods=2).mean()
+    roll_std = pct.rolling(window, min_periods=2).std().replace(0, np.nan)
+
+    # Normalised slope: |rolling_mean| / rolling_std  (t-statistic of the drift)
+    norm_slope = (roll_mean.abs() / roll_std).dropna()
+    # Scale to [0, 1] by taking tanh (saturates at ±∞ to 1)
+    if len(norm_slope) > 0:
+        slope_trend = float(np.tanh(float(norm_slope.mean())))
+    else:
+        slope_trend = 0.0
+
+    # Volatility (same as compute_regime)
+    high = df["high"].astype(float).reset_index(drop=True) if "high" in df.columns else close
+    low = df["low"].astype(float).reset_index(drop=True) if "low" in df.columns else close
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    safe_close = close.where(close != 0, other=np.nan)
+    atr_pct = float((tr / safe_close).mean() * 100) if not close.isna().all() else 0.0
+    if not np.isfinite(atr_pct):
+        atr_pct = 0.0
+
+    # Direction (same as compute_regime)
+    first_valid = close.dropna().iloc[0] if not close.dropna().empty else 1.0
+    last_valid = close.dropna().iloc[-1] if not close.dropna().empty else 1.0
+    if last_valid > first_valid:
+        direction = "bull"
+    elif last_valid < first_valid:
+        direction = "bear"
+    else:
+        direction = "neutral"
+
+    return round(slope_trend, 4), round(atr_pct, 4), direction
 
 
 # ── Backtest metrics from signals ─────────────────────────────────────────────
@@ -462,6 +546,66 @@ class WalkForwardWindowEngine:
         self.symbols = symbols or []
         self.commission = commission
         self.run_id = str(uuid.uuid4())
+        # Cache of leaderboard scores loaded once per run (strategy_name → {params_json → score}).
+        # Populated lazily by _leaderboard_param_ranking; empty dict means no prior run data.
+        self._leaderboard_cache: Optional[Dict] = None
+
+    # ── Leaderboard feedback ──────────────────────────────────────────────────
+
+    def _load_leaderboard_cache(self) -> Dict:
+        """Load historical leaderboard scores from engine_results (best Sharpe per params combo).
+
+        Implements the leaderboard → mutation feedback loop: when _mutate chooses
+        which parameter combinations to try, it prioritises combos that have
+        historically achieved good Sharpe ratios on other windows of the same
+        strategy-symbol pair.  This is a lightweight, non-structural change —
+        the existing grid is still exhausted if needed, just in a smarter order.
+
+        Returns a nested dict: strategy_name → symbol → params_json → avg_sharpe.
+        """
+        cache: Dict = {}
+        try:
+            df = self.db.read_sql("""
+                SELECT strategy_name, symbol, params, AVG(sharpe_ratio) AS avg_sharpe
+                FROM engine_results
+                WHERE permissive_pass = TRUE
+                GROUP BY strategy_name, symbol, params
+            """)
+            if df is None or df.empty:
+                return cache
+            for _, row in df.iterrows():
+                sn = row["strategy_name"]
+                sym = row["symbol"]
+                par = row["params"] if isinstance(row["params"], str) else json.dumps(row["params"], sort_keys=True)
+                sharpe = float(row["avg_sharpe"]) if row["avg_sharpe"] is not None else 0.0
+                cache.setdefault(sn, {}).setdefault(sym, {})[par] = sharpe
+        except Exception as e:
+            logger.debug("Leaderboard cache load skipped (no prior data or DB unavailable): %s", e)
+        return cache
+
+    def _ranked_mutation_grid(
+        self, strategy, symbol: str, tried_params: set
+    ) -> List[Dict]:
+        """Return mutation candidates sorted by historical leaderboard score (desc).
+
+        Candidates that have been tried in this window are excluded.
+        This implements the CryptoTrade-inspired feedback loop: the reflective
+        mechanism maps to using past window scores to seed future mutation order,
+        so strategies that worked in similar market conditions are tried first.
+        """
+        if self._leaderboard_cache is None:
+            self._leaderboard_cache = self._load_leaderboard_cache()
+
+        all_combos = _mutation_grid(strategy)
+        scores = self._leaderboard_cache.get(strategy.name, {}).get(symbol, {})
+
+        def _score_combo(params: Dict) -> float:
+            key = json.dumps(params, sort_keys=True)
+            return scores.get(key, 0.0)
+
+        # Sort descending by historical score; untried combos come first if ≥ 0
+        ranked = sorted(all_combos, key=_score_combo, reverse=True)
+        return [p for p in ranked if json.dumps(p, sort_keys=True) not in tried_params]
 
     def run(
         self,
@@ -668,10 +812,12 @@ class WalkForwardWindowEngine:
         if parent_result.mutation_generation >= MAX_MUTATION_GENERATIONS:
             return []
 
-        all_combos = _mutation_grid(strategy)
+        # Use leaderboard-ranked ordering: historically successful param combos
+        # are tried first (feedback loop: leaderboard → mutation ordering).
+        ranked_combos = self._ranked_mutation_grid(strategy, symbol, tried_params)
         mutation_results: List[RunResult] = []
 
-        for params in all_combos:
+        for params in ranked_combos:
             key = json.dumps(params, sort_keys=True)
             if key in tried_params:
                 continue
