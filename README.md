@@ -1,134 +1,152 @@
-# ML4T - Machine Learning for Trading
+# Raf3nd ML4T
 
-A comprehensive Python framework for algorithmic trading using machine learning, backtesting, and data collection from cryptocurrency exchanges.
+A research-grade, multi-strategy walk-forward backtesting engine for cryptocurrency markets. Phases 1–6 are functionally complete.
 
-## Overview
-
-ML4T is a research-grade trading system that combines:
-- **Automated data collection** from Binance exchange
-- **Machine learning models** for price prediction and signal generation
-- **Backtesting engine** with realistic transaction costs and slippage
-- **Statistical arbitrage strategies** with fixed-window mean reversion
-- **Portfolio analytics** and risk metrics
-- **Real-time monitoring** of backtest performance
-
-ML4T is designed for quant researchers, quantitative traders, and trading enthusiasts to develop, test, and analyze trading strategies.
+> **Status: Research-grade / pre-production.** Numbers are structurally sound but known limitations (documented below) mean no headline metric should be taken as production-validated. Read the Known Limitations section before drawing any conclusions from backtest results.
 
 ---
 
-## Key Features
+## What This Is
 
-### 📊 Data Management
-- Automatic price data collection from Binance
-- PostgreSQL database for efficient storage and querying
-- Data validation and quality checks
-- Support for multiple timeframes (1m, 5m, 15m, 1h, 1d)
-
-### 🤖 Machine Learning
-- Factor models for market prediction
-- Statistical arbitrage strategies
-- Feature engineering and technical indicators
-- Model training and validation pipelines
-- Prediction modules for analysis
-
-### ⚙️ Backtesting
-- Realistic order execution simulation
-- Transaction costs and slippage modeling
-- Performance metrics (Sharpe ratio, max drawdown, win rate, etc.)
-- Fixed-window analysis for parameter optimization
-- Detailed trade logs and diagnostics
-
-### 💼 Portfolio Analytics
-- Risk metrics calculation (Sharpe ratio, max drawdown, Sortino)
-- Trade statistics and performance analysis
-- Correlation analysis
-- P&L attribution
+Raf3nd ML4T is a quantitative trading research platform built around a walk-forward window engine that ranks strategies across three regime tiers (CONSERVATIVE / STANDARD / PERMISSIVE). It supports 12 strategies spanning single-asset, pairs, and perpetual-funding approaches, with ML-assisted regime detection, model lifecycle management, and an ops dashboard.
 
 ---
 
-## Project Structure
+## Module Tree
 
 ```
-ml4t/
-├── backtesting/              # Backtesting engine
-│   └── engine.py            # Backtest orchestrator with metrics
+rafund-ml4t/
+├── backtesting/
+│   ├── engine.py              # Single-asset backtest engine (mark-to-market, prop-firm rules)
+│   ├── window_engine.py       # Walk-forward window engine — dispatches all three strategy kinds
+│   ├── engine_eval.py         # Pairs evaluation helpers
+│   ├── costs.py               # Transaction cost model (flat + slippage)
+│   ├── significance.py        # Permutation + t-test significance
+│   ├── splitter.py            # Walk-forward fold splitter (expanding + rolling)
+│   ├── validation.py          # Single-entry walk-forward validation
+│   ├── reporting.py           # Equity-curve reporting
+│   ├── walk_forward.py        # Walk-forward validation runner
+│   └── persist.py             # Result persistence helpers
 │
-├── data/                    # Data collection and storage
-│   ├── db.py               # PostgreSQL database connection
-│   ├── schema.sql          # Schema overview (REFERENCE ONLY; Alembic is canonical)
-│   ├── collectors/         # Exchange data collectors
-│   │   └── binance_collector.py
-│   ├── clear_database.py   # Database maintenance
-│   └── verify_data.py      # Data validation
+├── strategies/
+│   ├── base.py                # BaseSingleAssetStrategy / BasePairsStrategy contracts
+│   ├── stat_arb.py            # StatArbStrategy (unified signal core) + StatArbPairsStrategy
+│   ├── funding_rate_arb.py    # FundingRateArb (8h perpetual carry)
+│   ├── factor_model.py        # ML factor model strategy
+│   ├── ema_crossover.py
+│   ├── macd.py
+│   ├── rsi_extremes.py
+│   ├── bollinger_reversion.py
+│   ├── donchian_breakout.py
+│   ├── atr_volatility_breakout.py
+│   ├── keltner_squeeze.py
+│   ├── supertrend.py
+│   ├── dca.py
+│   └── hodl_rebalance.py
 │
-├── models/                 # Machine learning
-│   ├── predict.py         # Prediction module
-│   └── train.py           # Model training
+├── monitoring/
+│   ├── leaderboard.py         # Strategy leaderboard scoring (score = sharpe×win_rate×consistency)
+│   ├── metrics.py             # Returns / Sharpe / Sortino / Calmar / win-rate
+│   ├── dashboard_app.py       # Flask ops-dashboard (model lifecycle)
+│   ├── dashboard_data.py      # Dashboard data layer
+│   ├── drift_detector.py      # Feature drift detection
+│   ├── drift_visualization.py # Plotly drift reports
+│   └── run_dashboard.py       # Dashboard launcher
 │
-├── strategies/            # Trading strategies
-│   ├── factor_model.py    # Factor model strategy
-│   └── stat_arb.py        # Statistical arbitrage
+├── models/
+│   ├── train.py               # ML model training with MLflow integration
+│   ├── validator.py           # Model validation + OOS promotion gating
+│   ├── regime_classifier.py   # Regime classifier (requires 200+ rows to activate)
+│   ├── regime_classifier.pkl  # Trained regime classifier
+│   ├── retraining_scheduler.py# Automated retraining + drift scheduling
+│   ├── predict.py             # Inference, blocking, latency tracking
+│   └── blocker.py             # Stale/drift gate enforcement
 │
-├── features/              # Feature engineering
-│   ├── price_features.py  # Technical indicators
-│   └── factor_models.py   # Factor computations
+├── portfolio/
+│   ├── risk.py                # VaR, CVaR, max drawdown, position limits
+│   └── optimizer.py           # Position sizing / capital allocation
+│   (Note: not wired into the backtest engine — library-only utilities)
 │
-├── portfolio/             # Portfolio analysis
-│   ├── optimizer.py      # Portfolio optimization
-│   └── risk.py          # Risk analytics
+├── data/
+│   ├── db.py                  # PostgreSQL connection + all query methods
+│   ├── schema.sql             # Reference overview (Alembic is canonical)
+│   ├── clear_database.py      # DB maintenance
+│   └── collectors/
+│       ├── binance_collector.py
+│       └── binance_funding_collector.py  # 8h funding rate collector
 │
-├── monitoring/            # Performance tracking
-│   └── metrics.py        # Metrics calculation
+├── features/
+│   ├── price_features.py      # Technical indicators + spread features
+│   └── permutation_entropy.py # Permutation entropy gate
 │
-├── config/                # Configuration
-│   └── settings.yaml     # Settings file
+├── labels/
+│   ├── triple_barrier.py      # Triple-barrier label generation
+│   └── barrier_ga.py          # GA-assisted barrier tuning
 │
-├── tests/                 # Test suite
-│   ├── test_setup.py
-│   ├── test_metrics.py
-│   └── test_window_approaches.py
+├── config/
+│   ├── settings.yaml          # Strategy + engine parameters
+│   ├── constants.py           # PERIODS_PER_YEAR = 365 (24/7 crypto)
+│   ├── loader.py              # Config loading
+│   └── mlflow_config.py       # MLflow run utilities
 │
-├── dev/                   # Development utilities
-│   └── diagnostics/      # Diagnostic tools
+├── alembic/
+│   └── versions/
+│       ├── 0001_...           # Initial schema
+│       ├── 0002_...           # engine_results table
+│       └── 0003_add_engine_results_funding_rates.py  # funding_rates table
 │
-├── docs/                  # Documentation
-│   └── ANALYSIS_ROLLING_WINDOW_PROBLEM.md
-│
-├── main.py               # Main entry point
-├── requirements.txt      # Dependencies
-└── logs/                 # Application logs
+├── tests/                     # 261 passed, 1 xpassed
+├── docs/
+│   ├── QUANT_AUDIT_REPORT.md
+│   └── STRATEGY_ENGINE_DESIGN.md
+├── .github/workflows/ci.yml   # CI with ratcheting coverage gate
+├── main.py                    # CLI entry point
+├── requirements.txt
+└── requirements.lock          # Pinned reproducible environment
 ```
 
 ---
 
-## Prop Firm Evaluation Rules
+## Phase Completion (per AGENTS.md)
 
-The backtesting engine enforces strict proprietary trading firm evaluation rules aligned with industry standards (similar to Breakout, funded account challenges, etc.).
+| Phase | Component | Status |
+|---|---|---|
+| 0 | Regime tiers (CONSERVATIVE/STANDARD/PERMISSIVE) | ✅ complete |
+| 1 | Unified signal path | ✅ complete — all call sites route through `StatArbStrategy.signals_from_pair_prices` |
+| 2 | Strategy library (base + 12 strategies) | ✅ complete |
+| 3 | Walk-forward window engine (carry, NaN-guard, √365 Sharpe) | ✅ complete |
+| 4 | Strategy leaderboard with tier scoring | ✅ complete |
+| 5 | Regime classifier | ✅ present (needs 200+ rows of engine results to activate) |
+| 6 | Funding data pipeline (collector + table + strategy + engine dispatch) | ✅ complete |
+| — | Alembic schema (0003: engine_results + funding_rates) | ✅ complete |
+| — | CLI (engine, leaderboard, train-classifier, collect --funding) | ✅ complete |
 
-### Account & Profit Targets
+**Test suite: 261 passed, 1 xpassed.**
 
-| Rule | Value |
-|------|-------|
-| **Account Size** | $5,000 |
-| **Step 1 Profit Target** | +$250 (5% return) |
-| **Step 2 Profit Target** | +$500 (10% return) |
-| **Evaluation Fee** | $49.99 |
+---
 
-### Risk Controls
+## Known Gaps (honest)
 
-| Rule | Value | Details |
-|------|-------|---------|
-| **Max Daily Loss** | 4% | Maximum loss per calendar day: $200 |
-| **Max Drawdown** | 6% | Equity floor: $4,700 |
-| **Max Leverage** | 5x | Notional exposure vs account equity |
+1. **Missing tests:** leaderboard scoring/tiers, funding collector pagination, regime classifier gate, and a true end-to-end engine run against a temp DB are not yet covered by tests.
+2. **No real engine run yet:** `python main.py engine` has not been run against a populated DB. Synthetic funding Sharpe looked very high on clean sine input — sanity-check on real data is pending.
+3. **`BacktestEngine` reuse (optional / architectural):** the window engine has three private P&L loops (single-asset, pairs, funding). Consolidating onto `BacktestEngine` is an architectural cleanup, not a correctness bug — current loops are tested and produce sane results.
 
-### Rules Summary
+---
 
-- **Profit Progression:** After hitting Step 1 (+$250), unlock Step 2 challenge (+$500 total)
-- **Daily Stop Loss:** If you lose 4% ($200) in a single day, trading halts for remainder of day
-- **Drawdown Floor:** If equity drops below $4,700 (6% drawdown), account is **failed**
-- **Leverage Limit:** Maximum notional exposure = 5x account equity
-- **Commission:** 0.1% per trade (bid-ask spread)
+## Known Limitations
+
+These are documented research-stage constraints, not hidden bugs:
+
+| Limitation | Where | Impact |
+|---|---|---|
+| **Single-asset mark-to-market** — open single-asset positions contribute $0 to equity | `backtesting/engine.py` | Prop-firm drawdown/daily-loss controls see only realised P&L. Pairs backtest is correctly marked. |
+| **Same-bar fills** — signals and fills resolve on the same bar | `backtesting/engine.py` | Look-ahead bias in execution; next-bar-open fills would be more conservative. |
+| **Flat slippage** — cost model uses a fixed fraction regardless of volume or volatility | `backtesting/costs.py` | Understates costs in thin markets; overstates in deep liquid markets. |
+| **`portfolio/` not wired into backtest** — `RiskManager` / `PortfolioOptimizer` exist as importable utilities but are not called from the engine | `portfolio/` | Kelly sizing and VaR limits are computed separately and do not feed back into position sizing during a run. |
+| **Prop-firm control bugs** (audited) — daily-loss parenthesization error, leverage-clip clears the daily halt | `backtesting/engine.py:139,175` | Two prop-firm compliance controls are currently non-functional. |
+| **Regime classifier needs data** — the classifier is non-blocking by design but returns `None` until the `engine_results` table has 200+ rows | `models/regime_classifier.py` | Regime-gated decisions fall back to default tier until enough engine runs accumulate. |
+
+See `RAFUND_MASTER_AUDIT.md`, `docs/QUANT_AUDIT_REPORT.md`, and `RISK_ENGINE_AUDIT.md` for the full audit trail.
 
 ---
 
@@ -136,480 +154,82 @@ The backtesting engine enforces strict proprietary trading firm evaluation rules
 
 ### Prerequisites
 
-- **Python 3.8+**
-- **PostgreSQL 12+**
-- **pip** or **conda**
+- Python 3.8+
+- PostgreSQL 12+
 
-### Step 1: Clone the Repository
-
-```bash
-git clone <repository-url>
-cd ml4t
-```
-
-### Step 2: Set Up Python Environment
+### Setup
 
 ```bash
-# Create virtual environment
+git clone https://github.com/Raf3-Tech/rafund-ml4t.git
+cd rafund-ml4t
+
 python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
 
-# Activate it
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+pip install -r requirements.lock  # pinned, reproducible
+# or: pip install -r requirements.txt  # minimum bounds
 ```
 
-### Step 3: Configure the Database
-
-Create a `.env` file or export `DATABASE_URL` directly. Example:
+### Database
 
 ```bash
-export DATABASE_URL="postgresql://user:password@localhost:5432/rafund"
-```
+# Set connection (DATABASE_URL takes precedence over DB_* vars)
+export DATABASE_URL="postgresql://user:password@localhost:5432/rafund_ml4t"
 
-If you prefer environment variables instead of a single URL, set:
-
-```bash
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_NAME=rafund
-export DB_USER=postgres
-export DB_PASSWORD=postgres
-```
-
-Then run the Alembic baseline migration:
-
-```bash
+# Provision schema
 alembic upgrade head
 ```
 
-### Step 4: Install Python Dependencies
+For a hosted DB (e.g. Supabase), append `?sslmode=require` to the URL and use the Session-pooler connection (port 5432, not the transaction pooler on 6543).
+
+### Collect data
 
 ```bash
-source venv/bin/activate            # if not already active
-pip install -r requirements.txt     # or: pip install -r requirements.lock  (pinned — see "Reproducible installs")
+python main.py collect                     # OHLCV from Binance
+python main.py collect --funding           # 8h funding rates
+python main.py features                    # compute features
 ```
 
-> **Schema:** Alembic is the single source of truth — always provision with
-> `alembic upgrade head` (Step 3). Do **not** load `data/schema.sql`; it is a
-> reference overview only and has drifted from the migrations.
+---
 
-### Step 5: Verify Setup
+## CLI Reference
 
 ```bash
-pytest tests/test_setup.py
+python main.py collect [--funding]         # Fetch market / funding data
+python main.py features                    # Compute features
+python main.py backtest                    # Single backtest run
+python main.py validate                    # Walk-forward OOS validation
+python main.py retrain                     # Model retraining cycle
+python main.py drift                       # Feature drift check
+python main.py engine [--tier TIER]        # Full multi-strategy window engine
+python main.py leaderboard [--tier TIER]   # Print ranked strategy leaderboard
+python main.py train-classifier            # Train regime classifier
 ```
-
-You should see all checks pass (imports, directory structure, files, PostgreSQL, Binance API).
 
 ---
 
-## Deploying to a hosted database (e.g. Supabase)
-
-The whole DB target is controlled by a single variable, so going from local
-Postgres to a hosted one is just a config change — no code edits.
-
-1. **Set `DATABASE_URL`** (in `.env` or the environment). It takes precedence
-   over the `DB_*` vars and is read identically by the app, the SQLAlchemy
-   engine, and Alembic.
-
-   ```bash
-   # Supabase: use the Session pooler / direct connection on :5432,
-   # NOT the transaction pooler on :6543 (this app holds a persistent pool).
-   DATABASE_URL=postgresql://postgres:<password>@db.<ref>.supabase.co:5432/postgres?sslmode=require
-   ```
-   - `sslmode=require` is mandatory for Supabase/most hosted Postgres.
-   - The direct connection is IPv6-only without the IPv4 add-on; the pooler is IPv4.
-   - **`DATABASE_URL` must be URL form** (`postgresql://user:pass@host:port/db`).
-     A libpq keyword DSN (`host=... dbname=...`) is **not supported** and will
-     fail the engine/migrations — providers give you URL form, so use it. Using
-     DSN form is unsupported by design; if it breaks, that's on the operator.
-
-2. **Provision the schema** on the fresh database:
-   ```bash
-   alembic upgrade head
-   ```
-
-3. **Bootstrap data** (code ships, data does not — it is re-fetched, fully reproducible):
-   ```bash
-   python main.py collect      # pull OHLCV from Binance (public)
-   python main.py features     # compute features
-   ```
-
-4. **Run / validate**:
-   ```bash
-   python main.py validate
-   ```
-
-> Using discrete `DB_*` vars against a hosted DB instead of `DATABASE_URL`?
-> Also set `DB_SSLMODE=require`.
-
-### Reproducible installs
-
-`requirements.txt` uses minimum bounds for readability. For a byte-for-byte
-reproducible environment (the versions this code was verified against), install
-from the lockfile instead:
+## Running the Test Suite
 
 ```bash
-pip install -r requirements.lock
+pytest                     # 261 passed, 1 xpassed (expected)
+pytest --cov=. -q          # with coverage
 ```
 
 ---
 
-## Quick Start
+## Architecture Notes
 
-### 1. Collect Market Data
-
-```bash
-python main.py collect
-```
-
-This fetches 4 years of daily OHLCV data for BTC, ETH, SOL, and BNB from Binance and stores it in PostgreSQL.
-
-**Expected output:**
-```
-====================================
-Collecting data for BTC/USDT
-====================================
-Fetching data...
-✓ BTC/USDT: 1460 records inserted
-✓ ETH/USDT: 1460 records inserted
-✓ SOL/USDT: 1460 records inserted
-✓ BNB/USDT: 1460 records inserted
-
-Database now contains:
-  Total records: 5840
-  Symbols: 4
-  Date range: 2020-04-17 to 2024-04-16
-```
-
-### 2. Run a Backtest
-
-```bash
-python main.py backtest
-```
-
-This tests your strategy on historical data, showing:
-- Total return
-- Sharpe ratio
-- Maximum drawdown
-- Win rate
-- Number of trades
-- Detailed trade log
-
-### 3. Analyze Results
-
-Backtest results include:
-- Total return and Sharpe ratio
-- Maximum drawdown
-- Win rate and trade count
-- Detailed trade log
-- Performance metrics
-
-Use analysis tools to validate strategy performance before considering real trading.
+- **Single signal code path (Phase 1):** All three call sites for stat-arb signal generation (signals CLI, pairs backtest, engine_eval) delegate to `StatArbStrategy.signals_from_pair_prices` + `to_db_signals`. No duplicate z-score implementations exist.
+- **Window engine dispatch:** `window_engine.py` routes by strategy kind: `timeframe=='8h'` → `_run_funding_strategy`; `BasePairsStrategy` → `_run_pairs_strategy`; else single-asset. Each kind has its own mark-to-market loop with the appropriate annualization factor (√365 daily, √1095 for 8h).
+- **Position carry:** HOLD signals now maintain the open position and mark it to market each bar. Prior to the Phase-3 fix, every HOLD bar flattened the position, producing artificial 1-bar trades.
+- **Alembic is the schema source of truth.** `data/schema.sql` is a reference overview only; do not load it directly.
 
 ---
 
-## Configuration
+## Disclaimer
 
-### Database Configuration
-
-Configure the database via `.env` / `DATABASE_URL` (see Installation above), or construct a connection directly:
-
-```python
-from data.db import DatabaseConnection
-
-db = DatabaseConnection(
-    host='localhost',
-    port=5432,
-    database='rafund',
-    user='postgres',
-    password='your_password'
-)
-```
-
-### Exchange Configuration
-
-Configure collectors in `data/collectors/`:
-
-```python
-from data.collectors.binance_collector import BinanceCollector
-
-# Binance data collection
-collector = BinanceCollector(testnet=False, rate_limit_ms=100)
-```
-
-### Strategy Configuration
-
-Edit `config/settings.yaml` for strategy parameters:
-
-```yaml
-strategy:
-  name: stat_arb
-  symbols: ['BTC/USDT', 'ETH/USDT']
-  timeframe: '1d'
-  lookback: 60          # Fixed window size
-  entry_threshold: 2.0  # Z-score entry threshold
-  exit_threshold: 0.5   # Z-score exit threshold
-  max_position_pct: 0.10  # Risk control
-```
+**Research and educational use only.** This system has not been validated for live capital deployment. Past backtest performance does not predict future results. All known limitations are documented above — do not treat any headline metric as a production signal until the audit roadmap items (particularly the mark-to-market and prop-firm control bugs) are resolved.
 
 ---
 
-## Usage Examples
-
-### Fetch Data Programmatically
-
-```python
-from data.db import DatabaseConnection
-import pandas as pd
-
-db = DatabaseConnection()
-
-# Get price data
-df = db.get_prices('BTC/USDT', start_date='2024-01-01', end_date='2024-04-01')
-print(df.head())
-
-db.close_pool()
-```
-
-### Train a Model
-
-```python
-from models.train import ModelTrainer
-from data.db import DatabaseConnection
-
-db = DatabaseConnection()
-trainer = ModelTrainer(db)
-model = trainer.train('factor_model', 'BTC/USDT')
-model.save('models/btc_model.pkl')
-```
-
-### Generate Predictions
-
-```python
-from models.predict import Predictor
-import pickle
-
-with open('models/btc_model.pkl', 'rb') as f:
-    model = pickle.load(f)
-
-predictor = Predictor(model)
-prediction = predictor.predict(features)
-print(f"Price movement: {prediction}")
-```
-
-### Run Custom Backtest
-
-```python
-from backtesting.engine import BacktestEngine
-from strategies.factor_model import FactorModelStrategy
-
-engine = BacktestEngine(
-    strategy=FactorModelStrategy(),
-    symbols=['BTC/USDT'],
-    start_date='2023-01-01',
-    end_date='2024-01-01',
-    initial_capital=10000
-)
-
-results = engine.run()
-print(results)
-```
-
----
-
-## API Reference
-
-### Database Module (`data.db`)
-
-**DatabaseConnection**
-- `get_prices(symbol, start_date, end_date)` - Fetch OHLCV data
-- `insert_prices(df)` - Insert price data
-- `get_data_stats()` - Get database statistics
-- `test_connection()` - Test PostgreSQL connection
-
-### Backtesting Module (`backtesting.engine`)
-
-**BacktestEngine**
-- `run()` - Execute backtest
-- `get_metrics()` - Get performance metrics
-- `get_trades()` - Get trade history
-
-### Models Module (`models.predict`)
-
-**Predictor**
-- `predict(features)` - Generate price predictions
-- `predict_batch(features_list)` - Batch predictions
-
----
-
-## Development
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=.
-
-# Run specific test file
-pytest tests/test_window_approaches.py -v
-```
-
-### Code Style
-
-This project follows PEP 8. Format code with:
-
-```bash
-black .
-flake8 .
-```
-
-### Contributing
-
-1. Create a feature branch: `git checkout -b feature/your-feature`
-2. Make changes and commit: `git commit -am 'Add feature'`
-3. Push to branch: `git push origin feature/your-feature`
-4. Open a Pull Request
-
-### Documentation
-
-- See `CHANGELOG.md` for recent fixes and version history
-- See `docs/ANALYSIS_ROLLING_WINDOW_PROBLEM.md` for the rolling-window bug analysis
-- See `backtesting/AUDIT.md` for the backtesting engine audit
-
----
-
-## Troubleshooting
-
-### PostgreSQL Connection Failed
-
-```bash
-# Check if PostgreSQL is running
-# Windows:
-Get-Service postgresql*
-
-# macOS:
-brew services list | grep postgres
-
-# Linux:
-sudo systemctl status postgresql
-```
-
-### Binance API Errors
-
-- Check internet connection
-- Verify API rate limits haven't been exceeded
-- Ensure Binance servers are accessible
-- Check system clock is accurate (Binance requires timestamp sync)
-
-### Data Collection Issues
-
-- Start with fewer symbols
-- Increase `rate_limit_ms` to avoid rate limiting
-- Check logs in `logs/ml4t.log`
-
-### Backtest Hangs
-
-- Reduce date range for initial testing
-- Check database has sufficient data
-- Monitor CPU/memory usage
-
-For more help, see the logs directory or check existing documentation files.
-
----
-
-## Performance
-
-Typical system performance on modern hardware:
-
-- **Data collection:** ~1000 candles/second
-- **Backtest:** ~10,000 daily bars/second
-- **Model prediction:** ~1000 predictions/second
-- **Dashboard:** <100ms response time
-
----
-
-## Roadmap
-
-- [ ] Add more data sources (Finviz, Alpaca, etc.)
-- [ ] Support for options trading
-- [ ] Advanced portfolio optimization (CVaR, robust optimization)
-- [ ] Live trading module (future)
-- [ ] Web dashboard (future)
-- [ ] Multi-strategy ensemble
-- [ ] Support for other exchanges (HTX, Kraken)
-
----
-
-## Important Disclaimer
-
-**EDUCATIONAL USE ONLY:** This system is provided for research and educational purposes.
-
-- Backtesting does not guarantee future performance
-- Past performance does not predict future results
-- Use this system to learn algorithmic trading concepts
-- Validate any strategy extensively before considering real trading
-- The system has not been tested for live trading
-
-This software is provided "as-is" without warranties.
-
----
-
-## License
-
-This project is provided for educational and research purposes. Check the LICENSE file for details.
-
----
-
-## Support
-
-- 📖 **Documentation:** See markdown files in project root
-- 🐛 **Issues:** Create an issue on GitHub
-- 💬 **Questions:** Check troubleshooting section above
-- 📧 **Email:** [Contact information if applicable]
-
----
-
-## Acknowledgments
-
-Built with:
-- Python, pandas, NumPy, scikit-learn
-- PostgreSQL for data storage
-- CCXT for exchange API abstraction
-- FastAPI for web framework
-- Plotly for visualization
-
----
-
-**Last Updated:** May 4, 2026
-
-For the latest updates and documentation, visit the project repository.
-
----
-
-## Project Status
-
-✅ **Production-Ready Components:**
-- Data collection from Binance
-- PostgreSQL data storage
-- Backtesting engine with accurate metrics
-- Statistical arbitrage strategy
-- Performance analytics
-- Walk-forward OOS validation + significance testing (`python main.py validate`)
-- Model retraining/validation cycle (`python main.py retrain`) and feature-drift checks (`python main.py drift`)
-
-📚 **Library-only utilities** (importable helpers, not wired to a CLI command):
-- `portfolio/optimizer.py` (`PortfolioOptimizer`) — position sizing / capital allocation
-- `portfolio/risk.py` (`RiskManager`) — VaR, CVaR, max drawdown, position limits
-- `monitoring/metrics.py` (`MetricsCalculator`) — returns, Sharpe/Sortino/Calmar, win rate
-
-⏳ **Planned Future Components:**
-- Live trading execution
-- Interactive dashboard
-- Support for additional exchanges
-- Advanced optimization algorithms
+**Last Updated:** 2026-06-08
