@@ -24,6 +24,187 @@ next agent doesn't re-create forks or clobber work.
 
 ---
 
+## DATABASE HEALTH RULE — Mandatory at every session start
+
+Before any agent does anything else in any session, execute this checklist in order:
+
+1. **Check DB connectivity**
+   Run: `python main.py collect --dry-run` (or equivalent ping).
+   If the DB is unreachable, stop and report. Do not proceed.
+
+2. **Check data freshness**
+   Run: `python main.py collect --status` and inspect the most recent timestamp
+   per symbol. If any symbol has a gap > 48 hours from now, run:
+   `python main.py collect` to pull fresh data from Binance before continuing.
+
+3. **Validate data integrity**
+   Run: `python data/verify_data.py` (or equivalent).
+   If validation fails, fix the data issue before proceeding with any backtest
+   or engine run. Log the failure in this session's entry.
+
+4. **Confirm engine_results baseline**
+   Run: `python main.py leaderboard` and note the row count in engine_results.
+   If count < 200, note it — the regime classifier will return None (non-blocking,
+   by design). Record the count in your session log entry.
+
+This rule applies to EVERY session regardless of the stated task. A session that
+skips the DB health check is invalid and its results cannot be trusted.
+
+---
+
+## SESSION LIMITS — Cool-off protocol
+
+Each agent session operates under the following hard limits to prevent runaway
+changes and ensure the next session can safely pick up:
+
+| Limit | Value | Rationale |
+|---|---|---|
+| Max files touched per session | 10 | Keeps diffs reviewable |
+| Max lines changed per session | 500 | Prevents unreviewed rewrites |
+| Max phases attempted per session | 1 | See Phase Gate Rule below |
+| Required test suite state at end | ✅ green | Never leave a failing suite |
+| Required AGENTS.md update at end | ✅ mandatory | Next session reads this first |
+| Required session log entry at end | ✅ mandatory | Newest-first, dated, complete |
+
+If a session hits a limit mid-phase, the agent must:
+1. Stop implementing.
+2. Commit all completed, green-tested work.
+3. Write a "PARTIAL" session log entry documenting exact stopping point.
+4. Add a `RESUME:` line to Active Claims with the next action.
+5. Do not start the next phase.
+
+A session that violates these limits and leaves a broken suite is a failed session.
+Revert to the last green commit and start over.
+
+---
+
+## PHASE GATE RULE — 90% completion required before advancing
+
+The gap backlog is broken into phases below. An agent may only advance to the
+next phase when the current phase is ≥ 90% complete by its own checklist.
+
+**90% complete means:** all checklist items are done OR the remaining items are
+explicitly marked `[DEFERRED — reason]` with a written justification, AND the
+test suite is green, AND the session log entry is written.
+
+No agent skips a phase. No agent works on Phase N+1 items while Phase N is open.
+If a task from a later phase is trivially entangled with current work (e.g., a
+one-line fix), it may be done but must be logged as "incidental" — it does not
+count toward the later phase's completion.
+
+---
+
+## GAP BACKLOG — Phased Execution Plan
+
+Work through these phases in strict order. Update the checkbox and status column
+as you go. Do not advance until the current phase is ≥ 90% complete (see PHASE
+GATE RULE).
+
+---
+
+### PHASE A — Prop-Firm Bug Fixes  ✅ / ⏳ / ❌
+**Goal:** Every prop-firm control works correctly for all strategy types.
+**Exit criteria:** All 4 xfails in `tests/test_risk_engine_stress.py` turn green.
+**Session limit:** May span multiple sessions; each session updates this checklist.
+
+| # | Item | File | Status |
+|---|---|---|---|
+| A1 | Fix daily-loss parenthesization — `daily_pnl = equity - daily_start_equity; if daily_pnl <= -capital*pct:` | `backtesting/engine.py:139` | ⏳ |
+| A2 | Delete leverage-clip halt reset — remove `daily_halt = False` | `backtesting/engine.py:175-176` | ⏳ |
+| A3 | Mark single-asset positions to market — value open position against `price` column, not `price_a`/`price_b` | `backtesting/engine.py:102-108, 384-386` | ⏳ |
+| A4 | Fix single-asset exit at zero signal — route flat-signal close through `price` | `backtesting/engine.py:384-386` | ⏳ |
+| A5 | Turn all 4 xfails green — verify `tests/test_risk_engine_stress.py` passes fully | `tests/test_risk_engine_stress.py` | ⏳ |
+
+**Verification:** `pytest tests/test_risk_engine_stress.py -v` must show 10 passed, 0 xfailed.
+
+---
+
+### PHASE B — Missing Tests  ✅ / ⏳ / ❌
+**Goal:** Test coverage for leaderboard, funding collector, regime classifier, and a true e2e engine run.
+**Prerequisite:** Phase A ≥ 90% complete.
+**Exit criteria:** 4 new test modules present and green; total suite count increases by ≥ 30 tests.
+
+| # | Item | File | Status |
+|---|---|---|---|
+| B1 | Leaderboard scoring + tier gate tests | `tests/test_leaderboard.py` | ⏳ |
+| B2 | Funding collector pagination tests (mock Binance pagination) | `tests/test_funding_collector.py` | ⏳ |
+| B3 | Regime classifier gate tests (< 200 rows → None; ≥ 200 rows → label) | `tests/test_regime_classifier.py` | ⏳ |
+| B4 | End-to-end engine run against a temp PostgreSQL DB (use pytest-postgresql or a fixture DB; all 3 strategy kinds must produce finite, non-NaN leaderboard rows) | `tests/test_e2e_engine.py` | ⏳ |
+
+**Verification:** `pytest tests/test_leaderboard.py tests/test_funding_collector.py tests/test_regime_classifier.py tests/test_e2e_engine.py -v` all green.
+
+---
+
+### PHASE C — First Real Engine Run + Sanity Check  ✅ / ⏳ / ❌
+**Goal:** Run the engine against the populated production DB, validate outputs are sane, catch the synthetic Sharpe inflation on real data.
+**Prerequisite:** Phase B ≥ 90% complete. DATABASE HEALTH RULE must pass before starting.
+**Exit criteria:** `LEADERBOARD.md` updated with real results; funding Sharpe sanity-checked and documented.
+
+| # | Item | Command / File | Status |
+|---|---|---|---|
+| C1 | DB health check passes (see DATABASE HEALTH RULE) | `python main.py collect --status` | ⏳ |
+| C2 | Run full engine across all strategies and windows | `python main.py engine` | ⏳ |
+| C3 | Run leaderboard and inspect output | `python main.py leaderboard` | ⏳ |
+| C4 | Sanity-check funding Sharpe — if `FundingRateArb` Sharpe > 3.0 on real data, flag as suspicious and document in session log | `LEADERBOARD.md` + session log | ⏳ |
+| C5 | Document top-3 strategies per tier (CONSERVATIVE / STANDARD / PERMISSIVE) in session log | session log | ⏳ |
+| C6 | Identify and log any NaN, Inf, or negative-equity anomalies from the engine run | `ml4t.log` inspection | ⏳ |
+| C7 | If anomalies found, create numbered bug entries under Known Gaps before ending session | `AGENTS.md` | ⏳ |
+
+**Verification:** `LEADERBOARD.md` exists with ≥ 1 row per tier; session log entry documents the run.
+
+---
+
+### PHASE D — BacktestEngine Consolidation (Optional / Architectural)  ✅ / ⏳ / ❌
+**Goal:** Eliminate the 3 private P&L loops in `window_engine.py` by routing all strategies through `BacktestEngine`.
+**Prerequisite:** Phase C ≥ 90% complete.
+**Note:** This is architectural cleanup. It must not change any leaderboard results. Add a regression test that pins leaderboard scores before and after consolidation within a tolerance of ±0.01.
+
+| # | Item | File | Status |
+|---|---|---|---|
+| D1 | Pin current leaderboard scores as regression baseline | `tests/test_engine_consolidation_regression.py` | ⏳ |
+| D2 | Route single-asset strategies through `BacktestEngine` instead of private loop | `backtesting/window_engine.py` | ⏳ |
+| D3 | Route pairs strategies through `BacktestEngine` | `backtesting/window_engine.py` | ⏳ |
+| D4 | Route funding strategies through `BacktestEngine` | `backtesting/window_engine.py` | ⏳ |
+| D5 | Run regression test — scores within ±0.01 tolerance | `tests/test_engine_consolidation_regression.py` | ⏳ |
+| D6 | Delete the 3 now-unused private P&L loops | `backtesting/window_engine.py` | ⏳ |
+
+**Verification:** `pytest` full suite green; `LEADERBOARD.md` scores unchanged within tolerance.
+
+---
+
+### PHASE E — Portfolio Risk Wiring  ✅ / ⏳ / ❌
+**Goal:** Wire `RiskManager` and `PortfolioOptimizer` into the engine so Kelly sizing and VaR limits are enforced during runs.
+**Prerequisite:** Phase D ≥ 90% complete (or explicitly deferred with justification).
+
+| # | Item | File | Status |
+|---|---|---|---|
+| E1 | Implement fractional crypto sizing in `PortfolioOptimizer` — replace `int(value/price)` with `round(value/price, 8)` | `portfolio/optimizer.py:41` | ⏳ |
+| E2 | Add Kelly sizing (fractional, capped at 0.25) to `RiskManager` | `portfolio/risk.py` | ⏳ |
+| E3 | Add volatility targeting position scalar | `portfolio/risk.py` | ⏳ |
+| E4 | Wire `RiskManager.check_position_limits` into the engine's `_open_position` | `backtesting/engine.py` | ⏳ |
+| E5 | Add portfolio-level gross exposure cap (N × 20% → must not exceed 100%) | `portfolio/risk.py` + `engine.py` | ⏳ |
+| E6 | Tests for Kelly, vol-targeting, gross cap | `tests/test_portfolio_risk.py` | ⏳ |
+
+**Verification:** `pytest tests/test_portfolio_risk.py -v` green; engine run with `--risk-wired` flag produces different (smaller) position sizes than without.
+
+---
+
+### PHASE F — Execution Realism  ✅ / ⏳ / ❌
+**Goal:** Next-bar-open fills, volatility-scaled slippage, short borrow + funding carry.
+**Prerequisite:** Phase E ≥ 90% complete.
+
+| # | Item | File | Status |
+|---|---|---|---|
+| F1 | Next-bar-open execution — shift fills from bar `t` to bar `t+1` open | `backtesting/engine.py` | ⏳ |
+| F2 | Thread `bar_volume` through `cost_model.apply` — make `volume_proportional` slippage reachable | `backtesting/costs.py`, `engine.py` | ⏳ |
+| F3 | Volatility-scaled slippage — widen slippage proportional to realized bar volatility | `backtesting/costs.py` | ⏳ |
+| F4 | Short borrow fee for multi-day single-asset shorts | `backtesting/engine.py` | ⏳ |
+| F5 | Perp funding carry for multi-day holds in `FundingRateArb` | `backtesting/engine.py` or `strategies/funding_rate_arb.py` | ⏳ |
+
+**Verification:** After F1, Sharpe for all strategies should decrease slightly (more conservative fills). If Sharpe increases, something is wrong — stop and investigate.
+
+---
+
 ## Spec completion status  (updated 2026-06-07, session "opus-audit")
 
 | Phase | Component | Status | Notes |
@@ -74,7 +255,61 @@ collector/classifier; a real end-to-end engine run against a populated DB.
 
 ---
 
+## SESSION LOG TEMPLATE — Copy this for every new entry
+
+### YYYY-MM-DD — session "your-session-id" (Claude / Human) — STATUS
+**Phase worked:** [A / B / C / D / E / F]
+**DB health check:** [PASSED / FAILED — reason]
+**engine_results row count at session start:** [N]
+**Files changed:** [list]
+**Tests added:** [list]
+**Suite result:** [X passed, Y xfailed, Z failed]
+**Phase checklist progress:** [e.g. A1 ✅ A2 ✅ A3 ⏳ A4 ⏳ A5 ⏳]
+**Phase completion %:** [e.g. 40%]
+**Blocking issues found:** [list or "none"]
+**Bugs discovered and logged:** [list or "none"]
+**Resume point for next session:** [exact next action]
+**Session limit hit:** [yes — which limit / no]
+
+---
+
 ## Session log  (newest first)
+
+### 2026-06-08 — session "playbook-update" (Claude) — COMPLETE
+**Phase worked:** none (docs only)
+**DB health check:** SKIPPED — docs-only session, no source changes
+**engine_results row count at session start:** unknown
+**Files changed:** `AGENTS.md` only
+**Tests added:** none
+**Suite result:** unchanged (261 passed, 1 xpassed)
+**Phase checklist progress:** n/a
+**Phase completion %:** n/a
+**Blocking issues found:** none
+**Bugs discovered and logged:** none
+**Resume point for next session:** Begin Phase A — start with A1 (daily-loss parenthesization) in `backtesting/engine.py:139`, then A2, A3, A4 in order, confirm A5 (xfails green) before closing the phase.
+**Session limit hit:** no
+
+Added to `AGENTS.md`: DATABASE HEALTH RULE, SESSION LIMITS, PHASE GATE RULE,
+GAP BACKLOG (Phases A–F with per-item checklists), SESSION LOG TEMPLATE.
+No source files touched.
+
+### 2026-06-08 — session "repo-sync" (Claude) — COMPLETE
+**Phase worked:** none (repo sync + rename)
+**DB health check:** SKIPPED — sync/docs session
+**engine_results row count at session start:** unknown
+**Files changed:** 93 files staged and committed (all Phases 1-6 unpublished work); `README.md` rewritten
+**Tests added:** none (tests were already present in the commit)
+**Suite result:** 261 passed, 1 xpassed (at time of push)
+**Phase checklist progress:** n/a
+**Phase completion %:** n/a
+**Blocking issues found:** none
+**Bugs discovered and logged:** none
+**Resume point for next session:** Phase A — prop-firm bug fixes
+**Session limit hit:** no
+
+Pushed all unpublished local work to `origin/main` (2 commits: 93-file bulk commit
++ README rewrite). Renamed `RAFund` → `Raf3nd` in all prose/display contexts across
+the repo (zero Python identifiers, import paths, or DB names changed).
 
 ### 2026-06-07 — session "opus-engine" (Claude) — COMPLETE
 Wired pairs + funding into the engine and fixed the position-carry P&L bug.
