@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Periodic fixed-interval buying for long-term accumulation",
+    tier_hints=["CONSERVATIVE", "STANDARD"],
+    tags=["passive", "accumulation"],
+)
 class DCAStrategy(BaseStrategy):
     name = "Dollar Cost Averaging"
     min_bars = 1

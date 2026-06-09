@@ -1,12 +1,11 @@
 """
-Prop-firm evaluation rules (Breakout-style $5k challenge).
+Prop-firm evaluation rules — 1-phase $5k challenge.
 
-Enforced during backtest:
-- Step 1 profit target: +$250 (5%)
-- Step 2 profit target: +$500 (10% from start)
-- Max daily loss: 4% of account ($200 on $5k)
-- Max drawdown: 6% from initial balance ($300 / floor $4,700)
-- Max leverage: 5x notional vs equity
+Enforced bar-by-bar during backtest:
+- Profit target : +$450 (9% of $5k) — single phase, same target as funded
+- Max daily loss: 3% of account ($150 on $5k)
+- Max drawdown  : 3% static from initial balance (floor $4,850)
+- Max leverage  : 5x notional vs equity
 """
 
 from dataclasses import dataclass
@@ -24,11 +23,12 @@ class EvaluationStatus(str, Enum):
 
 @dataclass(frozen=True)
 class PropFirmRules:
+    """1-phase prop challenge: 9% profit target, 3% daily loss, 3% static max drawdown."""
     account_size: float = 5000.0
-    step1_profit: float = 250.0
-    step2_profit: float = 500.0
-    max_daily_loss_pct: float = 0.04
-    max_drawdown_pct: float = 0.06
+    step1_profit: float = 450.0   # 9% of $5k — phase 1 (and only phase) target
+    step2_profit: float = 450.0   # same as step1: 1-phase challenge
+    max_daily_loss_pct: float = 0.03
+    max_drawdown_pct: float = 0.03
     max_leverage: float = 5.0
     evaluation_fee: float = 49.99
 

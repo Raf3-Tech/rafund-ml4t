@@ -157,10 +157,12 @@ leg_allocation_pct (0.18)` so the 5× cap almost never binds. Plus F3.
 |---|---|---|
 | **VaR** | Present / basic | `risk.py:23-33` historical percentile; single return series only (no covariance/portfolio VaR); no empty-series guard; returns a negative quantile (sign convention undocumented). |
 | **CVaR** | Present / basic | `risk.py:35-46` mean of the ≤VaR tail — correct shape; `NaN` if the tail is empty. |
-| **Kelly sizing** | 🔴 **MISSING** | No `kelly` anywhere in the codebase. |
+| **Kelly sizing** | 🟡 **Present / unwired** | `kelly_fraction(μ, σ², half_kelly=True)` in `portfolio/optimizer.py` — clamped to [0, 1]; tested. Not yet called from the engine per-bar. |
+| **Risk-parity allocation** | 🟡 **Present / unwired** | `risk_parity_weights(cov)` in `portfolio/optimizer.py` (iterative ERC); `multi_strategy_allocate` wraps it with per-strategy cap. Not yet called from the engine. |
+| **Correlation / diversification** | 🟡 **Present / unwired** | `correlation_matrix`, `diversification_ratio`, `concentration_check` in `portfolio/risk.py`. Library-only; not wired into engine. |
 | **Volatility targeting** | 🔴 **MISSING** | No vol-target position scaling anywhere. |
-| **Max position limits** | Present / unenforced | `risk.py:77-93` `check_position_limits` is a standalone helper **no one calls**; `optimizer.py:15` `max_position_size=0.2` caps each position but there is **no portfolio-level gross cap** (N positions → up to N×20%). |
-| **Sharpe / vol / max-DD** | Present | `risk.py:48-105`; no `std==0` guard (→ inf/nan); `√252` annualization (see QUANT §5, should be `√365`). |
+| **Max position limits** | Present / unenforced | `risk.py` `check_position_limits` is a standalone helper **no one calls** from the engine; `optimizer.py` `max_position_size=0.2` caps each position in `multi_strategy_allocate` but there is **no portfolio-level gross cap** wired into the per-bar engine loop (N positions → up to N×20%). |
+| **Sharpe / vol / max-DD** | Present | `risk.py`; no `std==0` guard (→ inf/nan); `√252` annualization (see QUANT §5, should be `√365`). |
 
 ### P3 🟠 HIGH — Crypto position sizing truncates to zero
 `optimizer.py:41` `position_size = int(position_value / price)`. For a $5,000
@@ -211,9 +213,11 @@ cutting blind spot (F1) that disables the controls for any single-leg strategy.
 
 ## 6. Portfolio Risk Score — **3 / 10**
 
-VaR/CVaR/Sharpe/vol/max-DD exist but are basic and **not wired into the
-backtest**; **Kelly and volatility targeting are absent**; position limits are
-unenforced with no portfolio-level cap; crypto sizing truncates to zero.
+VaR/CVaR/Sharpe/vol/max-DD exist but are basic; **Kelly sizing and risk-parity
+allocation are now implemented** (`portfolio/optimizer.py`) but **not yet wired
+into the per-bar engine loop**; volatility targeting still absent; position limits
+unenforced with no engine-level portfolio gross cap; crypto sizing still truncates
+to zero (int cast — P3 open).
 
 ---
 
@@ -229,7 +233,8 @@ unenforced with no portfolio-level cap; crypto sizing truncates to zero.
 
 ## 8. Missing Controls (summary)
 
-- Kelly sizing (P-Kelly) — absent.
+- Kelly sizing — **now present** (`kelly_fraction` in `portfolio/optimizer.py`); not yet wired per-bar into the engine.
+- Risk-parity allocation — **now present** (`risk_parity_weights`, `multi_strategy_allocate`); not yet wired per-bar into the engine.
 - Volatility targeting — absent.
 - Portfolio-level gross/net exposure cap — absent.
 - Intra-trade / live leverage monitoring — absent (open-only).

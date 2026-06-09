@@ -19,6 +19,7 @@ import numpy as np
 from typing import Dict, Optional, Tuple
 
 from strategies.base import BasePairsStrategy
+from strategies.registry import StrategyRegistry
 
 
 class StatArbStrategy:
@@ -463,6 +464,11 @@ class WalkForwardStatArb:
         return out
 
 
+@StrategyRegistry.register(
+    description="Z-score mean-reversion on cointegrated crypto pairs (long/short legs)",
+    tier_hints=["CONSERVATIVE", "STANDARD"],
+    tags=["pairs", "stat-arb", "market-neutral"],
+)
 class StatArbPairsStrategy(BasePairsStrategy):
     """BaseStrategy-compatible wrapper for statistical arbitrage (pairs).
 

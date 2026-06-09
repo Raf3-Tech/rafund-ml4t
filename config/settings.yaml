@@ -24,10 +24,11 @@ evaluation:
   pair_a: BTC/USDT
   pair_b: ETH/USDT
   account_size: 5000
-  step1_profit: 250
-  step2_profit: 500
-  max_daily_loss_pct: 0.04
-  max_drawdown_pct: 0.06
+  # 1-phase challenge: 9% profit target, 3% daily loss limit, 3% static max drawdown
+  step1_profit: 450
+  step2_profit: 450
+  max_daily_loss_pct: 0.03
+  max_drawdown_pct: 0.03
   max_leverage: 5.0
 
 strategy:

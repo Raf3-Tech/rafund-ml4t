@@ -8,8 +8,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="ATR-based Supertrend indicator for trend direction",
+    tier_hints=["STANDARD", "PERMISSIVE"],
+    tags=["trend", "momentum"],
+)
 class SupertrendStrategy(BaseStrategy):
     name = "Supertrend"
     min_bars = 11

@@ -27,6 +27,10 @@ CONSERVATIVE_MAX_DD = 3.0
 STANDARD_MAX_DD = 10.0
 PERMISSIVE_MAX_DD = 25.0
 
+# Minimum cumulative return for CONSERVATIVE pass — must also meet the 9% profit
+# target of the 1-phase prop challenge to count as a challenge-worthy window.
+CONSERVATIVE_MIN_RETURN = 9.0
+
 MIN_TRADEABLE_BARS = 30
 MAX_MUTATION_GENERATIONS = 3
 
@@ -413,7 +417,16 @@ def classify_passes(metrics: Dict) -> Tuple[bool, bool, bool]:
     dd = metrics["max_drawdown_pct"]
     sharpe = metrics["sharpe_ratio"]
     wr = metrics["win_rate_pct"]
-    conservative = dd <= CONSERVATIVE_MAX_DD and sharpe > 0 and wr > 40.0
+    total_ret = metrics.get("total_return_pct", 0.0)
+    # CONSERVATIVE requires the 9% profit target AND the 3% DD ceiling — this
+    # maps directly to the 1-phase prop challenge. A window that is profitable
+    # but doesn't reach 9% would not fund the challenge, so it doesn't qualify.
+    conservative = (
+        dd <= CONSERVATIVE_MAX_DD
+        and total_ret >= CONSERVATIVE_MIN_RETURN
+        and sharpe > 0
+        and wr > 40.0
+    )
     standard = dd <= STANDARD_MAX_DD and sharpe > 0 and wr > 40.0
     permissive = dd <= PERMISSIVE_MAX_DD and sharpe > 0
     return conservative, standard, permissive

@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Price breakout above/below N-period Donchian channel",
+    tier_hints=["STANDARD", "PERMISSIVE"],
+    tags=["trend", "breakout"],
+)
 class DonchianBreakout(BaseStrategy):
     name = "Donchian Breakout"
     min_bars = 20

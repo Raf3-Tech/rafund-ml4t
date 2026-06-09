@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Momentum breakout from Bollinger/Keltner squeeze compression",
+    tier_hints=["STANDARD", "PERMISSIVE"],
+    tags=["volatility", "momentum"],
+)
 class KeltnerSqueeze(BaseStrategy):
     name = "Keltner Squeeze"
     min_bars = 25

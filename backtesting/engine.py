@@ -56,10 +56,10 @@ class BacktestEngine:
         fixed_slippage_pct: float = 0.0005,
         volume_impact_factor: float = 0.1,
         leverage_limit: float = 5.0,
-        daily_loss_limit_pct: float = 0.04,
-        drawdown_limit_pct: float = 0.06,
-        step1_profit_pct: float = 0.05,
-        step2_profit_pct: float = 0.10,
+        daily_loss_limit_pct: float = 0.03,
+        drawdown_limit_pct: float = 0.03,
+        step1_profit_pct: float = 0.09,
+        step2_profit_pct: float = 0.09,
         leg_allocation_pct: float = 0.18,
     ) -> None:
         self.initial_capital = initial_capital

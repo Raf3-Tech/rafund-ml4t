@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Trend-following crossover of fast/slow EMAs",
+    tier_hints=["STANDARD", "PERMISSIVE"],
+    tags=["trend", "momentum"],
+)
 class EMACrossover(BaseStrategy):
     name = "EMA Crossover"
     min_bars = 50

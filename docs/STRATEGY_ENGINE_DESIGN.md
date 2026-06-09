@@ -141,8 +141,9 @@ and frequent outcome the reviews imply).
 
 - **Sizing:** volatility targeting (survey-endorsed) with a **Kelly-capped**
   fraction, then clamped so the backtested worst-case daily loss and drawdown stay
-  inside 4% / 6%. (Kelly & vol-targeting are *currently missing* — RISK audit
-  P-Kelly / P-vol.)
+  inside 4% / 6%. `kelly_fraction` is now implemented in `portfolio/optimizer.py`
+  (half-Kelly, clamped to [0,1]); it is not yet wired per-bar into the engine (Phase E
+  in AGENTS.md). Volatility targeting is still missing (RISK audit P-vol).
 - **Hard reject** any generated strategy whose walk-forward backtest ever trips
   `account_failed`, or whose worst-fold drawdown breaches 6%.
 - **Promotion gate** extends the existing `ModelValidator.validate_for_promotion`

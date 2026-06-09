@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Buy-and-hold with periodic rebalance back to target weight",
+    tier_hints=["CONSERVATIVE"],
+    tags=["passive", "rebalance"],
+)
 class HODLRebalance(BaseStrategy):
     name = "HODL with Rebalance"
     min_bars = 1

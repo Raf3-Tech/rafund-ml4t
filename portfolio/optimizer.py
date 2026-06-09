@@ -5,8 +5,55 @@ This module handles portfolio construction, asset allocation,
 and risk-return optimization.
 """
 
-import pandas as pd
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
 import numpy as np
+import pandas as pd
+
+
+def risk_parity_weights(cov_matrix: np.ndarray, max_iter: int = 500, tol: float = 1e-8) -> np.ndarray:
+    """Return equal-risk-contribution weights via iterative solver.
+
+    Each asset's marginal contribution to portfolio variance is equalised.
+    Falls back to inverse-volatility if the covariance matrix is singular.
+    """
+    n = cov_matrix.shape[0]
+    w = np.ones(n) / n
+    for _ in range(max_iter):
+        sigma_p = float(np.sqrt(w @ cov_matrix @ w))
+        if sigma_p == 0.0:
+            break
+        # Marginal risk contributions
+        mrc = cov_matrix @ w / sigma_p
+        rc = w * mrc
+        target = sigma_p / n
+        grad = rc - target
+        if np.max(np.abs(grad)) < tol:
+            break
+        w = w - 0.5 * grad
+        w = np.maximum(w, 1e-8)
+        w /= w.sum()
+    return w
+
+
+def kelly_fraction(
+    expected_return: float,
+    variance: float,
+    half_kelly: bool = True,
+) -> float:
+    """Return the (half-)Kelly fraction for a single-asset bet.
+
+    f* = mu / sigma^2.  Half-Kelly (default) halves the fraction for
+    robustness against estimation error.  Clamped to [0, 1].
+    """
+    if variance <= 0.0 or expected_return <= 0.0:
+        return 0.0
+    f = expected_return / variance
+    if half_kelly:
+        f *= 0.5
+    return float(np.clip(f, 0.0, 1.0))
 
 
 class PortfolioOptimizer:
@@ -82,6 +129,50 @@ class PortfolioOptimizer:
                 value += quantity * prices[asset]
         return value
     
+    def multi_strategy_allocate(
+        self,
+        strategy_names: List[str],
+        returns_history: pd.DataFrame,
+        capital: float,
+        method: str = "risk_parity",
+    ) -> Dict[str, float]:
+        """Allocate capital across strategies using risk-parity or equal-weight.
+
+        Args:
+            strategy_names: Ordered list of strategy identifiers.
+            returns_history: DataFrame where columns are strategy names and rows
+                are historical period returns.  Must contain at least 2 rows.
+            capital: Total capital to allocate.
+            method: "risk_parity" (default) or "equal_weight".
+
+        Returns:
+            Dict mapping strategy name -> notional allocation.
+        """
+        n = len(strategy_names)
+        if n == 0:
+            return {}
+
+        if method == "equal_weight" or returns_history.shape[0] < 2:
+            weights = np.ones(n) / n
+        else:
+            cols = [s for s in strategy_names if s in returns_history.columns]
+            if len(cols) < n:
+                weights = np.ones(n) / n
+            else:
+                ret = returns_history[cols].dropna()
+                if ret.shape[0] < 2:
+                    weights = np.ones(n) / n
+                else:
+                    cov = ret.cov().values
+                    weights = risk_parity_weights(cov)
+
+        allocations = {name: float(w * capital) for name, w in zip(strategy_names, weights)}
+        # Enforce per-strategy max_position_size cap
+        max_alloc = capital * self.max_position_size
+        for name in allocations:
+            allocations[name] = min(allocations[name], max_alloc)
+        return allocations
+
     def rebalance(self, current_positions: dict, target_signals: pd.Series, prices: pd.Series, capital: float) -> dict:
         """
         Rebalance portfolio to match target signals.

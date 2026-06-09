@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Collect funding payments by hedging perpetual vs spot when rate is extreme",
+    tier_hints=["CONSERVATIVE", "STANDARD"],
+    tags=["derivatives", "arbitrage", "market-neutral"],
+)
 class FundingRateArb(BaseStrategy):
     """Market-neutral: collect positive funding by shorting perp + long spot (or inverse).
 

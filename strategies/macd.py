@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="MACD histogram crossover for trend momentum",
+    tier_hints=["STANDARD", "PERMISSIVE"],
+    tags=["trend", "momentum"],
+)
 class MACDStrategy(BaseStrategy):
     name = "MACD"
     min_bars = 35

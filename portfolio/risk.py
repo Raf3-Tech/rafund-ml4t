@@ -4,6 +4,8 @@ Risk management.
 This module handles risk calculations, monitoring, and constraints.
 """
 
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 
@@ -97,11 +99,41 @@ class RiskManager:
     def calculate_portfolio_volatility(self, returns: pd.Series) -> float:
         """
         Calculate portfolio volatility.
-        
+
         Args:
             returns: Series of portfolio returns
-            
+
         Returns:
             Annualized volatility
         """
         return returns.std() * np.sqrt(PERIODS_PER_YEAR)
+
+    def correlation_matrix(self, returns_df: pd.DataFrame) -> pd.DataFrame:
+        """Pairwise Pearson correlation matrix for a multi-column returns DataFrame."""
+        return returns_df.corr()
+
+    def diversification_ratio(
+        self,
+        weights: np.ndarray,
+        cov_matrix: np.ndarray,
+    ) -> float:
+        """Weighted-average individual vol divided by portfolio vol.
+
+        A ratio of 1.0 means no diversification benefit; higher is better.
+        Returns 1.0 when portfolio volatility is zero (degenerate case).
+        """
+        vols = np.sqrt(np.diag(cov_matrix))
+        weighted_avg_vol = float(np.dot(weights, vols))
+        portfolio_var = float(weights @ cov_matrix @ weights)
+        portfolio_vol = float(np.sqrt(max(portfolio_var, 0.0)))
+        if portfolio_vol == 0.0:
+            return 1.0
+        return weighted_avg_vol / portfolio_vol
+
+    def concentration_check(
+        self,
+        weights: np.ndarray,
+        max_single_weight: float = 0.4,
+    ) -> bool:
+        """Return True if no single weight exceeds the concentration limit."""
+        return bool(np.max(np.abs(weights)) <= max_single_weight)

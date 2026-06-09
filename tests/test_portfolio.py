@@ -188,3 +188,145 @@ def test_calculate_portfolio_volatility_annualizes():
     vol = rm.calculate_portfolio_volatility(returns)
     assert vol == pytest.approx(returns.std() * np.sqrt(PERIODS_PER_YEAR))
     assert vol > 0
+
+
+# ---------------------------------------------------------------------------
+# RiskManager — new methods
+# ---------------------------------------------------------------------------
+
+
+def test_correlation_matrix_diagonal_is_one():
+    rm = RiskManager()
+    np.random.seed(42)
+    df = pd.DataFrame(np.random.randn(100, 3), columns=["A", "B", "C"])
+    corr = rm.correlation_matrix(df)
+    assert corr.shape == (3, 3)
+    np.testing.assert_allclose(np.diag(corr.values), 1.0)
+
+
+def test_correlation_matrix_symmetric():
+    rm = RiskManager()
+    np.random.seed(42)
+    df = pd.DataFrame(np.random.randn(100, 3), columns=["A", "B", "C"])
+    corr = rm.correlation_matrix(df)
+    np.testing.assert_allclose(corr.values, corr.values.T)
+
+
+def test_diversification_ratio_uncorrelated_exceeds_one():
+    rm = RiskManager()
+    # Two uncorrelated assets with equal vol -> DR > 1
+    cov = np.diag([0.01, 0.01])
+    w = np.array([0.5, 0.5])
+    dr = rm.diversification_ratio(w, cov)
+    assert dr > 1.0
+
+
+def test_diversification_ratio_single_asset_is_one():
+    rm = RiskManager()
+    cov = np.array([[0.04]])
+    w = np.array([1.0])
+    assert rm.diversification_ratio(w, cov) == pytest.approx(1.0)
+
+
+def test_concentration_check_within_limit():
+    rm = RiskManager()
+    w = np.array([0.3, 0.4, 0.3])
+    assert rm.concentration_check(w, max_single_weight=0.4) is True
+
+
+def test_concentration_check_exceeds_limit():
+    rm = RiskManager()
+    w = np.array([0.6, 0.2, 0.2])
+    assert rm.concentration_check(w, max_single_weight=0.4) is False
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers: risk_parity_weights and kelly_fraction
+# ---------------------------------------------------------------------------
+
+
+from portfolio.optimizer import kelly_fraction, risk_parity_weights
+
+
+def test_risk_parity_weights_sum_to_one():
+    np.random.seed(7)
+    A = np.random.randn(50, 3)
+    cov = (A.T @ A) / 50
+    w = risk_parity_weights(cov)
+    assert abs(w.sum() - 1.0) < 1e-6
+
+
+def test_risk_parity_weights_all_positive():
+    np.random.seed(7)
+    A = np.random.randn(50, 3)
+    cov = (A.T @ A) / 50
+    w = risk_parity_weights(cov)
+    assert (w > 0).all()
+
+
+def test_risk_parity_equal_variance_equal_weights():
+    cov = np.eye(3) * 0.01
+    w = risk_parity_weights(cov)
+    np.testing.assert_allclose(w, [1 / 3, 1 / 3, 1 / 3], atol=1e-5)
+
+
+def test_kelly_fraction_positive_edge():
+    f = kelly_fraction(expected_return=0.01, variance=0.001)
+    assert 0.0 < f <= 1.0
+
+
+def test_kelly_fraction_negative_edge_is_zero():
+    assert kelly_fraction(expected_return=-0.01, variance=0.001) == 0.0
+
+
+def test_kelly_fraction_half_kelly_smaller_than_full():
+    # Use params where full Kelly < 1 so clamping doesn't obscure the ratio
+    full = kelly_fraction(expected_return=0.001, variance=0.01, half_kelly=False)
+    half = kelly_fraction(expected_return=0.001, variance=0.01, half_kelly=True)
+    assert half == pytest.approx(full / 2)
+
+
+def test_kelly_fraction_clamped_to_one():
+    # Huge edge / tiny variance -> clamp to 1
+    f = kelly_fraction(expected_return=100.0, variance=0.0001, half_kelly=False)
+    assert f == 1.0
+
+
+# ---------------------------------------------------------------------------
+# PortfolioOptimizer.multi_strategy_allocate
+# ---------------------------------------------------------------------------
+
+
+def test_multi_strategy_allocate_equal_weight_fallback():
+    opt = PortfolioOptimizer(max_position_size=1.0)
+    names = ["A", "B", "C"]
+    # No history -> falls back to equal weight; max_position_size=1 so cap doesn't interfere
+    allocs = opt.multi_strategy_allocate(names, pd.DataFrame(), capital=90000)
+    assert len(allocs) == 3
+    assert abs(sum(allocs.values()) - 90000) < 1e-6
+
+
+def test_multi_strategy_allocate_risk_parity():
+    opt = PortfolioOptimizer(max_position_size=1.0)
+    np.random.seed(42)
+    df = pd.DataFrame(
+        np.random.randn(200, 3) * [0.01, 0.02, 0.01],
+        columns=["A", "B", "C"],
+    )
+    allocs = opt.multi_strategy_allocate(["A", "B", "C"], df, capital=10000, method="risk_parity")
+    # High-vol strategy (B) should get less than low-vol (A, C)
+    assert allocs["B"] < allocs["A"]
+    assert allocs["B"] < allocs["C"]
+
+
+def test_multi_strategy_allocate_respects_max_position():
+    opt = PortfolioOptimizer(max_position_size=0.2)
+    names = ["A", "B"]
+    allocs = opt.multi_strategy_allocate(names, pd.DataFrame(), capital=10000)
+    for v in allocs.values():
+        assert v <= 10000 * 0.2 + 1e-9
+
+
+def test_multi_strategy_allocate_empty_names():
+    opt = PortfolioOptimizer()
+    assert opt.multi_strategy_allocate([], pd.DataFrame(), capital=10000) == {}

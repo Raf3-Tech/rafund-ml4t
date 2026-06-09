@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Mean-reversion on Bollinger Band extremes",
+    tier_hints=["CONSERVATIVE", "STANDARD"],
+    tags=["mean-reversion"],
+)
 class BollingerReversion(BaseStrategy):
     name = "Bollinger Band Reversion"
     min_bars = 20

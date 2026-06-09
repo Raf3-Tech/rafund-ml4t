@@ -11,8 +11,10 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Minimum consistency ratio to appear in each tier
-CONSERVATIVE_MIN_CONSISTENCY = 0.60
+# Minimum consistency ratio to appear in each tier.
+# CONSERVATIVE is set to 0.70 — matches the 70% historical win-probability
+# target for the 1-phase prop challenge (9% profit, 3% DD).
+CONSERVATIVE_MIN_CONSISTENCY = 0.70
 STANDARD_MIN_CONSISTENCY = 0.60
 PERMISSIVE_MIN_CONSISTENCY = 0.50
 

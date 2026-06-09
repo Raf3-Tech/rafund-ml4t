@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Breakout triggered by ATR-measured volatility expansion",
+    tier_hints=["STANDARD", "PERMISSIVE"],
+    tags=["volatility", "breakout"],
+)
 class ATRVolatilityBreakout(BaseStrategy):
     name = "ATR Volatility Breakout"
     min_bars = 14

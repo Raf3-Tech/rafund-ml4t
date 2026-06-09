@@ -289,14 +289,14 @@ def test_engine_reports_positive_drawdown_magnitude():
     # Must be a POSITIVE magnitude, not a negative number as the old code returned.
     assert dd > 0.0
     # Peak equity is reached at price_a == 120 and trough at price_a == 85, a
-    # >6% account drawdown given the 50% leg allocation.
-    assert dd > 6.0
+    # >3% account drawdown given the 50% leg allocation.
+    assert dd > 3.0
 
 
-def test_drawdown_gate_bites_when_oos_drawdown_exceeds_6pct():
+def test_drawdown_gate_bites_when_oos_drawdown_exceeds_3pct():
     # Two folds whose OOS Sharpe is healthy (>= 1.0) but whose drawdown exceeds
-    # the 6% limit. With the old negative-percent bug, worst_oos_drawdown would
-    # have been negative and ``<= 6.0`` always true, so the gate never tripped.
+    # the 3% limit. With the old negative-percent bug, worst_oos_drawdown would
+    # have been negative and ``<= 3.0`` always true, so the gate never tripped.
     runner = _build_dd_helpers()
 
     def _fold(n: int, dd: float) -> FoldResult:
@@ -328,14 +328,14 @@ def test_drawdown_gate_bites_when_oos_drawdown_exceeds_6pct():
 
 
 def test_drawdown_gate_passes_when_within_limit():
-    # Sanity counterpart: healthy Sharpe AND drawdown under 6% must still pass,
+    # Sanity counterpart: healthy Sharpe AND drawdown under 3% must still pass,
     # confirming the positive convention did not invert the comparison.
     runner = _build_dd_helpers()
     aggregate = AggregateMetrics(
         mean_oos_sharpe=1.5,
         median_oos_sharpe=1.5,
-        mean_oos_max_drawdown=3.0,
-        worst_oos_drawdown=4.0,
+        mean_oos_max_drawdown=2.0,
+        worst_oos_drawdown=2.5,
         pct_folds_profitable=100.0,
         pct_folds_account_failed=0.0,
         total_oos_trades=4,

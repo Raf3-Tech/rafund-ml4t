@@ -8,6 +8,7 @@ import pandas as pd
 from config.constants import PERIODS_PER_YEAR
 from backtesting.window_engine import (
     CONSERVATIVE_MAX_DD,
+    CONSERVATIVE_MIN_RETURN,
     STANDARD_MAX_DD,
     PERMISSIVE_MAX_DD,
     FUNDING_PERIODS_PER_YEAR,
@@ -88,21 +89,27 @@ def test_missing_candle_does_not_nan_poison_metrics():
 # ── Pass classification (Rule 4) ──────────────────────────────────────────────
 
 def test_classify_passes_tiers():
-    # DD 2%, positive sharpe, 50% win → passes all three tiers.
+    # DD 2%, return 15%, positive sharpe, 50% win → passes all three tiers.
     cons, std, perm = classify_passes(
-        {"max_drawdown_pct": 2.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0}
+        {"max_drawdown_pct": 2.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0, "total_return_pct": 15.0}
     )
     assert (cons, std, perm) == (True, True, True)
 
-    # DD 8% → fails conservative (3%), passes standard (10%) and permissive.
+    # DD 2%, return 5% (below 9% target) → fails conservative despite low DD.
     cons, std, perm = classify_passes(
-        {"max_drawdown_pct": 8.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0}
+        {"max_drawdown_pct": 2.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0, "total_return_pct": 5.0}
     )
     assert cons is False and std is True and perm is True
 
-    # DD 20%, win 30% → only permissive (which ignores win rate).
+    # DD 8% → fails conservative (3% ceiling), passes standard (10%) and permissive.
     cons, std, perm = classify_passes(
-        {"max_drawdown_pct": 20.0, "sharpe_ratio": 0.5, "win_rate_pct": 30.0}
+        {"max_drawdown_pct": 8.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0, "total_return_pct": 15.0}
+    )
+    assert cons is False and std is True and perm is True
+
+    # DD 20%, win 30% → only permissive (ignores win rate and return target).
+    cons, std, perm = classify_passes(
+        {"max_drawdown_pct": 20.0, "sharpe_ratio": 0.5, "win_rate_pct": 30.0, "total_return_pct": 5.0}
     )
     assert cons is False and std is False and perm is True
 

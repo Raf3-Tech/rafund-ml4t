@@ -30,6 +30,7 @@ rafund-ml4t/
 │
 ├── strategies/
 │   ├── base.py                # BaseSingleAssetStrategy / BasePairsStrategy contracts
+│   ├── registry.py            # StrategyRegistry — decorator-based, agents discover strategies without parsing main.py
 │   ├── stat_arb.py            # StatArbStrategy (unified signal core) + StatArbPairsStrategy
 │   ├── funding_rate_arb.py    # FundingRateArb (8h perpetual carry)
 │   ├── factor_model.py        # ML factor model strategy
@@ -63,9 +64,9 @@ rafund-ml4t/
 │   └── blocker.py             # Stale/drift gate enforcement
 │
 ├── portfolio/
-│   ├── risk.py                # VaR, CVaR, max drawdown, position limits
-│   └── optimizer.py           # Position sizing / capital allocation
-│   (Note: not wired into the backtest engine — library-only utilities)
+│   ├── risk.py                # VaR, CVaR, max drawdown, correlation, diversification ratio, concentration check
+│   └── optimizer.py           # Position sizing, risk-parity weights, half-Kelly fraction, multi-strategy allocation
+│   (Note: library-level allocation utilities; not yet wired into the per-bar engine loop — see Known Limitations)
 │
 ├── data/
 │   ├── db.py                  # PostgreSQL connection + all query methods
@@ -95,7 +96,10 @@ rafund-ml4t/
 │       ├── 0002_...           # engine_results table
 │       └── 0003_add_engine_results_funding_rates.py  # funding_rates table
 │
-├── tests/                     # 261 passed, 1 xpassed
+├── research/
+│   └── pipeline.py            # Closed-loop research pipeline: propose → engine run → gate → JSONL decision log
+│
+├── tests/                     # 299 passed, 1 xpassed
 ├── docs/
 │   ├── QUANT_AUDIT_REPORT.md
 │   └── STRATEGY_ENGINE_DESIGN.md
@@ -119,9 +123,12 @@ rafund-ml4t/
 | 5 | Regime classifier | ✅ present (needs 200+ rows of engine results to activate) |
 | 6 | Funding data pipeline (collector + table + strategy + engine dispatch) | ✅ complete |
 | — | Alembic schema (0003: engine_results + funding_rates) | ✅ complete |
-| — | CLI (engine, leaderboard, train-classifier, collect --funding) | ✅ complete |
+| — | Strategy registry (`strategies/registry.py`) | ✅ complete — `@StrategyRegistry.register` on all 12 strategies; `instantiate_all()` replaces hardcoded list in `run_engine_cmd` |
+| — | Portfolio construction | ✅ complete — `risk_parity_weights`, `kelly_fraction`, `multi_strategy_allocate`; `correlation_matrix`, `diversification_ratio`, `concentration_check` |
+| — | Closed-loop research pipeline (`research/pipeline.py`) | ✅ complete — `python main.py research` runs propose→engine→gate→JSONL |
+| — | CLI (engine, leaderboard, train-classifier, collect --funding, research) | ✅ complete |
 
-**Test suite: 261 passed, 1 xpassed.**
+**Test suite: 299 passed, 1 xpassed.**
 
 ---
 
@@ -130,6 +137,7 @@ rafund-ml4t/
 1. **Missing tests:** leaderboard scoring/tiers, funding collector pagination, regime classifier gate, and a true end-to-end engine run against a temp DB are not yet covered by tests.
 2. **No real engine run yet:** `python main.py engine` has not been run against a populated DB. Synthetic funding Sharpe looked very high on clean sine input — sanity-check on real data is pending.
 3. **`BacktestEngine` reuse (optional / architectural):** the window engine has three private P&L loops (single-asset, pairs, funding). Consolidating onto `BacktestEngine` is an architectural cleanup, not a correctness bug — current loops are tested and produce sane results.
+4. **Portfolio layer not wired into engine:** `risk_parity_weights`, `kelly_fraction`, and `multi_strategy_allocate` exist as tested library utilities but are not yet called per-bar from the engine. Kelly sizing and VaR limits are computed separately and do not feed back into position sizing during a run (see Phase E in AGENTS.md).
 
 ---
 
@@ -142,7 +150,7 @@ These are documented research-stage constraints, not hidden bugs:
 | **Single-asset mark-to-market** — open single-asset positions contribute $0 to equity | `backtesting/engine.py` | Prop-firm drawdown/daily-loss controls see only realised P&L. Pairs backtest is correctly marked. |
 | **Same-bar fills** — signals and fills resolve on the same bar | `backtesting/engine.py` | Look-ahead bias in execution; next-bar-open fills would be more conservative. |
 | **Flat slippage** — cost model uses a fixed fraction regardless of volume or volatility | `backtesting/costs.py` | Understates costs in thin markets; overstates in deep liquid markets. |
-| **`portfolio/` not wired into backtest** — `RiskManager` / `PortfolioOptimizer` exist as importable utilities but are not called from the engine | `portfolio/` | Kelly sizing and VaR limits are computed separately and do not feed back into position sizing during a run. |
+| **`portfolio/` not wired into per-bar engine loop** — `RiskManager` / `PortfolioOptimizer` are library-level utilities (risk-parity allocation, half-Kelly sizing, VaR/CVaR, diversification ratio now present) but not called per-bar from the backtest engine | `portfolio/` | Kelly sizing and VaR limits do not yet feed back into position sizing during an engine run. Phase E in AGENTS.md tracks this. |
 | **Prop-firm control bugs** (audited) — daily-loss parenthesization error, leverage-clip clears the daily halt | `backtesting/engine.py:139,175` | Two prop-firm compliance controls are currently non-functional. |
 | **Regime classifier needs data** — the classifier is non-blocking by design but returns `None` until the `engine_results` table has 200+ rows | `models/regime_classifier.py` | Regime-gated decisions fall back to default tier until enough engine runs accumulate. |
 
@@ -195,15 +203,18 @@ python main.py features                    # compute features
 ## CLI Reference
 
 ```bash
-python main.py collect [--funding]         # Fetch market / funding data
-python main.py features                    # Compute features
-python main.py backtest                    # Single backtest run
-python main.py validate                    # Walk-forward OOS validation
-python main.py retrain                     # Model retraining cycle
-python main.py drift                       # Feature drift check
-python main.py engine [--tier TIER]        # Full multi-strategy window engine
-python main.py leaderboard [--tier TIER]   # Print ranked strategy leaderboard
-python main.py train-classifier            # Train regime classifier
+python main.py collect [--funding]                          # Fetch market / funding data
+python main.py features                                     # Compute features
+python main.py backtest                                     # Single backtest run
+python main.py validate                                     # Walk-forward OOS validation
+python main.py retrain                                      # Model retraining cycle
+python main.py drift                                        # Feature drift check
+python main.py engine [--strategy NAME] [--symbol SYM]     # Walk-forward engine: all strategies × all symbols
+python main.py leaderboard [--tier TIER]                    # Print ranked strategy leaderboard
+python main.py train-classifier                             # Train regime classifier
+python main.py research [--strategy NAME] [--symbol SYM]   # Closed-loop research pipeline (propose→backtest→gate)
+python main.py research --dry-run                           # Gate only, skip engine run (re-use existing results)
+python main.py research --top-n 5 --tier conservative       # Top-5 conservative candidates
 ```
 
 ---
@@ -211,7 +222,7 @@ python main.py train-classifier            # Train regime classifier
 ## Running the Test Suite
 
 ```bash
-pytest                     # 261 passed, 1 xpassed (expected)
+pytest                     # 299 passed, 1 xpassed (expected)
 pytest --cov=. -q          # with coverage
 ```
 
@@ -232,4 +243,4 @@ pytest --cov=. -q          # with coverage
 
 ---
 
-**Last Updated:** 2026-06-08
+**Last Updated:** 2026-06-09

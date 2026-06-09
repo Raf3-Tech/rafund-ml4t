@@ -1,14 +1,17 @@
 """
 ML4T System Entry Point.
 
-This is the main entry point for the machine learning for trading system.
-It orchestrates the entire pipeline from data collection through execution.
+Orchestrates the full pipeline from data collection through strategy evaluation.
 
 Usage:
-    python main.py collect          # Collect market data from Binance
-    python main.py backtest         # Run strategy backtest
-    python main.py paper            # Run paper trading (simulation)
-    python main.py live             # Run live trading (real money - DANGER!)
+    python main.py collect              # Collect OHLCV from Binance (incremental)
+    python main.py collect --funding    # Collect perpetual funding rates
+    python main.py engine               # Walk-forward engine: all strategies × symbols
+    python main.py leaderboard          # Rank results; --tier conservative|standard|permissive
+    python main.py research             # Closed-loop research pipeline (propose→gate→log)
+    python main.py backtest             # Single-strategy backtest
+    python main.py paper                # Paper trading simulation
+    python main.py live                 # Live trading (real money — DANGER)
 """
 
 import logging
@@ -1053,19 +1056,9 @@ def run_engine_cmd(strategy_filter: Optional[str] = None, symbol_filter: Optiona
         logger.info("Symbol filter: %s", symbol_filter)
 
     try:
+        import strategies as _strat_pkg  # noqa: F401 — populates StrategyRegistry
+        from strategies.registry import StrategyRegistry
         from backtesting.window_engine import WalkForwardWindowEngine
-        from strategies.ema_crossover import EMACrossover
-        from strategies.macd import MACDStrategy
-        from strategies.supertrend import SupertrendStrategy
-        from strategies.donchian_breakout import DonchianBreakout
-        from strategies.bollinger_reversion import BollingerReversion
-        from strategies.rsi_extremes import RSIExtremes
-        from strategies.atr_volatility_breakout import ATRVolatilityBreakout
-        from strategies.keltner_squeeze import KeltnerSqueeze
-        from strategies.dca import DCAStrategy
-        from strategies.hodl_rebalance import HODLRebalance
-        from strategies.funding_rate_arb import FundingRateArb
-        from strategies.stat_arb import StatArbPairsStrategy
         from config.loader import get_settings
 
         cfg = get_settings()
@@ -1081,20 +1074,8 @@ def run_engine_cmd(strategy_filter: Optional[str] = None, symbol_filter: Optiona
             db.close_pool()
             return False
 
-        strategies = [
-            EMACrossover(),
-            MACDStrategy(),
-            SupertrendStrategy(),
-            DonchianBreakout(),
-            BollingerReversion(),
-            RSIExtremes(),
-            ATRVolatilityBreakout(),
-            KeltnerSqueeze(),
-            DCAStrategy(),
-            HODLRebalance(),
-            StatArbPairsStrategy(),   # pairs — engine routes via generate_signals_pair
-            FundingRateArb(),         # funding — engine routes via 8h funding_rates data
-        ]
+        strategies = StrategyRegistry.instantiate_all()
+        logger.info("Registry loaded %d strategies: %s", len(strategies), [s.name for s in strategies])
 
         engine = WalkForwardWindowEngine(
             db=db,
@@ -1110,6 +1091,40 @@ def run_engine_cmd(strategy_filter: Optional[str] = None, symbol_filter: Optiona
 
     except Exception as e:
         logger.error("Engine error: %s", str(e), exc_info=True)
+        return False
+
+
+def run_research_cmd(
+    strategy_filter: Optional[str] = None,
+    symbol_filter: Optional[str] = None,
+    top_n: int = 5,
+    tier_filter: Optional[str] = None,
+    dry_run: bool = False,
+) -> bool:
+    """Run the closed-loop research pipeline."""
+    try:
+        from research.pipeline import run_research_pipeline, print_research_summary
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+
+        decisions = run_research_pipeline(
+            db=db,
+            strategy_filter=strategy_filter,
+            symbol_filter=symbol_filter,
+            top_n=top_n,
+            tier_filter=tier_filter,
+            dry_run=dry_run,
+        )
+        db.close_pool()
+        print_research_summary(decisions)
+        return len(decisions) > 0
+
+    except Exception as e:
+        logger.error("Research pipeline error: %s", str(e), exc_info=True)
         return False
 
 
@@ -1209,6 +1224,9 @@ Examples:
   python main.py bootstrap            # Same as pipeline (full infrastructure setup)
   python main.py paper                # Run paper trading
   python main.py live                 # Run live trading (DANGER!)
+  python main.py research             # Closed-loop research pipeline (propose→backtest→gate)
+  python main.py research --dry-run   # Gate only, skip engine run (re-use existing results)
+  python main.py research --top-n 5 --tier conservative  # Top-5 conservative candidates
         """
     )
 
@@ -1220,6 +1238,7 @@ Examples:
             'collect', 'features', 'signals', 'backtest', 'validate', 'retrain',
             'drift', 'backfill', 'pipeline', 'bootstrap', 'paper', 'live',
             'benchmark', 'models', 'engine', 'leaderboard', 'train-classifier',
+            'research',
         ],
         help='Operation mode (default: collect)'
     )
@@ -1230,6 +1249,8 @@ Examples:
     parser.add_argument('--tier', help='Leaderboard tier filter: conservative, standard, permissive')
     parser.add_argument('--funding', action='store_true', help='Collect funding rates (for collect mode)')
     parser.add_argument('--runs', type=int, default=100, help='Number of benchmark prediction runs')
+    parser.add_argument('--top-n', type=int, default=5, dest='top_n', help='Top-N candidates for research pipeline')
+    parser.add_argument('--dry-run', action='store_true', dest='dry_run', help='Skip engine run in research mode')
     parser.add_argument('--all', action='store_true', help='Backfill all configured symbols')
     parser.add_argument('--from', dest='date_from', help='Start date (YYYY-MM-DD) for backfill')
     parser.add_argument('--to', dest='date_to', help='End date (YYYY-MM-DD) for backfill')
@@ -1293,6 +1314,14 @@ Examples:
                 return 1
             exit_code = run_model_status()
             return exit_code
+        elif args.mode == 'research':
+            success = run_research_cmd(
+                strategy_filter=args.strategy,
+                symbol_filter=args.symbol,
+                top_n=args.top_n,
+                tier_filter=args.tier,
+                dry_run=args.dry_run,
+            )
         elif args.mode == 'pipeline':
             success = run_full_pipeline()
         elif args.mode == 'bootstrap':

@@ -62,7 +62,7 @@ def test_flash_crash_pair_breaches_drawdown_floor():
     """A large adverse gap on the long leg must fail the account and halt.
 
     Full allocation (leg_allocation_pct=1.0 -> $2,500 per leg); a 20% gap down
-    on leg A loses ~$500, taking equity below the $4,700 floor.
+    on leg A loses ~$500, taking equity well below the $4,850 floor (3% of $5k).
     """
     n = 10
     prices_a = [100.0] * 5 + [80.0] * 5  # -20% flash crash at bar 5

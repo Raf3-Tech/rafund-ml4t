@@ -7,8 +7,14 @@ from typing import Dict
 import pandas as pd
 
 from strategies.base import BaseStrategy
+from strategies.registry import StrategyRegistry
 
 
+@StrategyRegistry.register(
+    description="Counter-trend entries at RSI oversold/overbought extremes",
+    tier_hints=["CONSERVATIVE", "STANDARD"],
+    tags=["mean-reversion", "oscillator"],
+)
 class RSIExtremes(BaseStrategy):
     name = "RSI Extremes"
     min_bars = 14

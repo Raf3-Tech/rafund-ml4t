@@ -154,12 +154,12 @@ class WalkForwardRunner:
         )
 
     def _evaluate_gate(self, aggregate: AggregateMetrics) -> tuple[bool, str]:
-        if aggregate.mean_oos_sharpe >= 1.0 and aggregate.worst_oos_drawdown <= 6.0:
-            return True, "PASS: mean OOS Sharpe >= 1.0 and worst OOS drawdown <= 6%"
+        if aggregate.mean_oos_sharpe >= 1.0 and aggregate.worst_oos_drawdown <= 3.0:
+            return True, "PASS: mean OOS Sharpe >= 1.0 and worst OOS drawdown <= 3%"
 
         reasons: List[str] = []
         if aggregate.mean_oos_sharpe < 1.0:
             reasons.append(f"mean OOS Sharpe {aggregate.mean_oos_sharpe:.2f} < 1.0")
-        if aggregate.worst_oos_drawdown > 6.0:
-            reasons.append(f"worst OOS drawdown {aggregate.worst_oos_drawdown:.2f}% > 6%")
+        if aggregate.worst_oos_drawdown > 3.0:
+            reasons.append(f"worst OOS drawdown {aggregate.worst_oos_drawdown:.2f}% > 3%")
         return False, "FAIL: " + "; ".join(reasons)
