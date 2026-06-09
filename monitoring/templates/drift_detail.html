@@ -1,67 +1,129 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RAFund ML4T - Drift Detail</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>RAFund ML4T — Drift Detail</title>
   <style>
+    :root {
+      --bg:      #0d1117;
+      --surf:    #161b27;
+      --surf2:   #1e2537;
+      --border:  #2a3150;
+      --accent:  #3b7ef6;
+      --success: #22c55e;
+      --warn:    #f59e0b;
+      --danger:  #ef4444;
+      --text:    #e2e8f0;
+      --muted:   #7e8fa8;
+      --radius:  8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      margin: 0; padding: 24px; background: #f5f6f8; color: #1b1f24;
+      font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      font-size: 14px; line-height: 1.5;
+      padding: 32px 24px 60px;
+      max-width: 860px; margin: 0 auto;
     }
-    h1 { font-size: 22px; margin: 0 0 4px; }
-    .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
-    a.back { display: inline-block; margin-bottom: 16px; color: #2563eb; text-decoration: none; font-size: 14px; }
-    a.back:hover { text-decoration: underline; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
-    .sev-none { background: #16a34a; }
-    .sev-warning { background: #d97706; }
-    .sev-critical { background: #dc2626; }
-    .sev-unknown { background: #6b7280; }
-    .summary {
-      background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); border-radius: 6px;
-      padding: 12px 16px; margin: 12px 0 18px; font-size: 14px;
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .back {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 13px; color: var(--muted); margin-bottom: 24px;
     }
-    .summary dt { color: #6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
-    .summary dd { margin: 2px 0 12px; }
-    .summary dd:last-child { margin-bottom: 0; }
-    .chart { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); border-radius: 6px; padding: 12px; }
-    .empty { color: #6b7280; font-style: italic; padding: 10px 12px; }
-    .error { color: #b91c1c; font-weight: 600; padding: 10px 12px; }
+    .back:hover { color: var(--accent); text-decoration: none; }
+
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    .subtitle { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+
+    .card {
+      background: var(--surf); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; margin-bottom: 20px;
+    }
+    .card-title {
+      font-size: 11px; font-weight: 600; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 16px;
+    }
+
+    .meta-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 9px 0; border-bottom: 1px solid var(--border);
+    }
+    .meta-row:last-child { border-bottom: none; }
+    .meta-label { font-size: 12px; color: var(--muted); }
+    .meta-val   { font-size: 13px; font-weight: 600; }
+
+    .pill {
+      display: inline-block; padding: 3px 10px; border-radius: 10px;
+      font-size: 12px; font-weight: 600;
+    }
+    .sev-none     { background: rgba(34,197,94,.15);  color: var(--success); }
+    .sev-warning  { background: rgba(245,158,11,.15); color: var(--warn); }
+    .sev-critical { background: rgba(239,68,68,.15);  color: var(--danger); }
+    .sev-unknown  { background: var(--surf2);          color: var(--muted); }
+
+    .empty { color: var(--muted); font-style: italic; padding: 10px 0; }
+    .error { color: var(--danger); font-weight: 600; padding: 10px 0; }
+
+    .chart-wrap { background: var(--surf); border: 1px solid var(--border);
+                  border-radius: var(--radius); padding: 16px; }
   </style>
 </head>
 <body>
-  <a class="back" href="/">&larr; back to dashboard</a>
+
+  <a class="back" href="/">← back to dashboard</a>
 
   <h1>Drift Detail</h1>
   <div class="subtitle">
-    {% if model %}Model: <strong>{{ model }}</strong>{% endif %}
-    {% if symbol %} &middot; Symbol: <strong>{{ symbol }}</strong>{% endif %}
+    {% if model %}<strong>{{ model }}</strong>{% endif %}
+    {% if model and symbol %} &middot; {% endif %}
+    {% if symbol %}<strong>{{ symbol }}</strong>{% endif %}
   </div>
 
   {% if error %}
-  <div class="error">{{ error }}</div>
+    <p class="error">{{ error }}</p>
   {% elif report is none %}
-  <div class="empty">No drift data available.</div>
+    <p class="empty">No drift data available for this model / symbol.</p>
   {% else %}
-  <div class="summary">
-    <dt>Severity</dt>
-    <dd><span class="pill sev-{{ report.severity }}">{{ report.severity }}</span></dd>
-    <dt>Max PSI</dt>
-    <dd>{{ '%.4f'|format(report.max_psi) if report.max_psi is not none else '-' }}</dd>
-    <dt>Recommended Action</dt>
-    <dd>{{ report.recommended_action }}</dd>
-    <dt>Features Drifted</dt>
-    <dd>
-      {% if report.features_drifted %}{{ report.features_drifted|join(', ') }}{% else %}none{% endif %}
-    </dd>
-    <dt>Detected At</dt>
-    <dd>{{ report.detected_at if report.detected_at is not none else '-' }}</dd>
-  </div>
+    <div class="card">
+      <div class="card-title">Summary</div>
 
-  {% if chart_html %}
-  <div class="chart">{{ chart_html|safe }}</div>
+      <div class="meta-row">
+        <span class="meta-label">Severity</span>
+        <span class="meta-val">
+          <span class="pill sev-{{ report.severity }}">{{ report.severity|upper }}</span>
+        </span>
+      </div>
+
+      <div class="meta-row">
+        <span class="meta-label">Max PSI</span>
+        <span class="meta-val">{{ '%.4f'|format(report.max_psi) if report.max_psi is not none else '—' }}</span>
+      </div>
+
+      <div class="meta-row">
+        <span class="meta-label">Recommended Action</span>
+        <span class="meta-val">{{ report.recommended_action }}</span>
+      </div>
+
+      <div class="meta-row">
+        <span class="meta-label">Features Drifted</span>
+        <span class="meta-val">
+          {% if report.features_drifted %}{{ report.features_drifted|join(', ') }}{% else %}none{% endif %}
+        </span>
+      </div>
+
+      <div class="meta-row">
+        <span class="meta-label">Detected At</span>
+        <span class="meta-val">{{ report.detected_at if report.detected_at is not none else '—' }}</span>
+      </div>
+    </div>
+
+    {% if chart_html %}
+    <div class="chart-wrap">{{ chart_html|safe }}</div>
+    {% endif %}
   {% endif %}
-  {% endif %}
+
 </body>
 </html>

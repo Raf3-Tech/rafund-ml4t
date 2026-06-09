@@ -1,145 +1,1047 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RAFund ML4T - Ops Dashboard</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>RAFund ML4T</title>
   <style>
-    body {
-      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      margin: 0; padding: 24px; background: #f5f6f8; color: #1b1f24;
+    /* ── Design tokens ─────────────────────────────────────────────────── */
+    :root {
+      --bg:        #0d1117;
+      --surf:      #161b27;
+      --surf2:     #1e2537;
+      --border:    #2a3150;
+      --accent:    #3b7ef6;
+      --acc-h:     #2d6ae0;
+      --success:   #22c55e;
+      --warn:      #f59e0b;
+      --danger:    #ef4444;
+      --text:      #e2e8f0;
+      --muted:     #7e8fa8;
+      --radius:    8px;
+      --mono:      'SF Mono', 'Fira Code', monospace;
     }
-    h1 { font-size: 22px; margin: 0 0 4px; }
-    h2 { font-size: 16px; margin: 28px 0 10px; }
-    .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
-    .actions { margin: 16px 0; }
-    button {
-      font-size: 14px; padding: 8px 14px; margin-right: 8px; border: 0;
-      border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer;
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+           background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+    a { color: var(--accent); text-decoration: none; }
+
+    /* ── Top bar ───────────────────────────────────────────────────────── */
+    .topbar {
+      background: var(--surf);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 0;
+      padding: 0 24px; height: 52px; position: sticky; top: 0; z-index: 100;
     }
-    button:hover { background: #1d4ed8; }
-    button:disabled { background: #9ca3af; cursor: default; }
-    table {
-      border-collapse: collapse; width: 100%; background: #fff;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden;
+    .brand { font-weight: 700; font-size: 16px; color: var(--text);
+             white-space: nowrap; margin-right: 32px; }
+    .brand span { color: var(--accent); }
+    .tabs { display: flex; gap: 2px; }
+    .tab-btn {
+      background: none; border: none; color: var(--muted);
+      padding: 0 16px; height: 52px; cursor: pointer;
+      font-size: 13px; font-weight: 500; border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
     }
-    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eceef1; font-size: 13px; }
-    th { background: #f0f2f5; font-weight: 600; }
-    tr.blocked { background: #fde8e8; }
-    tr.safe { background: #e7f6ec; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
-    .sev-none { background: #16a34a; }
-    .sev-warning { background: #d97706; }
-    .sev-critical { background: #dc2626; }
-    .sev-unknown { background: #6b7280; }
-    .status-blocked { color: #b91c1c; font-weight: 600; }
-    .status-safe { color: #15803d; font-weight: 600; }
-    .empty { color: #6b7280; font-style: italic; padding: 10px 12px; }
-    pre {
-      background: #11161c; color: #d6e2ef; padding: 12px; border-radius: 6px;
-      overflow: auto; font-size: 12px; max-height: 320px; margin-top: 10px;
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* ── Layout ────────────────────────────────────────────────────────── */
+    main { max-width: 1280px; margin: 0 auto; padding: 28px 24px 60px; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; }
+    @media (max-width: 860px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+    /* ── Cards ─────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surf); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px;
     }
+    .card-title {
+      font-size: 12px; font-weight: 600; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 16px;
+    }
+    .section-hd {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .section-hd h2 { font-size: 15px; font-weight: 600; }
+
+    /* ── Form elements ─────────────────────────────────────────────────── */
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+    .field input[type=number], .field select {
+      width: 100%; background: var(--surf2); border: 1px solid var(--border);
+      color: var(--text); border-radius: 6px; padding: 8px 10px;
+      font-size: 14px; outline: none; appearance: none;
+    }
+    .field input[type=number]:focus, .field select:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,126,246,.15);
+    }
+    .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .inline-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    /* ── Buttons ───────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+      font-size: 13px; font-weight: 500; transition: background .15s, opacity .15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--acc-h); }
+    .btn-secondary { background: var(--surf2); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-danger { background: #450a0a; color: var(--danger); border: 1px solid #7f1d1d; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+
+    /* ── Tables ────────────────────────────────────────────────────────── */
+    .tbl-wrap { overflow-x: auto; border-radius: var(--radius); }
+    table { width: 100%; border-collapse: collapse; }
+    th { background: var(--surf2); font-size: 11px; font-weight: 600;
+         text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+         padding: 8px 12px; text-align: left; white-space: nowrap; }
+    td { padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    tr:last-child td { border-bottom: none; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover td { background: var(--surf2); }
+    tr.selected td { background: rgba(59,126,246,.08); }
+    .empty-row td { color: var(--muted); font-style: italic; text-align: center; padding: 24px; }
+
+    /* ── Badges ────────────────────────────────────────────────────────── */
+    .badge {
+      display: inline-block; padding: 2px 7px; border-radius: 10px;
+      font-size: 11px; font-weight: 600; white-space: nowrap;
+    }
+    .badge-fresh, .badge-cons   { background: rgba(34,197,94,.15);  color: var(--success); }
+    .badge-stale, .badge-std    { background: rgba(245,158,11,.15); color: var(--warn); }
+    .badge-old,   .badge-perm   { background: rgba(239,68,68,.15);  color: var(--danger); }
+    .badge-none                 { background: var(--surf2);          color: var(--muted); }
+    .pos { color: var(--success); }
+    .neg { color: var(--danger); }
+
+    /* ── Tier pills row ─────────────────────────────────────────────────── */
+    .tier-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tier-btn {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--surf2); color: var(--muted);
+      cursor: pointer; transition: all .15s;
+    }
+    .tier-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .tier-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    /* ── Challenge summary ─────────────────────────────────────────────── */
+    .sum-row { display: flex; justify-content: space-between;
+               padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .sum-row:last-child { border-bottom: none; }
+    .sum-label { font-size: 12px; color: var(--muted); }
+    .sum-val { font-size: 13px; font-weight: 600; }
+    .sum-val.green { color: var(--success); }
+    .sum-val.red   { color: var(--danger); }
+    .sum-val.blue  { color: var(--accent); }
+
+    /* ── Job log ───────────────────────────────────────────────────────── */
+    .job-wrap { margin-top: 16px; }
+    .job-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .job-status { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+    .job-status-pending { background: var(--surf2); color: var(--muted); }
+    .job-status-running { background: rgba(245,158,11,.15); color: var(--warn); }
+    .job-status-done    { background: rgba(34,197,94,.15);  color: var(--success); }
+    .job-status-failed  { background: rgba(239,68,68,.15);  color: var(--danger); }
+    .job-log {
+      background: #0a0d13; border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; color: #9ab;
+      max-height: 340px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    }
+
+    /* ── Detail panel ──────────────────────────────────────────────────── */
+    #detail-panel {
+      margin-top: 20px; border: 1px solid var(--accent);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    .detail-hd {
+      background: rgba(59,126,246,.1); padding: 12px 16px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .detail-hd h3 { font-size: 14px; font-weight: 600; color: var(--accent); }
+    .detail-close { background: none; border: none; color: var(--muted);
+                    font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px; }
+    .detail-close:hover { color: var(--text); }
+
+    /* ── Research decisions ─────────────────────────────────────────────── */
+    .decision-card {
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 14px 16px; margin-bottom: 10px;
+    }
+    .decision-card.accepted { border-left: 3px solid var(--success); }
+    .decision-card.rejected { border-left: 3px solid var(--danger); }
+    .decision-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .decision-name { font-weight: 600; font-size: 13px; }
+    .decision-reason { font-size: 12px; color: var(--muted); }
+    .decision-meta { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+    /* ── Stat grid (challenge summary numbers) ─────────────────────────── */
+    .stat-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 12px; }
+    .stat-box { background: var(--surf2); border-radius: 6px; padding: 12px 14px; }
+    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+    .stat-val { font-size: 20px; font-weight: 700; }
+
+    /* ── Toast ─────────────────────────────────────────────────────────── */
+    #toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+      opacity: 0; transform: translateY(8px); transition: all .25s;
+      max-width: 320px; pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: none; }
+    .toast-success { background: #14532d; color: var(--success); border: 1px solid #166534; }
+    .toast-error   { background: #450a0a; color: var(--danger);  border: 1px solid #7f1d1d; }
+    .toast-info    { background: var(--surf2); color: var(--text); border: 1px solid var(--border); }
+
+    /* ── Misc ──────────────────────────────────────────────────────────── */
+    .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+    .page-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .page-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+    .spinning { animation: spin 1s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .separator { margin: 0 6px; color: var(--border); }
   </style>
 </head>
 <body>
-  <h1>RAFund ML4T - Ops Dashboard</h1>
-  <div class="subtitle">Model lifecycle status, drift monitoring, and on-demand actions.</div>
 
-  <div class="actions">
-    <button id="btn-retrain" onclick="postAction('/api/retrain', {})">Retrain now</button>
-    <button id="btn-drift" onclick="runDriftCheck()">Check drift</button>
+<!-- ── Top bar ─────────────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <div class="brand">RAF<span>und</span> ML4T</div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="challenge" onclick="switchTab('challenge')">⚙ Challenge</button>
+    <button class="tab-btn" data-tab="data"      onclick="switchTab('data')">⬇ Data</button>
+    <button class="tab-btn" data-tab="simulate"  onclick="switchTab('simulate')">▶ Simulate</button>
+    <button class="tab-btn" data-tab="results"   onclick="switchTab('results')">📊 Results</button>
+    <button class="tab-btn" data-tab="research"  onclick="switchTab('research')">🔬 Research</button>
+    <button class="tab-btn" data-tab="ops"       onclick="switchTab('ops')">🛡 Ops</button>
+  </nav>
+</div>
+
+<main>
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: CHALLENGE SETUP
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-challenge" class="panel active">
+  <div class="page-title">Prop Challenge Setup</div>
+  <div class="page-sub">Define the rules for your 1-phase prop challenge. These parameters drive the simulation gate and leaderboard win-probability calculation.</div>
+
+  <div class="grid-2">
+    <!-- Config form -->
+    <div class="card">
+      <div class="card-title">Challenge Parameters</div>
+      <div class="inline-fields">
+        <div class="field">
+          <label>Account Size ($)</label>
+          <input type="number" id="cfg-account" min="100" step="100" value="5000" oninput="updateSummary()"/>
+        </div>
+        <div class="field">
+          <label>Profit Target (%)</label>
+          <input type="number" id="cfg-profit" min="0.1" max="50" step="0.1" value="9" oninput="updateSummary()"/>
+          <div class="hint">Cumulative target — not per day</div>
+        </div>
+        <div class="field">
+          <label>Daily Loss Limit (%)</label>
+          <input type="number" id="cfg-daily-loss" min="0.1" max="20" step="0.1" value="3" oninput="updateSummary()"/>
+        </div>
+        <div class="field">
+          <label>Max Drawdown (%)</label>
+          <input type="number" id="cfg-max-dd" min="0.1" max="20" step="0.1" value="3" oninput="updateSummary()"/>
+          <div class="hint">Static from initial balance</div>
+        </div>
+        <div class="field">
+          <label>Max Leverage (×)</label>
+          <input type="number" id="cfg-leverage" min="1" max="100" step="0.5" value="5" oninput="updateSummary()"/>
+        </div>
+        <div class="field">
+          <label>Win Probability Target (%)</label>
+          <input type="number" id="cfg-win-prob" min="0" max="100" step="1" value="70" oninput="updateSummary()"/>
+          <div class="hint">Min % of windows that must pass</div>
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:4px; margin-bottom:0">
+        <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
+        <button class="btn btn-secondary" onclick="loadConfig()">Reset</button>
+      </div>
+    </div>
+
+    <!-- Live summary -->
+    <div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Challenge Summary</div>
+        <div class="sum-row">
+          <span class="sum-label">Profit target (absolute)</span>
+          <span class="sum-val green" id="sum-profit-abs">$450.00</span>
+        </div>
+        <div class="sum-row">
+          <span class="sum-label">Daily loss limit (absolute)</span>
+          <span class="sum-val red" id="sum-daily-abs">$150.00</span>
+        </div>
+        <div class="sum-row">
+          <span class="sum-label">Max drawdown limit (absolute)</span>
+          <span class="sum-val red" id="sum-dd-abs">$150.00</span>
+        </div>
+        <div class="sum-row">
+          <span class="sum-label">Equity floor</span>
+          <span class="sum-val" id="sum-floor">$4,850.00</span>
+        </div>
+        <div class="sum-row">
+          <span class="sum-label">Equity target</span>
+          <span class="sum-val green" id="sum-target">$5,450.00</span>
+        </div>
+        <div class="sum-row">
+          <span class="sum-label">Win probability target</span>
+          <span class="sum-val blue" id="sum-win-prob">70%</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Quick Actions</div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
+          After saving your config, go to <strong>Simulate</strong> to run the walk-forward engine,
+          then <strong>Results</strong> to see which strategies meet your win-probability target.
+        </p>
+        <div class="btn-row" style="margin-bottom:0">
+          <button class="btn btn-secondary btn-sm" onclick="switchTab('simulate')">▶ Run Simulation →</button>
+          <button class="btn btn-secondary btn-sm" onclick="switchTab('results')">📊 View Results →</button>
+        </div>
+      </div>
+    </div>
   </div>
-  <pre id="result" style="display:none;"></pre>
+</div>
 
-  <h2>Production Models</h2>
-  {% if model_rows %}
-  <table>
-    <thead>
-      <tr>
-        <th>Model</th><th>Symbol</th><th>Stage</th><th>Age (days)</th>
-        <th>OOS Sharpe</th><th>Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in model_rows %}
-      <tr class="{% if row.blocked %}blocked{% elif row.safe_to_trade %}safe{% endif %}">
-        <td>{{ row.model_name }}</td>
-        <td>{{ row.symbol }}</td>
-        <td>{{ row.stage }}</td>
-        <td>{{ row.age_days if row.age_days is not none else '-' }}</td>
-        <td>{{ '%.3f'|format(row.oos_sharpe) if row.oos_sharpe is not none else '-' }}</td>
-        <td>
-          {% if row.blocked %}
-            <span class="status-blocked">BLOCKED{% if row.block_reason %} ({{ row.block_reason }}){% endif %}</span>
-          {% elif row.safe_to_trade %}
-            <span class="status-safe">SAFE TO TRADE</span>
-          {% else %}
-            <span>not tradeable</span>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty">No production models found.</div>
-  {% endif %}
 
-  <h2>Drift Status</h2>
-  {% if drift_rows %}
-  <table>
-    <thead>
-      <tr><th>Model</th><th>Symbol</th><th>Severity</th><th>Detected At</th><th>Actions</th></tr>
-    </thead>
-    <tbody>
-      {% for row in drift_rows %}
-      <tr>
-        <td>{{ row.model_name }}</td>
-        <td>{{ row.symbol }}</td>
-        <td><span class="pill sev-{{ row.severity }}">{{ row.severity }}</span></td>
-        <td>{{ row.detected_at if row.detected_at is not none else '-' }}</td>
-        <td><a href="/drift?model={{ row.model_name|urlencode }}&symbol={{ row.symbol|urlencode }}">details</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty">No drift reports found.</div>
-  {% endif %}
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: DATA
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-data" class="panel">
+  <div class="page-title">Market Data</div>
+  <div class="page-sub">Refresh OHLCV prices and funding rates from Binance. The engine uses this data for all simulations.</div>
 
-  <script>
-    function showResult(data) {
-      const el = document.getElementById('result');
-      el.style.display = 'block';
-      el.textContent = (typeof data === 'string') ? data : JSON.stringify(data, null, 2);
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btn-collect" onclick="runCollect(false)">⬇ Refresh OHLCV</button>
+    <button class="btn btn-secondary" id="btn-collect-funding" onclick="runCollect(true)">⬇ Refresh Funding Rates</button>
+    <button class="btn btn-secondary btn-sm" onclick="loadDataStatus()">↻ Reload Status</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Symbol Freshness</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>From</th><th>Latest</th><th>Bars</th><th>Status</th></tr>
+        </thead>
+        <tbody id="data-status-body">
+          <tr class="empty-row"><td colspan="5">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="data-job-wrap" class="job-wrap" style="display:none">
+    <div class="job-header">
+      <span style="font-size:13px;font-weight:600">Collection job</span>
+      <span class="job-status job-status-pending" id="data-job-status">pending</span>
+    </div>
+    <div class="job-log" id="data-job-log"></div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: SIMULATE
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-simulate" class="panel">
+  <div class="page-title">Walk-Forward Simulation</div>
+  <div class="page-sub">Run the engine across all strategies and symbols. Leave filters empty to run everything (~7 min). Filter by strategy or symbol for a faster targeted run.</div>
+
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">Engine Options</div>
+    <div class="inline-fields" style="max-width:480px">
+      <div class="field">
+        <label>Strategy (optional)</label>
+        <select id="engine-strategy">
+          <option value="">All strategies</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Symbol (optional)</label>
+        <select id="engine-symbol">
+          <option value="">All symbols</option>
+        </select>
+      </div>
+    </div>
+    <div class="btn-row" style="margin-bottom:0">
+      <button class="btn btn-primary" id="btn-engine" onclick="runEngine()">▶ Run Simulation</button>
+    </div>
+  </div>
+
+  <div id="engine-job-wrap" class="job-wrap" style="display:none">
+    <div class="job-header">
+      <span style="font-size:13px;font-weight:600">Engine job</span>
+      <span class="job-status job-status-pending" id="engine-job-status">pending</span>
+      <span id="engine-job-elapsed" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="job-log" id="engine-job-log"></div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: RESULTS (LEADERBOARD)
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-results" class="panel">
+  <div class="page-title">Strategy Leaderboard</div>
+  <div class="page-sub">
+    Ranked by win probability — the % of historical windows that hit the profit target while staying within the drawdown limit.
+    Click any row to see window-by-window breakdown.
+  </div>
+
+  <div class="section-hd">
+    <div class="tier-tabs">
+      <button class="tier-btn active" data-tier="conservative" onclick="loadLeaderboard('conservative')">Conservative</button>
+      <button class="tier-btn" data-tier="standard"     onclick="loadLeaderboard('standard')">Standard</button>
+      <button class="tier-btn" data-tier="permissive"   onclick="loadLeaderboard('permissive')">Permissive</button>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="loadLeaderboard(currentTier)">↻ Refresh</button>
+  </div>
+
+  <div class="card" style="padding:0">
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Strategy</th>
+            <th>Symbol</th>
+            <th id="win-pct-header">Win %</th>
+            <th>Avg Sharpe</th>
+            <th>Avg Return</th>
+            <th>Avg DD</th>
+            <th>Avg Win Rate</th>
+            <th>Windows</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body">
+          <tr class="empty-row"><td colspan="8">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Detail drill-down (hidden until row clicked) -->
+  <div id="detail-panel" style="display:none">
+    <div class="detail-hd">
+      <h3 id="detail-title"></h3>
+      <button class="detail-close" onclick="closeDetail()">✕</button>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Start</th><th>End</th><th>Yrs</th><th>Type</th><th>Return</th><th>Max DD</th><th>Sharpe</th><th>Win Rate</th><th>Trades</th><th>Tier</th><th>Params</th></tr>
+        </thead>
+        <tbody id="detail-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: RESEARCH
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-research" class="panel">
+  <div class="page-title">Research Pipeline</div>
+  <div class="page-sub">Re-gate the latest engine results through the acceptance pipeline. Uses existing simulation data — no engine re-run needed.</div>
+
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">Pipeline Options</div>
+    <div class="inline-fields" style="max-width:480px">
+      <div class="field">
+        <label>Strategy (optional)</label>
+        <select id="research-strategy">
+          <option value="">All strategies</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Tier</label>
+        <select id="research-tier">
+          <option value="conservative">Conservative (9% profit, 3% DD)</option>
+          <option value="standard">Standard (10% DD)</option>
+          <option value="permissive">Permissive (25% DD)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Top-N candidates</label>
+        <select id="research-topn">
+          <option value="5">5</option>
+          <option value="10" selected>10</option>
+          <option value="20">20</option>
+          <option value="50">50</option>
+        </select>
+      </div>
+    </div>
+    <div class="btn-row" style="margin-bottom:0">
+      <button class="btn btn-primary" id="btn-research" onclick="runResearch()">🔬 Run Research Pipeline</button>
+    </div>
+  </div>
+
+  <div id="research-job-wrap" class="job-wrap" style="display:none">
+    <div class="job-header">
+      <span style="font-size:13px;font-weight:600">Research job</span>
+      <span class="job-status job-status-pending" id="research-job-status">pending</span>
+    </div>
+    <div class="job-log" id="research-job-log"></div>
+  </div>
+
+  <div id="research-decisions" style="margin-top:20px"></div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: OPS
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-ops" class="panel">
+  <div class="page-title">Ops Dashboard</div>
+  <div class="page-sub">Model lifecycle status, drift monitoring, and on-demand retraining.</div>
+
+  <div class="btn-row">
+    <button class="btn btn-secondary" onclick="postAction('/api/retrain',{})">Retrain now</button>
+    <button class="btn btn-secondary" onclick="openDriftCheck()">Check drift</button>
+  </div>
+
+  <div id="ops-result" class="job-log" style="display:none;margin-bottom:16px;max-height:180px"></div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Production Models</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Model</th><th>Symbol</th><th>Stage</th><th>Age (d)</th><th>OOS Sharpe</th><th>Status</th></tr></thead>
+          <tbody id="models-body">
+            {% if model_rows %}
+              {% for row in model_rows %}
+              <tr>
+                <td>{{ row.model_name }}</td>
+                <td>{{ row.symbol }}</td>
+                <td>{{ row.stage }}</td>
+                <td>{{ row.age_days if row.age_days is not none else '-' }}</td>
+                <td>{{ '%.3f'|format(row.oos_sharpe) if row.oos_sharpe is not none else '-' }}</td>
+                <td>
+                  {% if row.blocked %}
+                    <span class="badge badge-old">BLOCKED{% if row.block_reason %} ({{ row.block_reason }}){% endif %}</span>
+                  {% elif row.safe_to_trade %}
+                    <span class="badge badge-fresh">SAFE</span>
+                  {% else %}
+                    <span class="badge badge-none">not tradeable</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="empty-row"><td colspan="6">No production models found.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Drift Status</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Model</th><th>Symbol</th><th>Severity</th><th>Detected</th><th></th></tr></thead>
+          <tbody>
+            {% if drift_rows %}
+              {% for row in drift_rows %}
+              <tr>
+                <td>{{ row.model_name }}</td>
+                <td>{{ row.symbol }}</td>
+                <td><span class="badge badge-{{ row.severity }}">{{ row.severity }}</span></td>
+                <td>{{ row.detected_at.strftime('%Y-%m-%d') if row.detected_at is not none else '-' }}</td>
+                <td><a href="/drift?model={{ row.model_name|urlencode }}&symbol={{ row.symbol|urlencode }}">details</a></td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="empty-row"><td colspan="5">No drift reports found.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+// ── State ───────────────────────────────────────────────────────────────────
+let currentTier = 'conservative';
+let pollTimers  = {};   // { jobId: intervalId }
+let jobStarts   = {};   // { jobId: Date }
+let elapsedTimer = null;
+
+// ── Boot ────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  loadConfig();
+  loadStrategies();
+  loadSymbols();
+  loadDataStatus();
+  loadLeaderboard('conservative');
+  fetchResearchDecisions();
+});
+
+// ── Tab switching ────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  document.querySelector('[data-tab="' + name + '"]').classList.add('active');
+  if (name === 'results') loadLeaderboard(currentTier);
+}
+
+// ── Challenge config ─────────────────────────────────────────────────────────
+function updateSummary() {
+  const acct = parseFloat(document.getElementById('cfg-account').value) || 0;
+  const prof = parseFloat(document.getElementById('cfg-profit').value)  || 0;
+  const dl   = parseFloat(document.getElementById('cfg-daily-loss').value) || 0;
+  const dd   = parseFloat(document.getElementById('cfg-max-dd').value) || 0;
+  const wp   = parseFloat(document.getElementById('cfg-win-prob').value) || 0;
+
+  const fmt = v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  document.getElementById('sum-profit-abs').textContent  = fmt(acct * prof / 100);
+  document.getElementById('sum-daily-abs').textContent   = fmt(acct * dl / 100);
+  document.getElementById('sum-dd-abs').textContent      = fmt(acct * dd / 100);
+  document.getElementById('sum-floor').textContent       = fmt(acct * (1 - dd / 100));
+  document.getElementById('sum-target').textContent      = fmt(acct * (1 + prof / 100));
+  document.getElementById('sum-win-prob').textContent    = wp + '%';
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/prop-config');
+    const cfg = await r.json();
+    document.getElementById('cfg-account').value    = cfg.account_size;
+    document.getElementById('cfg-profit').value     = cfg.profit_pct;
+    document.getElementById('cfg-daily-loss').value = cfg.daily_loss_pct;
+    document.getElementById('cfg-max-dd').value     = cfg.max_dd_pct;
+    document.getElementById('cfg-leverage').value   = cfg.max_leverage;
+    document.getElementById('cfg-win-prob').value   = cfg.win_prob_target;
+    updateSummary();
+  } catch(e) { showToast('Could not load config', 'error'); }
+}
+
+async function saveConfig() {
+  const cfg = {
+    account_size:    parseFloat(document.getElementById('cfg-account').value),
+    profit_pct:      parseFloat(document.getElementById('cfg-profit').value),
+    daily_loss_pct:  parseFloat(document.getElementById('cfg-daily-loss').value),
+    max_dd_pct:      parseFloat(document.getElementById('cfg-max-dd').value),
+    max_leverage:    parseFloat(document.getElementById('cfg-leverage').value),
+    win_prob_target: parseFloat(document.getElementById('cfg-win-prob').value),
+  };
+  try {
+    const r = await fetch('/api/prop-config', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfg)
+    });
+    const data = await r.json();
+    if (data.ok) { showToast('Config saved ✓', 'success'); }
+    else         { showToast('Save failed: ' + data.error, 'error'); }
+  } catch(e) { showToast('Save error: ' + e, 'error'); }
+}
+
+// ── Data status ──────────────────────────────────────────────────────────────
+async function loadDataStatus() {
+  try {
+    const r = await fetch('/api/data-status');
+    const rows = await r.json();
+    const tbody = document.getElementById('data-status-body');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No data. Run collection first.</td></tr>';
+      return;
     }
+    tbody.innerHTML = rows.map(row => `
+      <tr>
+        <td>${row.symbol}</td>
+        <td style="color:var(--muted)">${row.earliest}</td>
+        <td>${row.latest}</td>
+        <td style="color:var(--muted)">${row.bars.toLocaleString()}</td>
+        <td><span class="badge badge-${row.status}">${row.status}${row.stale_days > 1 ? ' (+' + row.stale_days + 'd)' : ''}</span></td>
+      </tr>
+    `).join('');
+  } catch(e) {
+    document.getElementById('data-status-body').innerHTML =
+      '<tr class="empty-row"><td colspan="5">Error loading status.</td></tr>';
+  }
+}
 
-    async function postAction(url, body) {
-      const buttons = document.querySelectorAll('button');
-      buttons.forEach(b => b.disabled = true);
-      showResult('Running ' + url + ' ...');
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body || {})
-        });
-        const data = await resp.json();
-        showResult(data);
-      } catch (err) {
-        showResult('Error: ' + err);
-      } finally {
-        buttons.forEach(b => b.disabled = false);
+// ── Collect ──────────────────────────────────────────────────────────────────
+async function runCollect(funding) {
+  const btnId = funding ? 'btn-collect-funding' : 'btn-collect';
+  const label = funding ? '⬇ Refresh Funding Rates' : '⬇ Refresh OHLCV';
+  const btn = document.getElementById(btnId);
+  btn.disabled = true; btn.textContent = '⏳ Running…';
+
+  try {
+    const r = await fetch('/api/collect', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({funding})
+    });
+    if (r.status === 409) {
+      showToast('Collection already running', 'info');
+      btn.disabled = false; btn.textContent = label; return;
+    }
+    const {job_id} = await r.json();
+    document.getElementById('data-job-wrap').style.display = 'block';
+    pollJob(job_id, 'data', () => {
+      btn.disabled = false; btn.textContent = label;
+      loadDataStatus();
+      showToast('Data refresh complete ✓', 'success');
+    });
+  } catch(e) {
+    btn.disabled = false; btn.textContent = label;
+    showToast('Error: ' + e, 'error');
+  }
+}
+
+// ── Engine ────────────────────────────────────────────────────────────────────
+async function loadStrategies() {
+  try {
+    const r = await fetch('/api/strategies');
+    const strats = await r.json();
+    const opts = '<option value="">All strategies</option>' +
+      strats.map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+    document.getElementById('engine-strategy').innerHTML = opts;
+    document.getElementById('research-strategy').innerHTML = opts;
+  } catch(e) {}
+}
+
+async function loadSymbols() {
+  try {
+    const r = await fetch('/api/symbols');
+    const syms = await r.json();
+    const opts = '<option value="">All symbols</option>' +
+      syms.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+    document.getElementById('engine-symbol').innerHTML = opts;
+  } catch(e) {}
+}
+
+async function runEngine() {
+  const btn = document.getElementById('btn-engine');
+  btn.disabled = true; btn.textContent = '⏳ Simulating…';
+
+  const strategy = document.getElementById('engine-strategy').value;
+  const symbol   = document.getElementById('engine-symbol').value;
+  const body = {};
+  if (strategy) body.strategy = strategy;
+  if (symbol)   body.symbol   = symbol;
+
+  try {
+    const r = await fetch('/api/engine', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    if (r.status === 409) {
+      showToast('Engine already running', 'info');
+      btn.disabled = false; btn.textContent = '▶ Run Simulation'; return;
+    }
+    const {job_id} = await r.json();
+    jobStarts[job_id] = new Date();
+    document.getElementById('engine-job-wrap').style.display = 'block';
+    startElapsed('engine-job-elapsed', job_id);
+    pollJob(job_id, 'engine', (job) => {
+      btn.disabled = false; btn.textContent = '▶ Run Simulation';
+      stopElapsed();
+      if (job.status === 'done') {
+        loadLeaderboard(currentTier);
+        showToast('Simulation complete ✓', 'success');
+      } else {
+        showToast('Simulation failed — check log', 'error');
       }
+    });
+  } catch(e) {
+    btn.disabled = false; btn.textContent = '▶ Run Simulation';
+    showToast('Error: ' + e, 'error');
+  }
+}
+
+// ── Research ─────────────────────────────────────────────────────────────────
+async function runResearch() {
+  const btn = document.getElementById('btn-research');
+  btn.disabled = true; btn.textContent = '⏳ Running…';
+
+  const body = {
+    tier:     document.getElementById('research-tier').value,
+    top_n:    parseInt(document.getElementById('research-topn').value),
+    strategy: document.getElementById('research-strategy').value,
+  };
+
+  try {
+    const r = await fetch('/api/research', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    if (r.status === 409) {
+      showToast('Research already running', 'info');
+      btn.disabled = false; btn.textContent = '🔬 Run Research Pipeline'; return;
+    }
+    const {job_id} = await r.json();
+    document.getElementById('research-job-wrap').style.display = 'block';
+    pollJob(job_id, 'research', async (job) => {
+      btn.disabled = false; btn.textContent = '🔬 Run Research Pipeline';
+      await fetchResearchDecisions();
+      const status = job.status === 'done' ? 'success' : 'error';
+      const msg = job.status === 'done' ? 'Research pipeline complete ✓' : 'Research pipeline failed — check log';
+      showToast(msg, status);
+    });
+  } catch(e) {
+    btn.disabled = false; btn.textContent = '🔬 Run Research Pipeline';
+    showToast('Error: ' + e, 'error');
+  }
+}
+
+async function fetchResearchDecisions() {
+  try {
+    const r = await fetch('/api/research-decisions?last=50');
+    const decisions = await r.json();
+    if (!Array.isArray(decisions)) return;
+    renderResearchDecisions(decisions);
+  } catch(e) { /* silently skip — decisions log may not exist yet */ }
+}
+
+function renderResearchDecisions(decisions) {
+  const container = document.getElementById('research-decisions');
+  if (!decisions.length) { container.innerHTML = ''; return; }
+
+  const accepted = decisions.filter(d => d.accepted).length;
+  const rejected = decisions.length - accepted;
+  container.innerHTML =
+    `<div style="font-size:13px;font-weight:600;margin-bottom:10px">` +
+    `${accepted} accepted / ${rejected} rejected (most recent ${decisions.length})</div>` +
+    decisions.map(d => `
+      <div class="decision-card ${d.accepted ? 'accepted' : 'rejected'}">
+        <div class="decision-top">
+          <span class="decision-name">${esc(d.strategy_name)}${d.symbol ? ' / ' + esc(d.symbol) : ''}</span>
+          <span class="badge badge-${d.accepted ? 'fresh' : 'old'}">${d.accepted ? 'ACCEPTED — ' + esc(d.tier) : 'REJECTED'}</span>
+        </div>
+        <div class="decision-reason">${esc(d.reason)}</div>
+        <div class="decision-meta">
+          <span>Sharpe: ${(d.avg_sharpe||0).toFixed(2)}</span>
+          <span>Cons: ${((d.cons_ratio||0)*100).toFixed(1)}%</span>
+          <span>Std: ${((d.std_ratio||0)*100).toFixed(1)}%</span>
+          <span>Windows: ${d.n_windows||0}</span>
+          <span style="color:var(--muted);margin-left:auto">${(d.timestamp||'').slice(0,10)}</span>
+        </div>
+      </div>
+    `).join('');
+}
+
+// ── Leaderboard ───────────────────────────────────────────────────────────────
+async function loadLeaderboard(tier) {
+  currentTier = tier;
+  document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('active'));
+  const activeBtn = document.querySelector('[data-tier="' + tier + '"]');
+  if (activeBtn) activeBtn.classList.add('active');
+
+  // Update header label
+  const labels = {conservative:'Win % (9% prof / 3% DD)', standard:'Win % (10% DD)', permissive:'Win % (25% DD)'};
+  document.getElementById('win-pct-header').textContent = labels[tier] || 'Win %';
+
+  const tbody = document.getElementById('leaderboard-body');
+  tbody.innerHTML = '<tr class="empty-row"><td colspan="8">Loading…</td></tr>';
+
+  try {
+    const r = await fetch('/api/leaderboard?tier=' + tier);
+    const rows = await r.json();
+
+    if (rows.error) {
+      tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Error: ${esc(rows.error)}</td></tr>`;
+      return;
+    }
+    if (!rows.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No results. Run the simulation first (Simulate tab).</td></tr>';
+      return;
     }
 
-    function runDriftCheck() {
-      const model = prompt('Model name?');
-      if (!model) return;
-      const symbol = prompt('Symbol?');
-      if (!symbol) return;
-      postAction('/api/drift-check', { model: model, symbol: symbol });
+    // Win-prob target for highlighting
+    const target = parseFloat(document.getElementById('cfg-win-prob').value) || 70;
+    const winPctField = tier === 'conservative' ? 'cons_pct' : tier === 'standard' ? 'std_pct' : 'perm_pct';
+
+    tbody.innerHTML = rows.map(row => {
+      const wp = row[winPctField];
+      const wpClass = wp >= target ? 'pos' : (wp >= target * 0.5 ? '' : 'neg');
+      const sharpeClass = row.avg_sharpe > 0 ? 'pos' : 'neg';
+      return `
+        <tr class="clickable" onclick="loadDetail('${esc(row.strategy)}','${esc(row.symbol)}',this)">
+          <td>${esc(row.strategy)}</td>
+          <td>${esc(row.symbol)}</td>
+          <td class="${wpClass}"><strong>${wp}%</strong></td>
+          <td class="${sharpeClass}">${row.avg_sharpe.toFixed(3)}</td>
+          <td class="${row.avg_ret >= 9 ? 'pos' : ''}">${row.avg_ret.toFixed(1)}%</td>
+          <td class="${row.avg_dd <= 3 ? 'pos' : row.avg_dd <= 10 ? '' : 'neg'}">${row.avg_dd.toFixed(1)}%</td>
+          <td>${row.avg_win_rate.toFixed(1)}%</td>
+          <td style="color:var(--muted)">${row.n_windows}</td>
+        </tr>`;
+    }).join('');
+  } catch(e) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Error loading leaderboard.</td></tr>`;
+  }
+}
+
+// ── Detail drill-down ─────────────────────────────────────────────────────────
+async function loadDetail(strategy, symbol, rowEl) {
+  // Highlight selected row
+  document.querySelectorAll('#leaderboard-body tr').forEach(r => r.classList.remove('selected'));
+  if (rowEl) rowEl.classList.add('selected');
+
+  document.getElementById('detail-title').textContent = strategy + ' / ' + symbol;
+  document.getElementById('detail-panel').style.display = 'block';
+  document.getElementById('detail-body').innerHTML =
+    '<tr class="empty-row"><td colspan="11">Loading…</td></tr>';
+
+  try {
+    const r = await fetch('/api/engine-detail?strategy=' + encodeURIComponent(strategy) +
+                          '&symbol=' + encodeURIComponent(symbol));
+    const rows = await r.json();
+
+    if (!rows.length) {
+      document.getElementById('detail-body').innerHTML =
+        '<tr class="empty-row"><td colspan="11">No window data found.</td></tr>';
+      return;
     }
-  </script>
+
+    document.getElementById('detail-body').innerHTML = rows.map(w => {
+      const tier = w.cons ? '<span class="badge badge-fresh">C</span>'
+                 : w.std  ? '<span class="badge badge-stale">S</span>'
+                 : w.perm ? '<span class="badge badge-old">P</span>'
+                 : '<span class="badge badge-none">—</span>';
+      const params = Object.entries(w.params||{}).map(([k,v])=>`${k}=${v}`).join(', ') || '—';
+      return `
+        <tr>
+          <td>${w.start}</td>
+          <td>${w.end}</td>
+          <td style="color:var(--muted)">${w.years}y</td>
+          <td style="color:var(--muted);font-size:11px">${w.type}</td>
+          <td class="${w.ret >= 9 ? 'pos' : ''}">${w.ret.toFixed(2)}%</td>
+          <td class="${w.dd <= 3 ? 'pos' : w.dd <= 10 ? '' : 'neg'}">${w.dd.toFixed(2)}%</td>
+          <td class="${w.sharpe > 0 ? 'pos' : 'neg'}">${w.sharpe.toFixed(3)}</td>
+          <td>${w.wr.toFixed(1)}%</td>
+          <td style="color:var(--muted)">${w.trades}</td>
+          <td>${tier}</td>
+          <td style="font-size:11px;color:var(--muted)">${esc(params)}</td>
+        </tr>`;
+    }).join('');
+
+    document.getElementById('detail-panel').scrollIntoView({behavior:'smooth', block:'nearest'});
+  } catch(e) {
+    document.getElementById('detail-body').innerHTML =
+      '<tr class="empty-row"><td colspan="11">Error loading detail.</td></tr>';
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').style.display = 'none';
+  document.querySelectorAll('#leaderboard-body tr').forEach(r => r.classList.remove('selected'));
+}
+
+// ── Ops ───────────────────────────────────────────────────────────────────────
+async function postAction(url, body) {
+  const el = document.getElementById('ops-result');
+  el.style.display = 'block';
+  el.textContent = 'Running ' + url + ' …';
+  try {
+    const r = await fetch(url, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body||{})
+    });
+    const data = await r.json();
+    el.textContent = JSON.stringify(data, null, 2);
+  } catch(err) {
+    el.textContent = 'Error: ' + err;
+  }
+}
+
+function openDriftCheck() {
+  const model  = prompt('Model name?');  if (!model)  return;
+  const symbol = prompt('Symbol (e.g. BTC/USDT)?'); if (!symbol) return;
+  postAction('/api/drift-check', {model, symbol});
+}
+
+// ── Job polling ───────────────────────────────────────────────────────────────
+function pollJob(jobId, context, onDone) {
+  if (pollTimers[jobId]) clearInterval(pollTimers[jobId]);
+
+  const logEl    = document.getElementById(context + '-job-log');
+  const statusEl = document.getElementById(context + '-job-status');
+
+  pollTimers[jobId] = setInterval(async () => {
+    try {
+      const r = await fetch('/api/jobs/' + jobId);
+      const job = await r.json();
+
+      if (logEl) {
+        logEl.textContent = (job.lines || []).join('\n');
+        logEl.scrollTop   = logEl.scrollHeight;
+      }
+      if (statusEl) {
+        statusEl.textContent = job.status;
+        statusEl.className   = 'job-status job-status-' + job.status;
+      }
+
+      if (job.status === 'done' || job.status === 'failed') {
+        clearInterval(pollTimers[jobId]);
+        delete pollTimers[jobId];
+        if (onDone) onDone(job);
+      }
+    } catch(e) { /* network blip — keep polling */ }
+  }, 1500);
+}
+
+// ── Elapsed timer ─────────────────────────────────────────────────────────────
+function startElapsed(elId, jobId) {
+  stopElapsed();
+  const el = document.getElementById(elId);
+  const start = new Date();
+  elapsedTimer = setInterval(() => {
+    const s = Math.floor((new Date() - start) / 1000);
+    const m = Math.floor(s / 60);
+    el.textContent = m > 0 ? `${m}m ${s % 60}s elapsed` : `${s}s elapsed`;
+  }, 1000);
+}
+
+function stopElapsed() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  const el = document.getElementById('engine-job-elapsed');
+  if (el) el.textContent = '';
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function showToast(msg, type) {
+  const t = document.createElement('div');
+  t.className = 'toast toast-' + (type || 'info');
+  t.textContent = msg;
+  document.getElementById('toast-container').appendChild(t);
+  requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('show')));
+  setTimeout(() => {
+    t.classList.remove('show');
+    setTimeout(() => t.remove(), 300);
+  }, 3500);
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+}
+</script>
 </body>
 </html>
