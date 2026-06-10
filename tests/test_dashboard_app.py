@@ -1,8 +1,8 @@
 """Offline tests for the ops-dashboard Flask app.
 
-All data-layer and sibling-module entrypoints are patched at their use site in
-``monitoring.dashboard_app`` so no real database, data layer, or scheduler code
-is exercised.
+Data-layer and scheduler entrypoints are patched at their use site in the
+relevant Blueprint modules (monitoring.routes.*) so no real database or
+scheduler code is exercised.
 """
 
 from __future__ import annotations
@@ -88,9 +88,9 @@ def client():
 
 def test_index_renders_rows(client):
     with patch(
-        "monitoring.dashboard_app.get_model_status", return_value=[_model_row()]
+        "monitoring.routes.pages.get_model_status", return_value=[_model_row()]
     ), patch(
-        "monitoring.dashboard_app.get_drift_status", return_value=[_drift_row()]
+        "monitoring.routes.pages.get_drift_status", return_value=[_drift_row()]
     ):
         resp = client.get("/")
 
@@ -103,8 +103,8 @@ def test_index_renders_rows(client):
 
 def test_index_renders_empty_state(client):
     with patch(
-        "monitoring.dashboard_app.get_model_status", return_value=[]
-    ), patch("monitoring.dashboard_app.get_drift_status", return_value=[]):
+        "monitoring.routes.pages.get_model_status", return_value=[]
+    ), patch("monitoring.routes.pages.get_drift_status", return_value=[]):
         resp = client.get("/")
 
     assert resp.status_code == 200
@@ -114,7 +114,7 @@ def test_index_renders_empty_state(client):
 def test_api_models_returns_json_list(client):
     row = _model_row()
     with patch(
-        "monitoring.dashboard_app.get_model_status", return_value=[row]
+        "monitoring.routes.ops.get_model_status", return_value=[row]
     ):
         resp = client.get("/api/models")
 
@@ -129,7 +129,7 @@ def test_api_models_returns_json_list(client):
 def test_api_drift_returns_json_list(client):
     row = _drift_row()
     with patch(
-        "monitoring.dashboard_app.get_drift_status", return_value=[row]
+        "monitoring.routes.ops.get_drift_status", return_value=[row]
     ):
         resp = client.get("/api/drift")
 
@@ -154,7 +154,7 @@ def test_api_retrain_invokes_cycle_and_returns_results(client):
         error=None,
     )
     with patch(
-        "monitoring.dashboard_app.run_retraining_cycle", return_value=[result]
+        "monitoring.routes.ops.run_retraining_cycle", return_value=[result]
     ) as mock_cycle:
         resp = client.post("/api/retrain")
 
@@ -169,7 +169,7 @@ def test_api_retrain_invokes_cycle_and_returns_results(client):
 
 def test_api_retrain_empty_results(client):
     with patch(
-        "monitoring.dashboard_app.run_retraining_cycle", return_value=[]
+        "monitoring.routes.ops.run_retraining_cycle", return_value=[]
     ) as mock_cycle:
         resp = client.post("/api/retrain")
 
@@ -181,7 +181,7 @@ def test_api_retrain_empty_results(client):
 def test_api_drift_check_valid_body_returns_report(client):
     report = _FakeReport(symbol="BTC/USDT", severity="critical", max_psi=0.42)
     with patch(
-        "monitoring.dashboard_app.run_drift_check", return_value=report
+        "monitoring.routes.ops.run_drift_check", return_value=report
     ) as mock_check:
         resp = client.post(
             "/api/drift-check",
@@ -201,7 +201,7 @@ def test_api_drift_check_valid_body_returns_report(client):
 
 def test_api_drift_check_none_report(client):
     with patch(
-        "monitoring.dashboard_app.run_drift_check", return_value=None
+        "monitoring.routes.ops.run_drift_check", return_value=None
     ):
         resp = client.post(
             "/api/drift-check",
@@ -214,7 +214,7 @@ def test_api_drift_check_none_report(client):
 
 def test_api_drift_check_missing_field_returns_400(client):
     with patch(
-        "monitoring.dashboard_app.run_drift_check"
+        "monitoring.routes.ops.run_drift_check"
     ) as mock_check:
         resp = client.post("/api/drift-check", json={"model": "m"})
 
@@ -245,9 +245,9 @@ def _drift_report() -> DriftReport:
 def test_drift_detail_renders_chart(client):
     report = _drift_report()
     with patch(
-        "monitoring.dashboard_app.run_drift_check", return_value=report
+        "monitoring.routes.pages.run_drift_check", return_value=report
     ) as mock_check, patch(
-        "monitoring.dashboard_app.psi_bar_html",
+        "monitoring.routes.pages.psi_bar_html",
         return_value="<div>PLOTLY_CHART</div>",
     ):
         resp = client.get(
@@ -267,9 +267,9 @@ def test_drift_detail_renders_chart(client):
 
 def test_drift_detail_none_report_shows_no_data(client):
     with patch(
-        "monitoring.dashboard_app.run_drift_check", return_value=None
+        "monitoring.routes.pages.run_drift_check", return_value=None
     ), patch(
-        "monitoring.dashboard_app.psi_bar_html",
+        "monitoring.routes.pages.psi_bar_html",
         return_value="<div>PLOTLY_CHART</div>",
     ) as mock_chart:
         resp = client.get("/drift?model=m&symbol=BTC/USDT")
@@ -283,7 +283,7 @@ def test_drift_detail_none_report_shows_no_data(client):
 
 def test_drift_detail_missing_model_returns_400(client):
     with patch(
-        "monitoring.dashboard_app.run_drift_check"
+        "monitoring.routes.pages.run_drift_check"
     ) as mock_check:
         resp = client.get("/drift?symbol=BTC/USDT")
 
@@ -293,7 +293,7 @@ def test_drift_detail_missing_model_returns_400(client):
 
 def test_drift_detail_missing_symbol_returns_400(client):
     with patch(
-        "monitoring.dashboard_app.run_drift_check"
+        "monitoring.routes.pages.run_drift_check"
     ) as mock_check:
         resp = client.get("/drift?model=m")
 
@@ -303,9 +303,9 @@ def test_drift_detail_missing_symbol_returns_400(client):
 
 def test_index_contains_drift_detail_link(client):
     with patch(
-        "monitoring.dashboard_app.get_model_status", return_value=[]
+        "monitoring.routes.pages.get_model_status", return_value=[]
     ), patch(
-        "monitoring.dashboard_app.get_drift_status", return_value=[_drift_row()]
+        "monitoring.routes.pages.get_drift_status", return_value=[_drift_row()]
     ):
         resp = client.get("/")
 
@@ -337,14 +337,14 @@ def token_client():
 
 
 def test_retrain_rejects_missing_token_when_configured(token_client):
-    with patch("monitoring.dashboard_app.run_retraining_cycle") as mock_cycle:
+    with patch("monitoring.routes.ops.run_retraining_cycle") as mock_cycle:
         resp = token_client.post("/api/retrain")
     assert resp.status_code == 401
     mock_cycle.assert_not_called()
 
 
 def test_retrain_rejects_wrong_token(token_client):
-    with patch("monitoring.dashboard_app.run_retraining_cycle") as mock_cycle:
+    with patch("monitoring.routes.ops.run_retraining_cycle") as mock_cycle:
         resp = token_client.post(
             "/api/retrain", headers={"Authorization": "Bearer nope"}
         )
@@ -354,7 +354,7 @@ def test_retrain_rejects_wrong_token(token_client):
 
 def test_retrain_accepts_valid_token(token_client):
     with patch(
-        "monitoring.dashboard_app.run_retraining_cycle", return_value=[]
+        "monitoring.routes.ops.run_retraining_cycle", return_value=[]
     ) as mock_cycle:
         resp = token_client.post(
             "/api/retrain", headers={"Authorization": "Bearer s3cret"}
@@ -364,7 +364,7 @@ def test_retrain_accepts_valid_token(token_client):
 
 
 def test_drift_check_requires_token_when_configured(token_client):
-    with patch("monitoring.dashboard_app.run_drift_check") as mock_check:
+    with patch("monitoring.routes.ops.run_drift_check") as mock_check:
         resp = token_client.post(
             "/api/drift-check", json={"model": "m", "symbol": "BTC/USDT"}
         )
@@ -373,7 +373,7 @@ def test_drift_check_requires_token_when_configured(token_client):
 
 
 def test_drift_check_rejects_oversized_input(client):
-    with patch("monitoring.dashboard_app.run_drift_check") as mock_check:
+    with patch("monitoring.routes.ops.run_drift_check") as mock_check:
         resp = client.post(
             "/api/drift-check",
             json={"model": "m" * 300, "symbol": "BTC/USDT"},
@@ -383,7 +383,7 @@ def test_drift_check_rejects_oversized_input(client):
 
 
 def test_drift_check_rejects_non_string_fields(client):
-    with patch("monitoring.dashboard_app.run_drift_check") as mock_check:
+    with patch("monitoring.routes.ops.run_drift_check") as mock_check:
         resp = client.post(
             "/api/drift-check", json={"model": 123, "symbol": ["x"]}
         )
@@ -397,7 +397,7 @@ def test_unhandled_exception_returns_json_500():
     app = create_app(db=MagicMock(), config={"retraining": {}})
     cli = app.test_client()
     with patch(
-        "monitoring.dashboard_app.get_model_status",
+        "monitoring.routes.ops.get_model_status",
         side_effect=RuntimeError("boom"),
     ):
         resp = cli.get("/api/models")

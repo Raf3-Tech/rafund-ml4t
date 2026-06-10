@@ -50,6 +50,8 @@ CORE_TABLES = (
     "model_registry",
     "drift_reports",
     "model_blocks",
+    # Research decisions (created by alembic migration 0004).
+    "research_decisions",
 )
 
 
@@ -1196,6 +1198,88 @@ class DatabaseConnection:
         except Exception as e:
             logger.error("Error getting funding rates for %s: %s", symbol, e)
             return pd.DataFrame()
+
+    def insert_research_decision(self, decision: Dict[str, Any]) -> bool:
+        """Insert one research decision row into research_decisions."""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO research_decisions (
+                    created_at, strategy_name, symbol, tier, accepted, reason,
+                    avg_sharpe, avg_max_dd_pct, avg_win_rate_pct,
+                    cons_ratio, std_ratio, perm_ratio, n_windows, params
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    decision.get("timestamp"),
+                    decision["strategy_name"],
+                    decision.get("symbol"),
+                    decision["tier"],
+                    bool(decision["accepted"]),
+                    decision["reason"],
+                    float(decision["avg_sharpe"]),
+                    float(decision["avg_max_dd_pct"]),
+                    float(decision["avg_win_rate_pct"]),
+                    float(decision["cons_ratio"]),
+                    float(decision["std_ratio"]),
+                    float(decision["perm_ratio"]),
+                    int(decision["n_windows"]),
+                    json.dumps(decision.get("params") or {}),
+                ),
+            )
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            return True
+        except Exception as e:
+            logger.error("Error inserting research_decision: %s", e)
+            try:
+                if conn:
+                    conn.rollback()
+                    self.return_connection(conn)
+            except Exception:
+                pass
+            return False
+
+    def get_research_decisions(self, last: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent research decisions, newest first."""
+        try:
+            df = self.read_sql(
+                """
+                SELECT created_at, strategy_name, symbol, tier, accepted, reason,
+                       avg_sharpe, avg_max_dd_pct, avg_win_rate_pct,
+                       cons_ratio, std_ratio, perm_ratio, n_windows, params
+                FROM research_decisions
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                [last],
+            )
+            rows = []
+            for _, r in df.iterrows():
+                rows.append({
+                    "timestamp": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
+                    "strategy_name": str(r["strategy_name"]),
+                    "symbol": r["symbol"] if r["symbol"] is not None else None,
+                    "tier": str(r["tier"]),
+                    "accepted": bool(r["accepted"]),
+                    "reason": str(r["reason"]),
+                    "avg_sharpe": float(r["avg_sharpe"]),
+                    "avg_max_dd_pct": float(r["avg_max_dd_pct"]),
+                    "avg_win_rate_pct": float(r["avg_win_rate_pct"]),
+                    "cons_ratio": float(r["cons_ratio"]),
+                    "std_ratio": float(r["std_ratio"]),
+                    "perm_ratio": float(r["perm_ratio"]),
+                    "n_windows": int(r["n_windows"]),
+                    "params": r["params"] if isinstance(r["params"], dict) else {},
+                })
+            return rows
+        except Exception as e:
+            logger.error("Error fetching research_decisions: %s", e)
+            return []
 
     def close_pool(self):
         """Close all connections in the pool (and dispose the read engine)."""

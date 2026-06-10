@@ -5,7 +5,7 @@ Flow:
   2. campaign  — run the walk-forward engine on that target
   3. evaluate  — pull engine_results, score via leaderboard + statistical gates
   4. decide    — accept / reject / watch based on tier qualification + Sharpe floor
-  5. log       — append the decision to tmp/research_decisions.jsonl + MLflow tags
+  5. log       — append the decision to tmp/research_decisions.jsonl + DB (if db provided)
 
 CLI entry point (via main.py):
     python main.py research --strategy "EMA Crossover" --symbol BTC/USDT
@@ -18,21 +18,31 @@ import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Optional
 
 import structlog
 
+from config.paths import DECISIONS_LOG_PATH
+
 logger = structlog.get_logger(__name__)
 
-# Acceptance floors — strategies that clear these are promoted.
+_DECISIONS_LOG = DECISIONS_LOG_PATH
+
 _SHARPE_FLOOR = 0.3
-_TIER_CONSISTENCY_FLOORS = {
-    "CONSERVATIVE": 0.70,   # 70% win-probability target for the 1-phase prop challenge
-    "STANDARD": 0.60,
-    "PERMISSIVE": 0.50,
-}
-_DECISIONS_LOG = Path("tmp") / "research_decisions.jsonl"
+
+# Standard and permissive floors are fixed; only the conservative floor is
+# user-configurable via the prop challenge config (win_prob_target).
+_STANDARD_FLOOR = 0.60
+_PERMISSIVE_FLOOR = 0.50
+
+
+def _conservative_floor() -> float:
+    """Read the conservative pass threshold from prop_challenge.json."""
+    try:
+        from config.prop_config import read_prop_config
+        return read_prop_config().get("win_prob_target", 70.0) / 100.0
+    except Exception:
+        return 0.70
 
 
 @dataclass
@@ -66,22 +76,23 @@ def _gate(row: Dict) -> ResearchDecision:
     n_windows = int(row.get("n_windows", 0))
     params = row.get("params") or {}
 
-    # Determine highest qualifying tier
+    cons_floor = _conservative_floor()
+
     tier = "NONE"
-    if cons_ratio >= _TIER_CONSISTENCY_FLOORS["CONSERVATIVE"] and avg_sharpe >= _SHARPE_FLOOR:
+    if cons_ratio >= cons_floor and avg_sharpe >= _SHARPE_FLOOR:
         tier = "CONSERVATIVE"
-    elif std_ratio >= _TIER_CONSISTENCY_FLOORS["STANDARD"] and avg_sharpe >= _SHARPE_FLOOR:
+    elif std_ratio >= _STANDARD_FLOOR and avg_sharpe >= _SHARPE_FLOOR:
         tier = "STANDARD"
-    elif perm_ratio >= _TIER_CONSISTENCY_FLOORS["PERMISSIVE"] and avg_sharpe >= _SHARPE_FLOOR:
+    elif perm_ratio >= _PERMISSIVE_FLOOR and avg_sharpe >= _SHARPE_FLOOR:
         tier = "PERMISSIVE"
 
     accepted = tier != "NONE"
 
     if accepted:
+        active_ratio = cons_ratio if tier == "CONSERVATIVE" else (std_ratio if tier == "STANDARD" else perm_ratio)
         reason = (
             f"Qualifies for {tier} tier: "
-            f"consistency={cons_ratio if tier == 'CONSERVATIVE' else (std_ratio if tier == 'STANDARD' else perm_ratio):.2f}, "
-            f"avg_sharpe={avg_sharpe:.2f}"
+            f"consistency={active_ratio:.2f}, avg_sharpe={avg_sharpe:.2f}"
         )
     else:
         reason = (
@@ -109,6 +120,7 @@ def _gate(row: Dict) -> ResearchDecision:
 
 
 def _log_decision(decision: ResearchDecision) -> None:
+    """Append decision to the JSONL flat file (backward-compat, offline-safe)."""
     _DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
     with _DECISIONS_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(asdict(decision)) + "\n")
@@ -158,10 +170,7 @@ def run_research_pipeline(
 
         strategy_instances = StrategyRegistry.instantiate_all()
         engine = WalkForwardWindowEngine(
-            db=db,
-            strategies=strategy_instances,
-            symbols=symbols,
-            commission=cfg.commission,
+            db=db, strategies=strategy_instances, symbols=symbols, commission=cfg.commission,
         )
         results = engine.run(strategy_filter=strategy_filter, symbol_filter=symbol_filter)
         logger.info("research_pipeline_campaign_done", n_results=len(results))
@@ -172,13 +181,11 @@ def run_research_pipeline(
         logger.warning("research_pipeline_no_leaderboard_results")
         return decisions
 
-    # Filter to the requested strategy/symbol if specified
     if strategy_filter:
         lb = lb[lb["strategy_name"].str.lower() == strategy_filter.lower()]
     if symbol_filter:
         lb = lb[lb["symbol"] == symbol_filter]
 
-    # Take top-N candidates
     candidates = lb.head(top_n)
 
     # --- Step 3: gate + log ---
@@ -186,6 +193,11 @@ def run_research_pipeline(
     for _, row in candidates.iterrows():
         decision = _gate(row.to_dict())
         _log_decision(decision)
+        # Also persist to DB if available (migration 0004).
+        try:
+            db.insert_research_decision(asdict(decision))
+        except Exception as exc:
+            logger.warning("research_decision_db_write_failed", error=str(exc))
         decisions.append(decision)
         if decision.accepted:
             accepted_count += 1
