@@ -1,4 +1,4 @@
-"""Flask dashboard for the RAFund ML4T pipeline.
+"""Flask dashboard for the Raf3nd ML4T pipeline.
 
 Serves a full single-page control panel (6 tabs) plus the original ops API.
 Long-running pipeline operations run as daemon threads via monitoring.jobs;
