@@ -4,8 +4,10 @@ All business logic lives in cli/*.  This file only parses arguments and
 dispatches to the appropriate command function.
 
 Usage:
-    python main.py collect              # Collect OHLCV from Binance (incremental)
-    python main.py collect --funding    # Also collect 8h funding rates
+    python main.py collect                          # Collect OHLCV from Binance (incremental)
+    python main.py collect --exchange kraken        # Collect from Kraken instead
+    python main.py collect --exchange all           # Collect from both exchanges
+    python main.py collect --funding                # Also collect 8h funding rates (Binance)
     python main.py features             # Calculate spread features
     python main.py signals              # Generate signals
     python main.py backtest             # Run evaluation backtest
@@ -77,6 +79,12 @@ def main() -> int:
     parser.add_argument("--strategy")
     parser.add_argument("--tier")
     parser.add_argument("--funding", action="store_true")
+    parser.add_argument(
+        "--exchange",
+        choices=["binance", "kraken", "all"],
+        default="binance",
+        help="Exchange to collect from (default: binance)",
+    )
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--top-n", type=int, default=5, dest="top_n")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
@@ -94,8 +102,14 @@ def main() -> int:
         success: bool
 
         if args.mode == "collect":
-            from cli.collect import collect_data, run_collect_funding_cmd
-            success = collect_data()
+            from cli.collect import collect_data, collect_kraken_data, run_collect_funding_cmd
+            exchange = args.exchange
+            if exchange in ("binance", "all"):
+                success = collect_data()
+            else:
+                success = True
+            if success and exchange in ("kraken", "all"):
+                success = collect_kraken_data()
             if success and args.funding:
                 success = run_collect_funding_cmd()
 

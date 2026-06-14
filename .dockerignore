@@ -1,0 +1,14 @@
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.git/
+mlruns/
+mlflow.db
+logs/
+results/
+tmp/
+*.mkv
+*.mp4

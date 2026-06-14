@@ -106,6 +106,76 @@ def run_collect_funding_cmd() -> bool:
         return False
 
 
+def collect_kraken_data(full_history: bool = True) -> bool:
+    """Collect OHLCV from Kraken into the prices table (incremental by default)."""
+    logger.info("=" * 80)
+    logger.info("STARTING KRAKEN DATA COLLECTION")
+    logger.info("=" * 80)
+    try:
+        from cli.db import get_db_connection
+        from config.loader import get_settings
+        from data.collectors.kraken_collector import KrakenCollector
+
+        settings = get_settings()
+        collector = KrakenCollector(rate_limit_ms=int(os.getenv("RATE_LIMIT_MS", 500)))
+        db = get_db_connection()
+
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            return False
+
+        symbols = settings.kraken_symbols
+        if not symbols:
+            logger.error("No Kraken symbols configured (KRAKEN_SYMBOLS or collect.kraken_symbols)")
+            db.close_pool()
+            return False
+
+        end_date = datetime.now(timezone.utc)
+        default_start = datetime.strptime(settings.collect_start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        total_inserted = 0
+
+        for symbol in symbols:
+            try:
+                latest = db.get_latest_timestamp(symbol)
+                if full_history or latest is None:
+                    start_date = default_start
+                    logger.info(f"[{symbol}] Full history from {start_date.date()}")
+                else:
+                    start_date = latest + timedelta(days=1)
+                    if start_date.date() >= end_date.date():
+                        logger.info(f"[{symbol}] Already up to date (latest {latest.date()})")
+                        continue
+                    logger.info(f"[{symbol}] Incremental from {start_date.date()}")
+
+                result = collector.collect_symbol(
+                    symbol=symbol,
+                    timeframe=settings.timeframe,
+                    from_date=start_date,
+                    to_date=end_date,
+                )
+                if not collector.last_collection_df.empty:
+                    inserted = db.insert_prices(collector.last_collection_df)
+                    total_inserted += inserted
+                    logger.info(f"[OK] {symbol}: {inserted} new rows (fetched {result.records_fetched})")
+                else:
+                    logger.warning(f"[SKIP] {symbol}: No valid data to insert")
+
+                if result.errors:
+                    for err in result.errors:
+                        logger.warning(err)
+            except Exception as e:
+                logger.error(f"[ERROR] {symbol}: {str(e)}", exc_info=True)
+
+        stats = db.get_data_stats()
+        logger.info(f"Total records: {stats.get('total_price_records', 0)}")
+        logger.info(f"Kraken rows inserted this run: {total_inserted}")
+        db.close_pool()
+        return True
+    except Exception as e:
+        logger.error(f"Kraken data collection error: {str(e)}", exc_info=True)
+        return False
+
+
 def run_backfill(
     symbol: Optional[str],
     timeframe: Optional[str],

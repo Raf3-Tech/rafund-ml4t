@@ -151,7 +151,7 @@ These are documented research-stage constraints, not hidden bugs:
 | **Same-bar fills** — signals and fills resolve on the same bar | `backtesting/engine.py` | Look-ahead bias in execution; next-bar-open fills would be more conservative. |
 | **Flat slippage** — cost model uses a fixed fraction regardless of volume or volatility | `backtesting/costs.py` | Understates costs in thin markets; overstates in deep liquid markets. |
 | **`portfolio/` not wired into per-bar engine loop** — `RiskManager` / `PortfolioOptimizer` are library-level utilities (risk-parity allocation, half-Kelly sizing, VaR/CVaR, diversification ratio now present) but not called per-bar from the backtest engine | `portfolio/` | Kelly sizing and VaR limits do not yet feed back into position sizing during an engine run. Phase E in AGENTS.md tracks this. |
-| **Prop-firm control bugs** (audited) — daily-loss parenthesization error, leverage-clip clears the daily halt | `backtesting/engine.py:139,175` | Two prop-firm compliance controls are currently non-functional. |
+| ~~**Prop-firm control bugs**~~ — daily-loss parenthesization (F2) and leverage-clip clearing daily halt (F3) | `backtesting/engine.py` | **Fixed.** Both controls verified by `tests/test_risk_engine_stress.py`. |
 | **Regime classifier needs data** — the classifier is non-blocking by design but returns `None` until the `engine_results` table has 200+ rows | `models/regime_classifier.py` | Regime-gated decisions fall back to default tier until enough engine runs accumulate. |
 
 See `RAFUND_MASTER_AUDIT.md`, `docs/QUANT_AUDIT_REPORT.md`, and `RISK_ENGINE_AUDIT.md` for the full audit trail.

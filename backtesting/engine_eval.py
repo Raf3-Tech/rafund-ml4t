@@ -19,7 +19,7 @@ from backtesting.evaluation_rules import (
     EvaluationTracker,
     PropFirmRules,
 )
-from config.constants import PERIODS_PER_YEAR
+from config.constants import PERIODS_PER_YEAR, STAT_ARB_ENTRY_Z, STAT_ARB_EXIT_Z
 from strategies.stat_arb import StatArbStrategy
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,8 @@ class EvaluationBacktestEngine:
         rules: Optional[PropFirmRules] = None,
         symbol_a: str = "BTC/USDT",
         symbol_b: str = "ETH/USDT",
-        entry_threshold: float = 2.0,
-        exit_threshold: float = 0.5,
+        entry_threshold: float = STAT_ARB_ENTRY_Z,
+        exit_threshold: float = STAT_ARB_EXIT_Z,
         lookback: int = 60,
         leg_allocation_pct: float = 0.18,
         commission: float = 0.001,
@@ -104,7 +104,9 @@ class EvaluationBacktestEngine:
         return self.strategy.signals_from_pair_prices(pair_df)
 
     @staticmethod
-    def signals_for_database(signals_df: pd.DataFrame, symbol_a: str, symbol_b: str) -> pd.DataFrame:
+    def signals_for_database(
+        signals_df: pd.DataFrame, symbol_a: str, symbol_b: str
+    ) -> pd.DataFrame:
         """Map the strategy's stateful signal column to DB signal_type rows.
 
         Delegates to ``StatArbStrategy.to_db_signals`` (the single mapper), so the
@@ -165,7 +167,9 @@ class EvaluationBacktestEngine:
         )
         return True
 
-    def _close_spread(self, price_a: float, price_b: float, ts, reason: str = "EXIT") -> None:
+    def _close_spread(
+        self, price_a: float, price_b: float, ts, reason: str = "EXIT"
+    ) -> None:
         if self.position == 0:
             return
 
@@ -308,7 +312,9 @@ class EvaluationBacktestEngine:
         wins = sum(1 for t in closed if t.get("pnl", 0) > 0)
         win_rate = wins / len(closed) if closed else 0.0
 
-        total_return = (final_equity - self.rules.account_size) / self.rules.account_size
+        total_return = (
+            final_equity - self.rules.account_size
+        ) / self.rules.account_size
 
         return {
             "initial_capital": self.rules.account_size,

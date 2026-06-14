@@ -284,6 +284,33 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 
 ## Session log  (newest first)
 
+### 2026-06-11 — session "signal-fork-fix" (Claude) — COMPLETE
+**Phase worked:** pre-commit stabilization (z-score threshold fork)
+**DB health check:** PASSED — connectivity OK, all 8 symbols current through 2026-06-10 (<48h), data integrity verified via direct query, engine_results=21,540 rows (well above 200)
+**engine_results row count at session start:** 21,540
+**Files changed:**
+  - `config/constants.py` — added `STAT_ARB_ENTRY_Z = 2.0` and `STAT_ARB_EXIT_Z = 0.5` (canonical constants)
+  - `config/loader.py` — import constants; use them as fallback defaults instead of bare literals
+  - `cli/backtest.py` — fixed 4 hardcoded `entry_threshold=2.0, exit_threshold=0.5` call sites in `run_backtest`, `run_validation_cmd`, `run_paper_trading`, `run_full_pipeline` to read `cfg.entry_threshold` / `cfg.exit_threshold` from `get_settings()`
+  - `strategies/stat_arb.py` — `StatArbPairsStrategy.param_grid` now references `STAT_ARB_ENTRY_Z` / `STAT_ARB_EXIT_Z` instead of bare literals
+  - `backtesting/engine_eval.py` — `EvaluationBacktestEngine` constructor defaults now reference `STAT_ARB_ENTRY_Z` / `STAT_ARB_EXIT_Z`
+  - `.gitignore` — added `.coverage`, `coverage.xml`, `htmlcov/`, `tmp/` (were missing, causing them to appear as untracked)
+**Tests added:** `tests/test_signal_fork_regression.py` (4 new tests: param_grid parity, engine constructor default, threshold sensitivity, path parity at non-default threshold 1.5/0.3)
+**Suite result:** 303 passed, 1 xpassed, 0 failed (baseline was 299+1xpassed; +4 new tests)
+**Phase checklist progress:** signal fork ✅; local verification ✅; pre-commit hygiene ✅
+**Phase completion %:** 100%
+**Blocking issues found:** none
+**Bugs discovered and logged:**
+  - Signal fork: `cli/backtest.py` hardcoded `2.0`/`0.5` at 4 call sites instead of reading from `config/settings.yaml`. `cli/features.py` (signals path) already read from config. Fork was latent (both happened to be 2.0/0.5 today) but would diverge on any config change.
+**Resume point for next session:** Begin Phase A — prop-firm bug fixes (A1 daily-loss parenthesization in `backtesting/engine.py:139`, then A2, A3, A4, A5 in order).
+**Session limit hit:** no
+
+Consolidated z-score thresholds to a single source of truth: `STAT_ARB_ENTRY_Z` /
+`STAT_ARB_EXIT_Z` in `config/constants.py`, loaded at runtime via `get_settings()`.
+All 4 hardcoded call sites in `cli/backtest.py` now read from config. Regression
+test guards constant consistency, threshold sensitivity, and engine/signals-path
+parity — will catch any future re-introduction of divergent literals.
+
 ### 2026-06-09 — session "gap-closure" (Claude) — COMPLETE
 **Phase worked:** infrastructure gaps (strategy registry, portfolio construction, research pipeline)
 **DB health check:** SKIPPED — no DB-touching changes; source-only session

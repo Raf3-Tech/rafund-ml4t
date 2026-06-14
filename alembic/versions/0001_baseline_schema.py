@@ -14,11 +14,15 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-signal_type = sa.Enum('BUY', 'SELL', 'HOLD', 'CLOSE', name='signal_type')
+signal_col_type = sa.VARCHAR(10)
 
 
 def upgrade() -> None:
-    signal_type.create(op.get_bind(), checkfirst=True)
+    op.execute(
+        "DO $$ BEGIN CREATE TYPE signal_type AS ENUM "
+        "('BUY', 'SELL', 'HOLD', 'CLOSE'); "
+        "EXCEPTION WHEN duplicate_object THEN null; END $$"
+    )
 
     op.create_table(
         'prices',
@@ -58,7 +62,7 @@ def upgrade() -> None:
         sa.Column('symbol_a', sa.String(length=20), nullable=False),
         sa.Column('symbol_b', sa.String(length=20), nullable=False),
         sa.Column('timestamp', sa.DateTime(), nullable=False),
-        sa.Column('signal', signal_type, nullable=False),
+        sa.Column('signal', signal_col_type, nullable=False),
         sa.Column('z_score', sa.Float(), nullable=True),
         sa.Column('position_a', sa.Integer(), nullable=True),
         sa.Column('position_b', sa.Integer(), nullable=True),
@@ -137,4 +141,4 @@ def downgrade() -> None:
     op.drop_index('idx_timestamp', table_name='prices')
     op.drop_table('prices')
 
-    signal_type.drop(op.get_bind(), checkfirst=True)
+    op.execute("DROP TYPE IF EXISTS signal_type")

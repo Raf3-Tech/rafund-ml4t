@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 from sqlalchemy.engine import URL
 
+from config.constants import STAT_ARB_ENTRY_Z, STAT_ARB_EXIT_Z
+
 _ROOT = Path(__file__).resolve().parent.parent
 _SETTINGS_PATH = _ROOT / "config" / "settings.yaml"
 
@@ -59,7 +61,7 @@ def build_database_url(
         # (credentials, host, db, and any ?sslmode=... query string).
         for prefix in ("postgresql+psycopg2://", "postgresql://", "postgres://"):
             if raw.startswith(prefix):
-                return f"{driver}://{raw[len(prefix):]}"
+                return f"{driver}://{raw[len(prefix) :]}"
         return raw  # some other scheme — pass through untouched
 
     host = host or os.environ.get("DB_HOST", "localhost")
@@ -152,12 +154,44 @@ class Settings:
 
         symbols_csv = _env("COLLECT_SYMBOLS", "")
         if symbols_csv:
-            self.collect_symbols = [s.strip() for s in symbols_csv.split(",") if s.strip()]
+            self.collect_symbols = [
+                s.strip() for s in symbols_csv.split(",") if s.strip()
+            ]
         else:
-            self.collect_symbols = list(collect.get("symbols", [
-                "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
-                "ADA/USDT", "DOT/USDT", "LINK/USDT", "XRP/USDT",
-            ]))
+            self.collect_symbols = list(
+                collect.get(
+                    "symbols",
+                    [
+                        "BTC/USDT",
+                        "ETH/USDT",
+                        "SOL/USDT",
+                        "BNB/USDT",
+                        "ADA/USDT",
+                        "DOT/USDT",
+                        "LINK/USDT",
+                        "XRP/USDT",
+                    ],
+                )
+            )
+
+        kraken_csv = _env("KRAKEN_SYMBOLS", "")
+        if kraken_csv:
+            self.kraken_symbols = [s.strip() for s in kraken_csv.split(",") if s.strip()]
+        else:
+            self.kraken_symbols = list(
+                collect.get(
+                    "kraken_symbols",
+                    [
+                        "BTC/USD",
+                        "ETH/USD",
+                        "SOL/USD",
+                        "ADA/USD",
+                        "DOT/USD",
+                        "LINK/USD",
+                        "XRP/USD",
+                    ],
+                )
+            )
 
         self.collect_start_date = _env(
             "COLLECT_START_DATE", collect.get("start_date", "2017-08-17")
@@ -166,22 +200,30 @@ class Settings:
 
         self.eval_pair_a = _env("EVAL_PAIR_A", eval_cfg.get("pair_a", "BTC/USDT"))
         self.eval_pair_b = _env("EVAL_PAIR_B", eval_cfg.get("pair_b", "ETH/USDT"))
-        self.account_size = _env_float("ACCOUNT_SIZE", float(eval_cfg.get("account_size", 5000)))
-        self.step1_profit = _env_float("STEP1_PROFIT", float(eval_cfg.get("step1_profit", 250)))
-        self.step2_profit = _env_float("STEP2_PROFIT", float(eval_cfg.get("step2_profit", 500)))
+        self.account_size = _env_float(
+            "ACCOUNT_SIZE", float(eval_cfg.get("account_size", 5000))
+        )
+        self.step1_profit = _env_float(
+            "STEP1_PROFIT", float(eval_cfg.get("step1_profit", 250))
+        )
+        self.step2_profit = _env_float(
+            "STEP2_PROFIT", float(eval_cfg.get("step2_profit", 500))
+        )
         self.max_daily_loss_pct = _env_float(
             "MAX_DAILY_LOSS_PCT", float(eval_cfg.get("max_daily_loss_pct", 0.04))
         )
         self.max_drawdown_pct = _env_float(
             "MAX_DRAWDOWN_PCT", float(eval_cfg.get("max_drawdown_pct", 0.06))
         )
-        self.max_leverage = _env_float("MAX_LEVERAGE", float(eval_cfg.get("max_leverage", 5.0)))
+        self.max_leverage = _env_float(
+            "MAX_LEVERAGE", float(eval_cfg.get("max_leverage", 5.0))
+        )
 
         self.entry_threshold = _env_float(
-            "ENTRY_THRESHOLD", float(strat.get("entry_threshold", 2.0))
+            "ENTRY_THRESHOLD", float(strat.get("entry_threshold", STAT_ARB_ENTRY_Z))
         )
         self.exit_threshold = _env_float(
-            "EXIT_THRESHOLD", float(strat.get("exit_threshold", 0.5))
+            "EXIT_THRESHOLD", float(strat.get("exit_threshold", STAT_ARB_EXIT_Z))
         )
         self.lookback = _env_int("LOOKBACK", int(strat.get("lookback_period", 60)))
         self.leg_allocation_pct = _env_float(
@@ -227,38 +269,61 @@ class Settings:
             if not cond:
                 errors.append(msg)
 
-        _check(0.0 < self.max_daily_loss_pct < 1.0,
-               f"max_daily_loss_pct must be in (0, 1), got {self.max_daily_loss_pct}")
-        _check(0.0 < self.max_drawdown_pct < 1.0,
-               f"max_drawdown_pct must be in (0, 1), got {self.max_drawdown_pct}")
-        _check(self.max_leverage > 0,
-               f"max_leverage must be > 0, got {self.max_leverage}")
-        _check(0.0 <= self.commission < 1.0,
-               f"commission must be in [0, 1), got {self.commission}")
-        _check(self.entry_threshold > 0,
-               f"entry_threshold must be > 0, got {self.entry_threshold}")
-        _check(self.exit_threshold >= 0,
-               f"exit_threshold must be >= 0, got {self.exit_threshold}")
-        _check(0.0 < self.leg_allocation_pct <= 1.0,
-               f"leg_allocation_pct must be in (0, 1], got {self.leg_allocation_pct}")
-        _check(self.lookback > 0,
-               f"lookback must be > 0, got {self.lookback}")
-        _check(self.max_holding_days > 0,
-               f"max_holding_days must be > 0, got {self.max_holding_days}")
-        _check(self.account_size > 0,
-               f"account_size must be > 0, got {self.account_size}")
-        _check(0.0 < self.entropy_threshold <= 1.0,
-               f"entropy_threshold must be in (0, 1], got {self.entropy_threshold}")
-        _check(2 <= self.entropy_embedding <= 7,
-               f"entropy_embedding must be in [2, 7], got {self.entropy_embedding}")
-        _check(self.entropy_window > self.entropy_embedding,
-               f"entropy_window ({self.entropy_window}) must exceed "
-               f"entropy_embedding ({self.entropy_embedding})")
+        _check(
+            0.0 < self.max_daily_loss_pct < 1.0,
+            f"max_daily_loss_pct must be in (0, 1), got {self.max_daily_loss_pct}",
+        )
+        _check(
+            0.0 < self.max_drawdown_pct < 1.0,
+            f"max_drawdown_pct must be in (0, 1), got {self.max_drawdown_pct}",
+        )
+        _check(
+            self.max_leverage > 0, f"max_leverage must be > 0, got {self.max_leverage}"
+        )
+        _check(
+            0.0 <= self.commission < 1.0,
+            f"commission must be in [0, 1), got {self.commission}",
+        )
+        _check(
+            self.entry_threshold > 0,
+            f"entry_threshold must be > 0, got {self.entry_threshold}",
+        )
+        _check(
+            self.exit_threshold >= 0,
+            f"exit_threshold must be >= 0, got {self.exit_threshold}",
+        )
+        _check(
+            0.0 < self.leg_allocation_pct <= 1.0,
+            f"leg_allocation_pct must be in (0, 1], got {self.leg_allocation_pct}",
+        )
+        _check(self.lookback > 0, f"lookback must be > 0, got {self.lookback}")
+        _check(
+            self.max_holding_days > 0,
+            f"max_holding_days must be > 0, got {self.max_holding_days}",
+        )
+        _check(
+            self.account_size > 0, f"account_size must be > 0, got {self.account_size}"
+        )
+        _check(
+            0.0 < self.entropy_threshold <= 1.0,
+            f"entropy_threshold must be in (0, 1], got {self.entropy_threshold}",
+        )
+        _check(
+            2 <= self.entropy_embedding <= 7,
+            f"entropy_embedding must be in [2, 7], got {self.entropy_embedding}",
+        )
+        _check(
+            self.entropy_window > self.entropy_embedding,
+            f"entropy_window ({self.entropy_window}) must exceed "
+            f"entropy_embedding ({self.entropy_embedding})",
+        )
 
         drift = set(self.retrain_symbols) - set(self.collect_symbols)
-        _check(not drift,
-               f"retraining.symbols must be a subset of collect.symbols; "
-               f"unknown symbols: {sorted(drift)}")
+        _check(
+            not drift,
+            f"retraining.symbols must be a subset of collect.symbols; "
+            f"unknown symbols: {sorted(drift)}",
+        )
 
         if errors:
             raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))

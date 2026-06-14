@@ -35,3 +35,11 @@ Thumbs.db
 # MLflow artifacts
 mlruns/
 mlflow.db
+
+# Pytest coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+
+# Local model-training output (feature importance plots, tmp JSON)
+tmp/

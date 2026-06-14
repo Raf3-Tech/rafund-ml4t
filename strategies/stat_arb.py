@@ -7,7 +7,7 @@ based on mean-reverting spreads between correlated assets.
 Mathematical Framework:
     Spread = log(P_A) - β * log(P_B)
     Z-score = (Spread - μ) / σ
-    
+
 Trading Rules:
     - Long spread (buy A, sell B) when z-score < -2
     - Short spread (sell A, buy B) when z-score > 2
@@ -16,20 +16,26 @@ Trading Rules:
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
+from config.constants import STAT_ARB_ENTRY_Z, STAT_ARB_EXIT_Z
 from strategies.base import BasePairsStrategy
 from strategies.registry import StrategyRegistry
 
 
 class StatArbStrategy:
     """Statistical Arbitrage Strategy Implementation."""
-    
-    def __init__(self, entry_threshold: float = 2.0, exit_threshold: float = 0.5, 
-                 use_fixed_window: bool = True, fixed_window_size: int = 60):
+
+    def __init__(
+        self,
+        entry_threshold: float = 2.0,
+        exit_threshold: float = 0.5,
+        use_fixed_window: bool = True,
+        fixed_window_size: int = 60,
+    ):
         """
         Initialize statistical arbitrage strategy.
-        
+
         Args:
             entry_threshold: Z-score threshold for entry (default: 2.0 std deviations)
             exit_threshold: Z-score threshold for exit (default: 0.5 std deviations)
@@ -42,46 +48,50 @@ class StatArbStrategy:
         self.fixed_window_size = fixed_window_size
         self.signals = None
         self.fixed_mean = None  # Will store fixed mean from training period
-        self.fixed_std = None   # Will store fixed std from training period
-        
-    def calculate_spread(self, price_a: pd.Series, price_b: pd.Series, hedge_ratio: float) -> pd.Series:
+        self.fixed_std = None  # Will store fixed std from training period
+
+    def calculate_spread(
+        self, price_a: pd.Series, price_b: pd.Series, hedge_ratio: float
+    ) -> pd.Series:
         """
         Calculate the spread between two assets.
-        
+
         Formula: spread = log(P_A) - β * log(P_B)
-        
+
         Args:
             price_a: Price series for asset A
             price_b: Price series for asset B
             hedge_ratio: Hedge ratio (β) from regression
-            
+
         Returns:
             Series of spread values
         """
         log_a = np.log(price_a)
         log_b = np.log(price_b)
         return log_a - hedge_ratio * log_b
-    
-    def calculate_z_score(self, spread: pd.Series, window: int = 20, training_end_idx: int = None) -> pd.Series:
+
+    def calculate_z_score(
+        self, spread: pd.Series, window: int = 20, training_end_idx: int = None
+    ) -> pd.Series:
         """
         Calculate Z-score for the spread.
-        
+
         Supports two modes:
         1. Fixed window (RECOMMENDED): Uses statistics from training period only
            - Eliminates window drift
            - More stable baseline
-           
+
         2. Rolling window (DEPRECATED): Updates baseline daily
            - Can cause false signals (window chasing)
            - Use only for comparison
-        
+
         Formula: z = (spread - mean) / std
-        
+
         Args:
             spread: Series of spread values
             window: Window size (used only if use_fixed_window=False)
             training_end_idx: End index of training period (for fixed window mode)
-            
+
         Returns:
             Series of Z-score values
         """
@@ -90,47 +100,49 @@ class StatArbStrategy:
             # Use only the training period to calculate mean and std
             if training_end_idx is None:
                 training_end_idx = min(self.fixed_window_size, len(spread))
-            
+
             training_spread = spread.iloc[:training_end_idx]
             mean = training_spread.mean()
             std = training_spread.std()
-            
+
             # Store for later reference
             self.fixed_mean = mean
             self.fixed_std = std
-            
+
             # Calculate z-score using FIXED stats (no rolling)
             z_score = (spread - mean) / std
-            
+
         else:
             # ROLLING WINDOW MODE (deprecated, problematic)
             # This is the old approach - kept for backwards compatibility
             mean = spread.rolling(window).mean()
             std = spread.rolling(window).std()
             z_score = (spread - mean) / std
-        
+
         return z_score
-    
-    def generate_signals(self, z_score: pd.Series, spread: pd.Series = None) -> pd.DataFrame:
+
+    def generate_signals(
+        self, z_score: pd.Series, spread: pd.Series = None
+    ) -> pd.DataFrame:
         """
         Generate trading signals based on Z-score.
-        
+
         Signal Rules:
             - 1: Long spread (buy A, short B) when z < -entry_threshold
             - -1: Short spread (short A, buy B) when z > entry_threshold
             - 0: Close when |z| < exit_threshold AND spread has reverted
-            
+
         Args:
             z_score: Series of Z-score values
             spread: Series of spread values (required for reversion validation)
-            
+
         Returns:
             DataFrame with signals and positions
         """
         signals = pd.DataFrame(index=z_score.index)
-        signals['z_score'] = z_score
+        signals["z_score"] = z_score
         if spread is not None:
-            signals['spread'] = spread
+            signals["spread"] = spread
 
         # Stateful entry/exit carry.
         #
@@ -146,43 +158,43 @@ class StatArbStrategy:
         entry_spread_col: list[float] = []
 
         for idx in signals.index:
-            z = signals.loc[idx, 'z_score']
-            sp = signals.loc[idx, 'spread'] if spread is not None else np.nan
+            z = signals.loc[idx, "z_score"]
+            sp = signals.loc[idx, "spread"] if spread is not None else np.nan
 
             if target == 0:
                 if z > self.entry_threshold:
-                    target = -1            # spread rich -> short A / long B
+                    target = -1  # spread rich -> short A / long B
                     entry_spread = sp
                 elif z < -self.entry_threshold:
-                    target = 1             # spread cheap -> long A / short B
+                    target = 1  # spread cheap -> long A / short B
                     entry_spread = sp
             elif pd.notna(z) and abs(z) < self.exit_threshold:
-                target = 0                 # reverted -> flat
+                target = 0  # reverted -> flat
                 entry_spread = None
 
             signal_col.append(target)
             entry_spread_col.append(entry_spread if target != 0 else np.nan)
 
-        signals['signal'] = signal_col
-        signals['entry_spread'] = entry_spread_col
+        signals["signal"] = signal_col
+        signals["entry_spread"] = entry_spread_col
 
         # Position sizes (normalized): long spread = long A / short B.
-        signals['position_a'] = signals['signal']
-        signals['position_b'] = -signals['signal']
+        signals["position_a"] = signals["signal"]
+        signals["position_b"] = -signals["signal"]
 
         self.signals = signals
         return signals
-    
+
     def get_trades(self, signals: pd.DataFrame) -> pd.DataFrame:
         """
         Extract trade entries and exits from signals.
-        
+
         For each trade, validates whether actual spread reversion occurred
         (not just z-score threshold crossing).
-        
+
         Args:
             signals: DataFrame with signals
-            
+
         Returns:
             DataFrame with trade information including reversion validation
         """
@@ -192,48 +204,52 @@ class StatArbStrategy:
         entry_z = None
         entry_spread = None
         position_type = None
-        
+
         for date, row in signals.iterrows():
-            current_signal = row['signal']
-            current_z = row['z_score']
-            current_spread = row.get('spread', np.nan)
-            
+            current_signal = row["signal"]
+            current_z = row["z_score"]
+            current_spread = row.get("spread", np.nan)
+
             # Entry
             if prev_signal == 0 and current_signal != 0:
                 entry_date = date
                 entry_z = current_z
                 entry_spread = current_spread
-                position_type = 'Long' if current_signal == 1 else 'Short'
-            
+                position_type = "Long" if current_signal == 1 else "Short"
+
             # Exit
             elif prev_signal != 0 and current_signal == 0:
                 # Validate whether spread actually reverted
                 spread_reverted = False
                 reversion_distance = np.nan
-                
+
                 if not np.isnan(entry_spread) and not np.isnan(current_spread):
                     # For long positions: spread should decrease (improve)
-                    if position_type == 'Long':
-                        spread_reverted = (current_spread < entry_spread)
+                    if position_type == "Long":
+                        spread_reverted = current_spread < entry_spread
                         reversion_distance = entry_spread - current_spread
                     # For short positions: spread should increase
-                    elif position_type == 'Short':
-                        spread_reverted = (current_spread > entry_spread)
+                    elif position_type == "Short":
+                        spread_reverted = current_spread > entry_spread
                         reversion_distance = current_spread - entry_spread
-                
-                trades.append({
-                    'entry_date': entry_date,
-                    'exit_date': date,
-                    'entry_z': entry_z,
-                    'exit_z': current_z,
-                    'entry_spread': entry_spread,
-                    'exit_spread': current_spread,
-                    'position_type': position_type,
-                    'duration_days': (date - entry_date).days,
-                    'spread_reverted': spread_reverted,
-                    'reversion_distance': reversion_distance,
-                    'signal_validity': 'VALID' if spread_reverted else 'FALSE_SIGNAL (window drift)'
-                })
+
+                trades.append(
+                    {
+                        "entry_date": entry_date,
+                        "exit_date": date,
+                        "entry_z": entry_z,
+                        "exit_z": current_z,
+                        "entry_spread": entry_spread,
+                        "exit_spread": current_spread,
+                        "position_type": position_type,
+                        "duration_days": (date - entry_date).days,
+                        "spread_reverted": spread_reverted,
+                        "reversion_distance": reversion_distance,
+                        "signal_validity": "VALID"
+                        if spread_reverted
+                        else "FALSE_SIGNAL (window drift)",
+                    }
+                )
                 entry_date = None
                 entry_z = None
                 entry_spread = None
@@ -254,7 +270,9 @@ class StatArbStrategy:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _hedge_ratio_from_training(log_a: pd.Series, log_b: pd.Series, end: int) -> float:
+    def _hedge_ratio_from_training(
+        log_a: pd.Series, log_b: pd.Series, end: int
+    ) -> float:
         """OLS hedge ratio beta: log_a ~ beta * log_b on the training slice."""
         la = log_a.iloc[:end].values
         lb = log_b.iloc[:end].values
@@ -390,7 +408,9 @@ class WalkForwardStatArb:
         self.baseline_std: float = 1.0
 
     @staticmethod
-    def _spread(price_a: pd.Series, price_b: pd.Series, hedge_ratio: float) -> pd.Series:
+    def _spread(
+        price_a: pd.Series, price_b: pd.Series, hedge_ratio: float
+    ) -> pd.Series:
         return np.log(price_a) - hedge_ratio * np.log(price_b)
 
     def prepare(self, train_df: pd.DataFrame) -> None:
@@ -419,7 +439,9 @@ class WalkForwardStatArb:
         # If the pair failed the causal (train-fold) cointegration gate, stay flat
         # for the whole OOS window rather than trading a non-mean-reverting spread.
         if self.require_cointegration and not self.is_cointegrated:
-            out = pd.DataFrame({"timestamp": test_df["timestamp"].reset_index(drop=True)})
+            out = pd.DataFrame(
+                {"timestamp": test_df["timestamp"].reset_index(drop=True)}
+            )
             out["position_a"] = 0
             out["position_b"] = 0
             return out
@@ -451,9 +473,9 @@ class WalkForwardStatArb:
             if target == 0:
                 if gate[i]:  # only enter when the regime is tradeable
                     if z_val > self.entry_threshold:
-                        target = -1   # spread rich -> short A / long B
+                        target = -1  # spread rich -> short A / long B
                     elif z_val < -self.entry_threshold:
-                        target = 1    # spread cheap -> long A / short B
+                        target = 1  # spread cheap -> long A / short B
             elif abs(z_val) < self.exit_threshold:
                 target = 0
             positions.append(target)
@@ -480,7 +502,11 @@ class StatArbPairsStrategy(BasePairsStrategy):
 
     name = "Statistical Arbitrage"
     min_bars = 60
-    param_grid = {"entry_z": 2.0, "exit_z": 0.5, "lookback": 60}
+    param_grid = {
+        "entry_z": STAT_ARB_ENTRY_Z,
+        "exit_z": STAT_ARB_EXIT_Z,
+        "lookback": 60,
+    }
 
     def get_min_bars(self, params: Dict) -> int:
         return int(params.get("lookback", self.param_grid["lookback"]))
@@ -532,8 +558,12 @@ class StatArbPairsStrategy(BasePairsStrategy):
         return frame[["timestamp", "position_a", "position_b"]].copy()
 
     def signals_to_db_format(
-        self, df_a: pd.DataFrame, df_b: pd.DataFrame, params: Dict,
-        symbol_a: str, symbol_b: str,
+        self,
+        df_a: pd.DataFrame,
+        df_b: pd.DataFrame,
+        params: Dict,
+        symbol_a: str,
+        symbol_b: str,
     ) -> pd.DataFrame:
         """Produce DB-compatible signal rows (BUY/SELL/HOLD) for the signals table.
 
@@ -545,7 +575,15 @@ class StatArbPairsStrategy(BasePairsStrategy):
         merged = self._merge_pair(df_a, df_b)
         if len(merged) < lookback + 5:
             return pd.DataFrame(
-                columns=["symbol_a", "symbol_b", "timestamp", "signal", "z_score", "position_a", "position_b"]
+                columns=[
+                    "symbol_a",
+                    "symbol_b",
+                    "timestamp",
+                    "signal",
+                    "z_score",
+                    "position_a",
+                    "position_b",
+                ]
             )
 
         frame = self._core(params).signals_from_pair_prices(merged)

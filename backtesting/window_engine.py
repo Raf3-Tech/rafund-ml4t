@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from backtesting.metrics import compute_performance_metrics, empty_metrics
 from config.constants import PERIODS_PER_YEAR
 
 logger = logging.getLogger(__name__)
@@ -197,25 +198,8 @@ def _stats_from_equity(
     num_trades: int,
     annualization: int,
 ) -> Dict:
-    """Turn an equity curve + trade tally into the standard metrics dict."""
-    eq = pd.Series(equity_curve, dtype=float)
-    if len(eq) < 2:
-        return _empty_metrics()
-    rets = eq.pct_change().dropna()
-    mean_r = float(rets.mean()) if len(rets) else 0.0
-    std_r = float(rets.std()) if len(rets) else 0.0
-    sharpe = float(mean_r / std_r * np.sqrt(annualization)) if std_r > 0 else 0.0
-    cummax = eq.cummax()
-    max_dd = float(abs(((eq - cummax) / cummax).min()) * 100)
-    total_return = float((eq.iloc[-1] - 1.0) * 100)
-    win_rate = float(num_wins / num_trades * 100) if num_trades > 0 else 0.0
-    return {
-        "total_return_pct": total_return,
-        "sharpe_ratio": sharpe,
-        "max_drawdown_pct": max_dd,
-        "win_rate_pct": win_rate,
-        "num_trades": num_trades,
-    }
+    """Thin alias — delegates to the shared backtesting.metrics module (Phase D)."""
+    return compute_performance_metrics(equity_curve, num_wins, num_trades, annualization)
 
 
 def _compute_metrics_from_signals(
@@ -402,13 +386,7 @@ def _compute_metrics_from_positions(
 
 
 def _empty_metrics() -> Dict:
-    return {
-        "total_return_pct": 0.0,
-        "sharpe_ratio": 0.0,
-        "max_drawdown_pct": 0.0,
-        "win_rate_pct": 0.0,
-        "num_trades": 0,
-    }
+    return empty_metrics()
 
 
 # ── Pass/fail classification ──────────────────────────────────────────────────
@@ -456,6 +434,60 @@ def _mutation_grid(strategy) -> List[Dict]:
             if key in raw:
                 raw[key] = getattr(strategy, attr)
     return expand_param_grid(raw)
+
+
+# ── Promotion gate (PROMOTION_GATES) ─────────────────────────────────────────
+
+
+def check_promotion_gate(results: List[RunResult]) -> Dict[str, bool]:
+    """Check PROMOTION_GATES for each (strategy_name, symbol) combination.
+
+    Evaluates the last 5 windows per combo against all four gates:
+      - min_windows_positive_sharpe: Sharpe > 0 in >= 3 of last 5 windows
+      - min_windows_pass_dd:         permissive_pass in >= 4 of last 5 windows
+      - min_trades_per_window:       every window in the last 5 has >= 10 trades
+      - min_win_rate_pct:            average win rate over last 5 >= 40%
+
+    Returns:
+        Dict mapping "strategy_name|symbol" → True if all gates pass.
+    """
+    from collections import defaultdict
+    groups: Dict[str, List[RunResult]] = defaultdict(list)
+    for r in results:
+        groups[f"{r.strategy_name}|{r.symbol}"].append(r)
+
+    eligibility: Dict[str, bool] = {}
+    for key, group in groups.items():
+        recent = sorted(group, key=lambda r: r.window_end)[-5:]
+        if not recent:
+            eligibility[key] = False
+            continue
+
+        n_pos_sharpe = sum(1 for r in recent if r.sharpe_ratio > 0)
+        n_pass_dd = sum(1 for r in recent if r.permissive_pass)
+        avg_wr = sum(r.win_rate_pct for r in recent) / len(recent)
+        min_trades_ok = all(
+            r.num_trades >= PROMOTION_GATES["min_trades_per_window"] for r in recent
+        )
+
+        eligible = (
+            n_pos_sharpe >= PROMOTION_GATES["min_windows_positive_sharpe"]
+            and n_pass_dd >= PROMOTION_GATES["min_windows_pass_dd"]
+            and min_trades_ok
+            and avg_wr >= PROMOTION_GATES["min_win_rate_pct"]
+        )
+        eligibility[key] = eligible
+
+        level = logger.info if eligible else logger.debug
+        level(
+            "PROMOTION GATE %s | %s | sharpe_windows=%d/%d pass_dd_windows=%d/%d "
+            "avg_wr=%.1f%% min_trades=%s → %s",
+            key, "ELIGIBLE" if eligible else "NOT ELIGIBLE",
+            n_pos_sharpe, len(recent), n_pass_dd, len(recent),
+            avg_wr, min_trades_ok, eligible,
+        )
+
+    return eligibility
 
 
 # ── Main engine ───────────────────────────────────────────────────────────────
@@ -508,6 +540,16 @@ class WalkForwardWindowEngine:
 
         self._persist_results(all_results)
         logger.info("Engine run complete — %d results written", len(all_results))
+
+        if all_results:
+            gate_results = check_promotion_gate(all_results)
+            eligible = [k for k, v in gate_results.items() if v]
+            logger.info(
+                "Promotion gate: %d / %d combos eligible — %s",
+                len(eligible), len(gate_results),
+                eligible or "none",
+            )
+
         return all_results
 
     def _run_strategy_symbol(self, strategy, symbol: str) -> List[RunResult]:

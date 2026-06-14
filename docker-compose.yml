@@ -1,0 +1,40 @@
+services:
+
+  # ── Continuous training loop ──────────────────────────────────────────────
+  trainer:
+    build: .
+    restart: unless-stopped
+    command: ["/app/scripts/train_loop.sh"]
+    env_file: .env
+    environment:
+      # File-based MLflow tracking — no server needed, works on low-RAM instances.
+      # To enable the MLflow UI, run: mlflow ui --backend-store-uri /mldata/mlruns
+      MLFLOW_TRACKING_URI: file:///mldata/mlruns
+      MLFLOW_EXPERIMENT: rafund-ml4t
+    volumes:
+      - mldata:/mldata
+      - logs:/app/logs
+      - results:/app/results
+
+  # ── Ops dashboard ─────────────────────────────────────────────────────────
+  # UI: http://<host>:8000  (bind to 127.0.0.1; expose via SSH tunnel or nginx)
+  dashboard:
+    build: .
+    restart: unless-stopped
+    command: >
+      gunicorn
+        -w 2
+        -b 0.0.0.0:8000
+        --timeout 120
+        --access-logfile -
+        "monitoring.run_dashboard:build_app_from_env()"
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - logs:/app/logs
+
+volumes:
+  mldata:
+  logs:
+  results:

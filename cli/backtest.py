@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
@@ -42,6 +42,10 @@ def run_backtest() -> bool:
             db.close_pool()
             return False
 
+        from config.loader import get_settings
+
+        cfg = get_settings()
+
         pairs = db.get_feature_pairs()
         if not pairs:
             if not calculate_features():
@@ -65,30 +69,41 @@ def run_backtest() -> bool:
 
             prices = pd.concat([pa, pb], ignore_index=True)
             engine = EvaluationBacktestEngine(
-                rules=rules, symbol_a=pair_a, symbol_b=pair_b,
-                entry_threshold=2.0, exit_threshold=0.5, lookback=60,
-                leg_allocation_pct=0.18, commission=0.001,
-                stop_loss_spread_pct=0.03, max_holding_days=30,
+                rules=rules,
+                symbol_a=pair_a,
+                symbol_b=pair_b,
+                entry_threshold=cfg.entry_threshold,
+                exit_threshold=cfg.exit_threshold,
+                lookback=60,
+                leg_allocation_pct=0.18,
+                commission=0.001,
+                stop_loss_spread_pct=0.03,
+                max_holding_days=30,
             )
             results = engine.run(prices)
             ev = results.get("evaluation", {})
 
-            if os.getenv("SAVE_TO_DB", "1") == "1" and results.get("signals_df") is not None:
+            if (
+                os.getenv("SAVE_TO_DB", "1") == "1"
+                and results.get("signals_df") is not None
+            ):
                 backtest_id = (
                     f"backtest_{pair_a.replace('/', '')}_{pair_b.replace('/', '')}_"
                     f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 )
                 persist_evaluation_run(db, results, backtest_id)
 
-            results_summary.append({
-                "pair": f"{pair_a}/{pair_b}",
-                "status": ev.get("status", "N/A"),
-                "total_return_pct": results.get("total_return_pct", 0.0),
-                "sharpe_ratio": results.get("sharpe_ratio", 0.0),
-                "max_drawdown_pct": results.get("max_drawdown_pct", 0.0),
-                "num_trades": results.get("num_trades", 0),
-                "win_rate_pct": results.get("win_rate_pct", 0.0),
-            })
+            results_summary.append(
+                {
+                    "pair": f"{pair_a}/{pair_b}",
+                    "status": ev.get("status", "N/A"),
+                    "total_return_pct": results.get("total_return_pct", 0.0),
+                    "sharpe_ratio": results.get("sharpe_ratio", 0.0),
+                    "max_drawdown_pct": results.get("max_drawdown_pct", 0.0),
+                    "num_trades": results.get("num_trades", 0),
+                    "win_rate_pct": results.get("win_rate_pct", 0.0),
+                }
+            )
 
         if not results_summary:
             logger.error("No backtest results were generated")
@@ -98,9 +113,13 @@ def run_backtest() -> bool:
         for row in results_summary:
             logger.info(
                 "%s | status=%s | return=%.2f%% | sharpe=%.2f | dd=%.2f%% | trades=%d | win=%.1f%%",
-                row["pair"], row["status"], row["total_return_pct"],
-                row["sharpe_ratio"], row["max_drawdown_pct"],
-                row["num_trades"], row["win_rate_pct"],
+                row["pair"],
+                row["status"],
+                row["total_return_pct"],
+                row["sharpe_ratio"],
+                row["max_drawdown_pct"],
+                row["num_trades"],
+                row["win_rate_pct"],
             )
         db.close_pool()
         return True
@@ -138,22 +157,29 @@ def run_validation_cmd() -> bool:
                 continue
 
             strategy = WalkForwardStatArb(
-                entry_threshold=2.0,
-                exit_threshold=0.5,
-                entropy_threshold=cfg.entropy_threshold if cfg.entropy_enabled else None,
+                entry_threshold=cfg.entry_threshold,
+                exit_threshold=cfg.exit_threshold,
+                entropy_threshold=cfg.entropy_threshold
+                if cfg.entropy_enabled
+                else None,
                 entropy_window=cfg.entropy_window,
                 entropy_embedding=cfg.entropy_embedding,
             )
             result = run_validation(
-                prices, strategy,
+                prices,
+                strategy,
                 strategy_name=f"statarb_{pair_a.replace('/', '')}_{pair_b.replace('/', '')}",
             )
             wf = result.walk_forward
             agg = wf.aggregate
             logger.info(
                 "RESULT %s/%s: folds=%d oos_sharpe=%.2f dd=%.2f%% pct_prof=%.0f%% gate=%s",
-                pair_a, pair_b, len(wf.folds), agg.mean_oos_sharpe,
-                agg.worst_oos_drawdown, agg.pct_folds_profitable,
+                pair_a,
+                pair_b,
+                len(wf.folds),
+                agg.mean_oos_sharpe,
+                agg.worst_oos_drawdown,
+                agg.pct_folds_profitable,
                 "PASS" if wf.passed_gate else "FAIL",
             )
             any_results = True
@@ -166,86 +192,51 @@ def run_validation_cmd() -> bool:
 
 
 def run_paper_trading() -> bool:
-    """Run paper trading simulation across all valid pairs."""
+    """Real-time paper trading: consume live DB prices, track virtual position with prop-firm rules."""
     logger.info("=" * 80)
-    logger.info("STARTING PAPER TRADING")
+    logger.info("STARTING PAPER TRADING CYCLE")
     logger.info("=" * 80)
     try:
-        from backtesting.engine_eval import EvaluationBacktestEngine
-        from backtesting.evaluation_rules import PropFirmRules
-        from backtesting.persist import persist_evaluation_run
         from cli.db import get_db_connection
-        from cli.features import calculate_features
+        from trading.paper_trader import run_paper_cycle
 
         db = get_db_connection()
         if not db.test_connection():
             logger.error("Database connection failed")
             db.close_pool()
             return False
-
-        symbols = db.get_symbols_with_data()
-        if not symbols:
-            logger.error("No symbols with price data found.")
-            db.close_pool()
-            return False
-
-        if not calculate_features():
-            db.close_pool()
-            return False
-
-        pairs = db.get_feature_pairs()
-        if not pairs:
-            logger.error("No valid feature pairs found.")
-            db.close_pool()
-            return False
-
-        results_summary = []
-        for idx, (sym_a, sym_b) in enumerate(pairs, 1):
-            pa = db.get_prices(sym_a, None, None)
-            pb = db.get_prices(sym_b, None, None)
-            if pa.empty or pb.empty:
-                continue
-
-            prices = pd.concat([pa, pb], ignore_index=True)
-            engine = EvaluationBacktestEngine(
-                rules=PropFirmRules(), symbol_a=sym_a, symbol_b=sym_b,
-                entry_threshold=2.0, exit_threshold=0.5, lookback=60,
-                leg_allocation_pct=0.18, commission=0.001,
-                stop_loss_spread_pct=0.03, max_holding_days=30,
-            )
-            results = engine.run(prices)
-            backtest_id = (
-                f"paper_{sym_a.replace('/', '')}_{sym_b.replace('/', '')}_"
-                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            persist_evaluation_run(db, results, backtest_id)
-            results_summary.append({
-                "pair": f"{sym_a}/{sym_b}",
-                "status": results.get("evaluation", {}).get("status", "UNKNOWN"),
-                "total_return_pct": results.get("total_return_pct", 0.0),
-                "sharpe_ratio": results.get("sharpe_ratio", 0.0),
-            })
-
-        if not results_summary:
-            logger.error("No results generated")
-            db.close_pool()
-            return False
-
-        results_summary.sort(key=lambda r: r["total_return_pct"], reverse=True)
-        for row in results_summary:
-            logger.info("%s | status=%s | return=%.2f%% | sharpe=%.2f",
-                        row["pair"], row["status"], row["total_return_pct"], row["sharpe_ratio"])
-
+        result = run_paper_cycle(db)
         db.close_pool()
-        return True
+        return result
     except Exception as e:
-        logger.error(f"Paper trading error: {str(e)}", exc_info=True)
+        logger.error("Paper trading error: %s", str(e), exc_info=True)
         return False
 
 
 def run_live_trading() -> bool:
-    logger.critical("LIVE TRADING NOT IMPLEMENTED — exiting for safety")
-    return False
+    """Live order execution via CCXT with prop-firm risk enforcement.
+
+    Requires LIVE_TRADING_ENABLED=1 in .env.  Without it, runs in shadow mode
+    (logs what it would do, places no orders).
+    """
+    logger.info("=" * 80)
+    logger.info("STARTING LIVE TRADING CYCLE")
+    logger.info("=" * 80)
+    try:
+        from cli.db import get_db_connection
+        from trading.live_trader import run_live_cycle
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+        result = run_live_cycle(db)
+        db.close_pool()
+        return result
+    except Exception as e:
+        logger.error("Live trading error: %s", str(e), exc_info=True)
+        return False
 
 
 def run_full_pipeline() -> bool:
@@ -272,20 +263,34 @@ def run_full_pipeline() -> bool:
         pb = db.get_prices(pair_b, None, None)
         prices = pd.concat([pa, pb], ignore_index=True)
 
+        from config.loader import get_settings
+
+        cfg = get_settings()
+
         rules = PropFirmRules()
         engine = EvaluationBacktestEngine(
-            rules=rules, symbol_a=pair_a, symbol_b=pair_b,
-            entry_threshold=2.0, exit_threshold=0.5, lookback=60,
-            leg_allocation_pct=0.18, commission=0.001,
-            stop_loss_spread_pct=0.03, max_holding_days=30,
+            rules=rules,
+            symbol_a=pair_a,
+            symbol_b=pair_b,
+            entry_threshold=cfg.entry_threshold,
+            exit_threshold=cfg.exit_threshold,
+            lookback=60,
+            leg_allocation_pct=0.18,
+            commission=0.001,
+            stop_loss_spread_pct=0.03,
+            max_holding_days=30,
         )
         results = engine.run(prices)
         ev = results.get("evaluation", {})
         backtest_id = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{ev.get('status', 'UNKNOWN')}"
         persist_evaluation_run(db, results, backtest_id)
 
-        logger.info("Pipeline complete — final equity: $%.2f  return: %.2f%%  status: %s",
-                    results["final_value"], results["total_return_pct"], ev.get("status"))
+        logger.info(
+            "Pipeline complete — final equity: $%.2f  return: %.2f%%  status: %s",
+            results["final_value"],
+            results["total_return_pct"],
+            ev.get("status"),
+        )
         db.close_pool()
         return True
     except Exception as e:

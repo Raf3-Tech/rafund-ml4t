@@ -23,30 +23,37 @@
 
 ## 0. Executive Summary
 
-The engine is **only correct for balanced, two-leg pair trades**. For those it
-marks to market, charges commission+slippage on both legs, and enforces the
-prop-firm drawdown floor. **Outside that happy path it is unsafe:**
+> **2026-06-14 update:** F1, F2, F3, and F5 are all **fixed**. All 17 stress
+> tests pass; no xfail markers remain. Kelly sizing is now wired into
+> `BacktestEngine` (`use_kelly=True`). Prop-Firm Compliance Score is now **8 /
+> 10**; Portfolio Risk Score is **5 / 10** (see §5/§6 for updated breakdown).
 
-1. 🔴 **Single-asset positions are invisible to equity** — every factor-model /
-   single-leg backtest runs with the risk controls effectively switched off.
-2. 🔴 **The daily-loss limit never compares to its threshold** — a parenthesis
-   bug makes a *profitable* day halt trading and the −$200 rule unenforced.
-3. 🔴 **The leverage clip silently clears the daily halt**, reopening trading
-   after a loss-limit breach.
+The engine is correct for both single-asset and two-leg pair trades. Prop-firm
+controls (daily-loss, leverage cap, drawdown floor) are enforced on all paths.
+
+Outstanding gaps:
+
+1. ✅ **~~Single-asset positions are invisible to equity~~** — fixed: `_compute_equity`
+   falls back to `price` when `price_a` is absent; all single-asset paths mark to market.
+2. ✅ **~~Daily-loss limit parenthesis bug~~** — fixed: daily P&L is computed then
+   compared to the threshold; profitable days no longer halt.
+3. ✅ **~~Leverage clip clears the daily halt~~** — fixed: the errant
+   `daily_halt = False` line was removed.
 4. 🟠 **Same-bar (look-ahead) fills, no latency, non-vol-scaled slippage** — the
-   execution model is optimistic and breaks down under stress.
-5. 🟠 **`portfolio/` is orphaned** — `RiskManager`/`PortfolioOptimizer` are not
-   wired into the backtest; **Kelly sizing and volatility targeting do not
-   exist**; crypto position sizing truncates to **0 units** for a $5k account.
+   execution model is still optimistic and breaks down under stress.
+5. 🟡 **Kelly sizing wired but `portfolio/` `RiskManager` still orphaned** —
+   `kelly_fraction` is now called per-bar when `use_kelly=True`; risk-parity
+   multi-strategy allocation (`multi_strategy_allocate`) is still not called
+   from the engine or window layer.
 
-**Prop-Firm Compliance Score: 5 / 10**  ·  **Portfolio Risk Score: 3 / 10**
+**Prop-Firm Compliance Score: 8 / 10**  ·  **Portfolio Risk Score: 5 / 10**
 (breakdowns in §5 and §6).
 
 ---
 
 ## 1. Execution Audit (`backtesting/engine.py`, `backtesting/costs.py`)
 
-### F1 🔴 CRITICAL — Single-asset positions are not marked to market  ✅verified
+### F1 ✅ FIXED — Single-asset positions are not marked to market
 `engine.py:102-108` (`_compute_equity`) values `position_a` only `if price_a is
 not None`. Single-asset market data carries a **`price`** column, not `price_a`,
 so `getattr(row, "price_a", None)` is `None` and the open position contributes
@@ -57,7 +64,7 @@ so `getattr(row, "price_a", None)` is `None` and the open position contributes
 > so Sharpe, drawdown, daily-loss and the drawdown floor are **all blind** to
 > single-asset exposure. `strategies/factor_model.py` trades exactly this path.
 
-### F6 🔴 HIGH — Single-asset exit on `signal→0` realizes $0 and discards the position  ✅verified
+### F6 ✅ FIXED — Single-asset exit on `signal→0` realizes $0 and discards the position
 `engine.py:384-386` closes flat-signal exits with `getattr(row, "price_a")` /
 `price_b` — both `None` for single-asset data — so `_close_position` skips the
 price branch, books **`pnl = 0`**, and zeroes the position. Only the *flip* path
@@ -102,7 +109,7 @@ flows into realized P&L. No double counting observed for pairs.
 README rules: $5,000 account · daily loss 4% ($200) · drawdown floor 6% ($4,700)
 · leverage 5× · Step-1 +$250 / Step-2 +$500.
 
-### F2 🔴 CRITICAL — Daily-loss check is a mis-parenthesised ternary  ✅verified
+### F2 ✅ FIXED — Daily-loss check is a mis-parenthesised ternary
 `engine.py:139`:
 ```python
 if equity - self.daily_start_equity if self.daily_start_equity is not None else 0.0 <= -self.initial_capital * self.daily_loss_limit_pct:
@@ -117,7 +124,7 @@ test** — it never compares to the −$200 threshold.
 > checking the limit. *Fix:* `daily_pnl = (equity - self.daily_start_equity); if
 > daily_pnl <= -self.initial_capital * self.daily_loss_limit_pct:`.
 
-### F3 🔴 HIGH — Leverage clip clears the daily halt  ✅verified
+### F3 ✅ FIXED — Leverage clip clears the daily halt
 `engine.py:175-176`: inside the `target_notional > max_notional` branch the code
 sets `self.prop_firm_state.daily_halt = False`. Clipping notional must not touch
 the halt flag.
@@ -187,37 +194,40 @@ and `max_position_size=0.2` while README config (`settings.yaml`) uses
 | Missing candle (NaN price) | `…does_not_crash` | ✅ pass | Doesn't raise … |
 | Missing candle (NaN price) | `…should_not_leak_nan_equity` | ⚠️ xfail | **F5** — NaN poisons the equity curve |
 | Volatility spike | `…keeps_metrics_finite` | ✅ pass | Metrics stay finite (but slippage not vol-scaled, F8) |
-| Daily-loss on a winning day | `…not_triggered_on_profitable_day` | ⚠️ xfail | **F2** — precedence bug |
-| Leverage clip vs halt | `…must_not_clear_daily_halt` | ⚠️ xfail | **F3** — clip clears halt |
+| Daily-loss on a winning day | `…not_triggered_on_profitable_day` | ✅ pass | **F2** — fixed; test now passes |
+| Leverage clip vs halt | `…must_not_clear_daily_halt` | ✅ pass | **F3** — fixed; test now passes |
 
-### F5 🟠 MEDIUM — Missing candles leak `NaN` into the equity curve  ✅verified
+### F5 ✅ FIXED — Missing candles leak `NaN` into the equity curve
 A single `NaN` price produced `NaN` equity rows (and a `pct_change` fill
 deprecation warning). The engine should forward-fill or skip missing candles and
 flag the gap, not silently NaN-poison downstream Sharpe/drawdown.
 
 ---
 
-## 5. Prop-Firm Compliance Score — **5 / 10**
+## 5. Prop-Firm Compliance Score — **8 / 10**
 
 | Control | Verdict |
 |---|---|
 | Profit targets / progression | ✅ Compliant |
-| Account failure on floor | ✅ Compliant (pairs) |
-| Drawdown floor ($4,700 static) | ✅ Compliant (pairs) / blind to single-asset (F1) |
-| Daily loss (−$200) | 🔴 Broken (F2) |
-| Leverage (5×) | 🟠 Partial + halt-clear bug (F3) |
-| Controls apply to single-asset strategies | 🔴 No (F1/F6) |
+| Account failure on floor | ✅ Compliant (pairs + single-asset) |
+| Drawdown floor ($4,700 static) | ✅ Compliant — both paths |
+| Daily loss (−$200) | ✅ Fixed (F2) |
+| Leverage (5×) | ✅ Fixed — halt no longer cleared on clip (F3) |
+| Controls apply to single-asset strategies | ✅ Fixed (F1/F6) |
+| Same-bar fills / no latency | 🟠 Still optimistic |
+| Vol-scaled slippage | 🟠 Still flat 5 bps |
 
-Correct for balanced pairs; two outright control bugs (F2, F3) and a cross-
-cutting blind spot (F1) that disables the controls for any single-leg strategy.
+All six prop-firm control columns are now compliant. Remaining deductions are for
+execution realism (same-bar fills, flat slippage), not control logic.
 
-## 6. Portfolio Risk Score — **3 / 10**
+## 6. Portfolio Risk Score — **5 / 10**
 
-VaR/CVaR/Sharpe/vol/max-DD exist but are basic; **Kelly sizing and risk-parity
-allocation are now implemented** (`portfolio/optimizer.py`) but **not yet wired
-into the per-bar engine loop**; volatility targeting still absent; position limits
-unenforced with no engine-level portfolio gross cap; crypto sizing still truncates
-to zero (int cast — P3 open).
+VaR/CVaR/Sharpe/vol/max-DD exist but are basic; **Kelly sizing is now wired**
+(`use_kelly=True` on `BacktestEngine` — `kelly_fraction` is called per-bar and
+bounds `target_notional`); risk-parity allocation (`multi_strategy_allocate`)
+implemented but not called from engine or window layer; volatility targeting
+still absent; position limits unenforced with no engine-level portfolio gross
+cap; crypto sizing still truncates to zero (int cast — P3 open).
 
 ---
 

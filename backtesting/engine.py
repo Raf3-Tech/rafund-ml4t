@@ -15,7 +15,9 @@ import pandas as pd
 import structlog
 
 from backtesting.costs import TransactionCostModel
+from backtesting.metrics import compute_performance_metrics
 from config.constants import PERIODS_PER_YEAR
+from portfolio.optimizer import kelly_fraction
 
 logger = structlog.get_logger(__name__)
 
@@ -61,6 +63,8 @@ class BacktestEngine:
         step1_profit_pct: float = 0.09,
         step2_profit_pct: float = 0.09,
         leg_allocation_pct: float = 0.18,
+        use_kelly: bool = False,
+        kelly_lookback: int = 30,
     ) -> None:
         self.initial_capital = initial_capital
         self.commission_pct = commission_pct
@@ -73,6 +77,8 @@ class BacktestEngine:
         self.step1_profit_pct = step1_profit_pct
         self.step2_profit_pct = step2_profit_pct
         self.leg_allocation_pct = leg_allocation_pct
+        self.use_kelly = use_kelly
+        self.kelly_lookback = kelly_lookback
 
         self.reset()
 
@@ -92,6 +98,7 @@ class BacktestEngine:
         self.entry_timestamp: Optional[pd.Timestamp] = None
         self.trades: List[Dict[str, object]] = []
         self.equity_curve: List[Dict[str, object]] = []
+        self._daily_equity_history: List[float] = []
         self.cost_model = TransactionCostModel(
             commission_pct=self.commission_pct,
             slippage_model=self.slippage_model,
@@ -374,6 +381,9 @@ class BacktestEngine:
                 # daily_start_equity is never contaminated.
                 if np.isfinite(new_day_equity):
                     self.daily_start_equity = new_day_equity
+                    self._daily_equity_history.append(new_day_equity)
+                    if len(self._daily_equity_history) > self.kelly_lookback:
+                        self._daily_equity_history = self._daily_equity_history[-self.kelly_lookback:]
                 self.prop_firm_state.daily_halt = False
 
             equity = self._compute_equity(price_a, price_b, price)
@@ -391,6 +401,9 @@ class BacktestEngine:
             target_notional = getattr(row, "target_notional", None)
             if target_notional is None:
                 target_notional = equity * self.leg_allocation_pct
+                kn = self._kelly_notional(equity)
+                if kn is not None:
+                    target_notional = min(target_notional, kn)
 
             if target_position_a != 0.0 or target_position_b != 0.0:
                 if self.position_a == 0 and self.position_b == 0:
@@ -450,35 +463,44 @@ class BacktestEngine:
         return self._build_results()
 
     def _build_results(self) -> Dict[str, object]:
-        equity_series = pd.Series(
-            [row["equity"] for row in self.equity_curve],
-            index=[row["timestamp"] for row in self.equity_curve],
-        )
-        daily_returns = equity_series.pct_change().dropna()
-        mean_return = daily_returns.mean() if len(daily_returns) else 0.0
-        std_return = daily_returns.std() if len(daily_returns) else 0.0
-        sharpe = (mean_return / std_return * np.sqrt(PERIODS_PER_YEAR)) if std_return > 0 else 0.0
-        worst_drawdown = ((equity_series - equity_series.cummax()) / equity_series.cummax()).min() if len(equity_series) else 0.0
-        final_equity = equity_series.iloc[-1] if len(equity_series) else self.cash
+        eq_dollars = [row["equity"] for row in self.equity_curve]
+        final_equity = eq_dollars[-1] if eq_dollars else self.cash
         total_return = (final_equity - self.initial_capital) / self.initial_capital
+
+        # Normalize to unit equity so compute_performance_metrics gives correct
+        # total_return_pct and the Sharpe/DD are scale-invariant anyway.
+        unit_eq = (
+            [e / self.initial_capital for e in eq_dollars]
+            if eq_dollars and self.initial_capital > 0
+            else eq_dollars
+        )
+        closed = [t for t in self.trades if t.get("event") == "CLOSE" and t.get("pnl") is not None]
+        wins = sum(1 for t in closed if t["pnl"] > 0)
+        perf = compute_performance_metrics(unit_eq, wins, len(closed), PERIODS_PER_YEAR)
 
         return {
             "initial_capital": self.initial_capital,
             "final_equity": final_equity,
             "total_return": total_return,
             "total_return_pct": total_return * 100,
-            "sharpe_ratio": sharpe,
-            "max_drawdown_pct": abs(worst_drawdown) * 100,
+            "sharpe_ratio": perf["sharpe_ratio"],
+            "max_drawdown_pct": perf["max_drawdown_pct"],
             "num_trades": len(self.trades),
-            "win_rate": self._compute_win_rate(),
+            "win_rate": perf["win_rate_pct"] / 100.0,
             "equity_curve": self.equity_curve,
             "trades": self.trades,
             "prop_firm_state": self.prop_firm_state,
         }
 
-    def _compute_win_rate(self) -> float:
-        closed = [t for t in self.trades if t.get("event") == "CLOSE" and t.get("pnl") is not None]
-        if not closed:
-            return 0.0
-        wins = sum(1 for t in closed if t["pnl"] > 0)
-        return wins / len(closed)
+    def _kelly_notional(self, equity: float) -> Optional[float]:
+        """Return Kelly-sized notional or None during warmup (<2 observations)."""
+        if not self.use_kelly or len(self._daily_equity_history) < 2:
+            return None
+        hist = np.array(self._daily_equity_history[-self.kelly_lookback:], dtype=float)
+        if len(hist) < 2:
+            return None
+        rets = np.diff(hist) / hist[:-1]
+        mu = float(rets.mean())
+        var = float(rets.var())
+        f = kelly_fraction(mu, var, half_kelly=True)
+        return equity * f

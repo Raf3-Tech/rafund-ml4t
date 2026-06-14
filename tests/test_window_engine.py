@@ -9,10 +9,13 @@ from config.constants import PERIODS_PER_YEAR
 from backtesting.window_engine import (
     CONSERVATIVE_MAX_DD,
     CONSERVATIVE_MIN_RETURN,
+    PROMOTION_GATES,
     STANDARD_MAX_DD,
     PERMISSIVE_MAX_DD,
     FUNDING_PERIODS_PER_YEAR,
+    RunResult,
     WalkForwardWindowEngine,
+    check_promotion_gate,
     classify_passes,
     compute_regime,
     expand_param_grid,
@@ -241,3 +244,111 @@ def test_engine_routes_single_pairs_and_funding():
     assert any("|" in r.symbol for r in res)
     assert all(np.isfinite(r.sharpe_ratio) for r in res)
     assert all(r.max_drawdown_pct <= 100.0001 for r in res)
+
+
+# ── Promotion gate ────────────────────────────────────────────────────────────
+
+
+def _make_run_result(strategy="S", symbol="BTC/USDT", sharpe=1.0, perm_pass=True,
+                     num_trades=15, win_rate=55.0, window_end=None) -> RunResult:
+    from datetime import date
+    return RunResult(
+        run_id="x",
+        strategy_name=strategy,
+        symbol=symbol,
+        window_type="EXPANDING",
+        window_start=date(2020, 1, 1),
+        window_end=window_end or date(2023, 1, 1),
+        window_years=3.0,
+        params={},
+        total_return_pct=10.0,
+        sharpe_ratio=sharpe,
+        max_drawdown_pct=2.0,
+        win_rate_pct=win_rate,
+        num_trades=num_trades,
+        conservative_pass=True,
+        standard_pass=True,
+        permissive_pass=perm_pass,
+        failure_reason=None,
+        mutation_generation=0,
+        parent_run_id=None,
+        bars_used=100,
+        regime_trend=0.5,
+        regime_volatility=3.0,
+        regime_direction="bull",
+    )
+
+
+def test_promotion_gate_all_conditions_met():
+    """All four gates satisfied → eligible."""
+    from datetime import date, timedelta
+    results = [
+        _make_run_result(sharpe=1.0, perm_pass=True, num_trades=15, win_rate=55.0,
+                         window_end=date(2022, 1, 1) + timedelta(days=i * 90))
+        for i in range(5)
+    ]
+    gate = check_promotion_gate(results)
+    assert gate["S|BTC/USDT"] is True
+
+
+def test_promotion_gate_fails_on_too_few_positive_sharpe():
+    """Only 2 of 5 windows positive Sharpe → gate fails (need 3)."""
+    from datetime import date, timedelta
+    results = [
+        _make_run_result(
+            sharpe=1.0 if i < 2 else -0.5,
+            perm_pass=True, num_trades=15, win_rate=55.0,
+            window_end=date(2022, 1, 1) + timedelta(days=i * 90),
+        )
+        for i in range(5)
+    ]
+    gate = check_promotion_gate(results)
+    assert gate["S|BTC/USDT"] is False
+
+
+def test_promotion_gate_fails_on_low_win_rate():
+    """Average win rate below 40% → gate fails."""
+    from datetime import date, timedelta
+    results = [
+        _make_run_result(
+            sharpe=1.0, perm_pass=True, num_trades=15, win_rate=30.0,
+            window_end=date(2022, 1, 1) + timedelta(days=i * 90),
+        )
+        for i in range(5)
+    ]
+    gate = check_promotion_gate(results)
+    assert gate["S|BTC/USDT"] is False
+
+
+def test_promotion_gate_fails_on_too_few_trades():
+    """Any window with < 10 trades blocks promotion."""
+    from datetime import date, timedelta
+    results = [
+        _make_run_result(
+            sharpe=1.0, perm_pass=True, num_trades=5 if i == 0 else 15, win_rate=55.0,
+            window_end=date(2022, 1, 1) + timedelta(days=i * 90),
+        )
+        for i in range(5)
+    ]
+    gate = check_promotion_gate(results)
+    assert gate["S|BTC/USDT"] is False
+
+
+def test_promotion_gate_uses_only_last_5_windows():
+    """Historical bad windows beyond the last 5 must not affect the gate."""
+    from datetime import date, timedelta
+    # 10 windows: first 5 are bad (low Sharpe), last 5 are all good.
+    results = [
+        _make_run_result(
+            sharpe=-1.0 if i < 5 else 1.5,
+            perm_pass=True, num_trades=15, win_rate=55.0,
+            window_end=date(2020, 1, 1) + timedelta(days=i * 90),
+        )
+        for i in range(10)
+    ]
+    gate = check_promotion_gate(results)
+    assert gate["S|BTC/USDT"] is True
+
+
+def test_promotion_gate_empty_results():
+    assert check_promotion_gate([]) == {}

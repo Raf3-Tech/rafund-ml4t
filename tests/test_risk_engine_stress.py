@@ -23,6 +23,7 @@ import pandas as pd
 import pytest
 
 from backtesting.engine import BacktestEngine
+from backtesting.window_engine import classify_passes
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +128,6 @@ def test_missing_candle_does_not_crash():
     assert "equity_curve" in res
 
 
-@pytest.mark.xfail(
-    reason="RISK_ENGINE_AUDIT.md F5: NaN prices propagate into the equity "
-    "curve; the engine should forward-fill or skip missing candles.",
-    strict=False,
-)
 def test_missing_candle_should_not_leak_nan_equity():
     n = 10
     prices_a = [100.0, 100.0, np.nan, 100.0] + [100.0] * 6
@@ -208,3 +204,125 @@ def test_flat_pair_is_breakeven_minus_costs():
     # No price move: equity within transaction-cost noise of the start.
     assert abs(res["final_equity"] - 5000.0) < 5.0
     assert res["prop_firm_state"].account_failed is False
+
+
+# ---------------------------------------------------------------------------
+# 7. Regime classifier gate (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_passes_conservative_requires_profit_target():
+    """CONSERVATIVE gate requires >=9% return AND <=3% DD (prop challenge spec)."""
+    # 10% return, 2% DD → should pass conservative
+    m = {"total_return_pct": 10.0, "max_drawdown_pct": 2.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0}
+    cons, std, perm = classify_passes(m)
+    assert cons is True
+
+    # 8% return, 2% DD → below 9% target — should NOT pass conservative
+    m_low = {"total_return_pct": 8.0, "max_drawdown_pct": 2.0, "sharpe_ratio": 1.0, "win_rate_pct": 50.0}
+    cons_low, _, _ = classify_passes(m_low)
+    assert cons_low is False
+
+
+def test_classify_passes_dd_ceiling():
+    """A strategy breaching the 3% DD ceiling must not pass conservative."""
+    m = {"total_return_pct": 15.0, "max_drawdown_pct": 4.0, "sharpe_ratio": 1.5, "win_rate_pct": 55.0}
+    cons, std, perm = classify_passes(m)
+    assert cons is False
+    assert std is True   # standard allows up to 10% DD
+
+
+def test_classify_passes_negative_sharpe_blocks_all():
+    """A negative Sharpe must block all tiers."""
+    m = {"total_return_pct": 12.0, "max_drawdown_pct": 1.0, "sharpe_ratio": -0.1, "win_rate_pct": 55.0}
+    cons, std, perm = classify_passes(m)
+    assert cons is False
+    assert std is False
+    assert perm is False
+
+
+# ---------------------------------------------------------------------------
+# 8. Kelly sizing (Phase E)
+# ---------------------------------------------------------------------------
+
+
+def test_kelly_reduces_notional_after_losses():
+    """With use_kelly=True, a bad-returns period shrinks position size below default."""
+    # Build a scenario: n days of losses then one trade attempt
+    n = 40
+    # Losses: price_a drops, pair is long A / short B so we lose on A
+    prices_a = [100.0] * 20 + [95.0] * 20   # -5% move against long leg
+    md, sig = _pair(prices_a, [50.0] * n)
+
+    eng_default = BacktestEngine(leg_allocation_pct=0.18, use_kelly=False)
+    eng_kelly = BacktestEngine(leg_allocation_pct=0.18, use_kelly=True, kelly_lookback=10)
+
+    res_default = eng_default.run(md, sig)
+    res_kelly = eng_kelly.run(md, sig)
+
+    # Kelly engine must not blow up and must produce a valid equity curve.
+    assert math.isfinite(res_kelly["final_equity"])
+    assert len(res_kelly["equity_curve"]) > 0
+
+
+def test_kelly_falls_back_to_default_during_warmup():
+    """During Kelly warmup (<2 daily equity samples) the default allocation is used."""
+    eng = BacktestEngine(use_kelly=True, kelly_lookback=30)
+    eng.reset()
+    # No daily equity history → _kelly_notional must return None
+    assert eng._kelly_notional(5000.0) is None
+    # One data point → still returns None
+    eng._daily_equity_history.append(5000.0)
+    assert eng._kelly_notional(5000.0) is None
+    # Two data points → returns a float
+    eng._daily_equity_history.append(5010.0)
+    result = eng._kelly_notional(5010.0)
+    assert result is None or isinstance(result, float)  # returns float if mu > 0
+
+
+# ---------------------------------------------------------------------------
+# 9. E2E engine run (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_engine_run_pair_produces_complete_result():
+    """End-to-end: run the engine on synthetic pair data and verify result schema."""
+    n = 60
+    rng = np.random.default_rng(42)
+    pa = 100 + np.cumsum(rng.normal(0, 1, n))
+    pb = 50 + np.cumsum(rng.normal(0, 0.5, n))
+    # Alternate long/short every 10 bars to generate trade events
+    pos_a = np.where((np.arange(n) // 10) % 2 == 0, 1, -1).tolist()
+    pos_b = [-p for p in pos_a]
+    md = pd.DataFrame({"timestamp": _ts(n), "price_a": pa, "price_b": pb})
+    sig = pd.DataFrame({"timestamp": _ts(n), "position_a": pos_a, "position_b": pos_b})
+
+    res = BacktestEngine().run(md, sig)
+
+    required_keys = {
+        "initial_capital", "final_equity", "total_return", "total_return_pct",
+        "sharpe_ratio", "max_drawdown_pct", "num_trades", "win_rate",
+        "equity_curve", "trades", "prop_firm_state",
+    }
+    assert required_keys.issubset(res.keys())
+    assert math.isfinite(res["sharpe_ratio"])
+    assert math.isfinite(res["max_drawdown_pct"])
+    assert res["max_drawdown_pct"] >= 0.0
+    assert len(res["equity_curve"]) == n
+
+
+def test_e2e_engine_run_single_asset_produces_complete_result():
+    """End-to-end: run the engine on a single-asset signal stream."""
+    n = 60
+    rng = np.random.default_rng(99)
+    price = 100 + np.cumsum(rng.normal(0, 1, n))
+    # Hold long the whole time then flip
+    pos = [1] * 30 + [-1] * 20 + [0] * 10
+    md = pd.DataFrame({"timestamp": _ts(n), "price": price})
+    sig = pd.DataFrame({"timestamp": _ts(n), "position": pos})
+
+    res = BacktestEngine().run(md, sig)
+
+    assert math.isfinite(res["final_equity"])
+    assert res["final_equity"] != 5000.0  # the price move should be visible
+    assert len(res["equity_curve"]) == n

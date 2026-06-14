@@ -7,7 +7,10 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
+
+from portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,63 @@ PERMISSIVE_MIN_CONSISTENCY = 0.50
 
 def _score(sharpe: float, win_rate: float, consistency: float) -> float:
     return sharpe * win_rate * consistency
+
+
+def _fetch_returns_history(db) -> pd.DataFrame:
+    """Return per-window total_return_pct pivoted by strategy|symbol key."""
+    try:
+        df = db.read_sql("""
+            SELECT strategy_name, symbol, params, window_end, total_return_pct
+            FROM engine_results
+            WHERE bars_used IS NOT NULL
+            ORDER BY window_end
+        """)
+    except Exception as e:
+        logger.warning("Could not fetch returns history for risk-parity: %s", e)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    df["params"] = df["params"].apply(
+        lambda p: json.dumps(p, sort_keys=True) if isinstance(p, dict) else (p or "{}")
+    )
+    df["key"] = df["strategy_name"] + "|" + df["symbol"] + "|" + df["params"]
+    pivot = df.pivot_table(
+        index="window_end", columns="key", values="total_return_pct", aggfunc="mean"
+    )
+    return pivot
+
+
+def _add_risk_parity_allocations(result: pd.DataFrame, returns_pivot: pd.DataFrame) -> pd.DataFrame:
+    """Append a risk_parity_alloc_pct column to the leaderboard DataFrame.
+
+    Uses PortfolioOptimizer.multi_strategy_allocate with the return time series
+    from engine_results for qualifying strategies.  Falls back to equal-weight
+    when there is insufficient history.
+    """
+    if result.empty:
+        return result
+
+    result["key"] = (
+        result["strategy_name"] + "|" + result["symbol"] + "|"
+        + result["params"].apply(lambda p: json.dumps(p, sort_keys=True) if isinstance(p, dict) else str(p))
+    )
+    strategy_keys = result["key"].tolist()
+
+    optimizer = PortfolioOptimizer(initial_capital=1.0, max_position_size=1.0)
+    allocations = optimizer.multi_strategy_allocate(
+        strategy_names=strategy_keys,
+        returns_history=returns_pivot,
+        capital=1.0,
+        method="risk_parity" if not returns_pivot.empty else "equal_weight",
+    )
+
+    result["risk_parity_alloc_pct"] = result["key"].map(
+        lambda k: round(allocations.get(k, 0.0) * 100, 1)
+    )
+    result = result.drop(columns=["key"])
+    return result
 
 
 def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
@@ -160,6 +220,10 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
 
     result = result.reset_index(drop=True)
     result.index += 1
+
+    returns_pivot = _fetch_returns_history(db)
+    result = _add_risk_parity_allocations(result, returns_pivot)
+
     return result
 
 
@@ -182,11 +246,12 @@ def print_leaderboard(lb: pd.DataFrame, tier: Optional[str] = None) -> None:
 
     for rank, row in lb.iterrows():
         params_str = ", ".join(f"{k}={v}" for k, v in row["params"].items()) if row["params"] else ""
+        alloc = row.get("risk_parity_alloc_pct", 0.0)
         print(
             f"{rank:>4} | {row['strategy_name']:25} | {row['symbol']:10} | "
             f"{row['avg_sharpe']:7.2f} | {row['avg_max_dd_pct']:6.1f} | "
             f"{row['avg_win_rate_pct']:7.1f} | {row['n_windows']:7} | "
-            f"{row['best_tier']:13} | {row['regime']}"
+            f"{row['best_tier']:13} | {alloc:5.1f}% | {row['regime']}"
         )
         if params_str:
             print(f"{'':4}   params: {params_str}")
