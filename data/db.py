@@ -57,7 +57,7 @@ CORE_TABLES = (
 
 class DatabaseConnection:
     """PostgreSQL database connection manager."""
-    
+
     def __init__(
         self,
         host: str = None,
@@ -69,19 +69,6 @@ class DatabaseConnection:
         min_conn: int = 1,
         max_conn: int = 10
     ):
-        """
-        Initialize database connection with connection pooling.
-        
-        Args:
-            host: PostgreSQL host
-            port: PostgreSQL port
-            database: Database name
-            user: Database user
-            password: Database password
-            database_url: Optional PostgreSQL DSN URL
-            min_conn: Minimum connections in pool
-            max_conn: Maximum connections in pool
-        """
         self.database_url = database_url or os.getenv('DATABASE_URL')
         self.host = host or os.getenv('DB_HOST', 'localhost')
         self.port = int(port or os.getenv('DB_PORT', 5432))
@@ -96,7 +83,7 @@ class DatabaseConnection:
         self.pool = None
         self._engine = None  # lazily-built SQLAlchemy engine for pandas reads
         self._initialize_pool()
-    
+
     def _initialize_pool(self):
         """Initialize connection pool."""
         try:
@@ -125,7 +112,7 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"Failed to initialize connection pool: {str(e)}")
             raise
-    
+
     @property
     def engine(self):
         """Lazily-built SQLAlchemy engine used for pandas read queries.
@@ -178,7 +165,7 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"Error getting connection from pool: {str(e)}")
             raise
-    
+
     def return_connection(self, conn):
         """Return connection to the pool."""
         if conn is None:
@@ -187,42 +174,45 @@ class DatabaseConnection:
             self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"Error returning connection: {str(e)}")
-    
+
     def test_connection(self) -> bool:
         """Test database connection."""
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT 1")
-            cursor.close()
-            self.return_connection(conn)
             logger.info("Database connection test passed")
             return True
         except Exception as e:
             logger.error(f"Database connection test failed: {str(e)}")
             return False
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def insert_prices(self, df: pd.DataFrame) -> int:
         """
         Insert OHLCV data into prices table.
-        
+
         Args:
             df: DataFrame with columns: timestamp, open, high, low, close, volume, symbol
-            
+
         Returns:
             Number of rows inserted
         """
         if df.empty:
             logger.warning("Empty DataFrame provided to insert_prices")
             return 0
-        
+
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            
-            # Prepare data for insertion
+
             data = []
             for _, row in df.iterrows():
                 data.append((
@@ -234,35 +224,30 @@ class DatabaseConnection:
                     float(row['close']),
                     float(row['volume'])
                 ))
-            
-            # Insert data
+
             query = """
                 INSERT INTO prices (symbol, timestamp, open, high, low, close, volume)
                 VALUES %s
                 ON CONFLICT (symbol, timestamp) DO NOTHING
             """
-            
+
             execute_values(cursor, query, data)
             conn.commit()
-            
+
             inserted = cursor.rowcount
             logger.info(f"Inserted {inserted} price records into database")
-            
-            cursor.close()
-            self.return_connection(conn)
-            
             return inserted
-            
+
         except Exception as e:
             logger.error(f"Error inserting prices: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def get_prices(
         self,
         symbol: str,
@@ -271,12 +256,12 @@ class DatabaseConnection:
     ) -> pd.DataFrame:
         """
         Retrieve price data from database.
-        
+
         Args:
             symbol: Trading symbol
             start_date: Start date (optional)
             end_date: End date (optional)
-            
+
         Returns:
             DataFrame with price data
         """
@@ -298,46 +283,44 @@ class DatabaseConnection:
 
             logger.info(f"Retrieved {len(df)} price records for {symbol}")
             return df
-            
+
         except Exception as e:
             logger.error(f"Error retrieving prices: {str(e)}")
             return pd.DataFrame()
-    
+
     def get_latest_timestamp(self, symbol: str) -> Optional[datetime]:
         """
         Get the latest timestamp for a symbol.
-        
+
         Args:
             symbol: Trading symbol
-            
+
         Returns:
             Latest timestamp or None if no data
         """
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            
             cursor.execute(
                 "SELECT MAX(timestamp) FROM prices WHERE symbol = %s",
                 (symbol,)
             )
-            
             result = cursor.fetchone()
-            cursor.close()
-            self.return_connection(conn)
-            
             return result[0] if result[0] else None
-            
         except Exception as e:
             logger.error(f"Error getting latest timestamp: {str(e)}")
-            self.return_connection(conn)
             return None
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def get_symbols_with_data(self) -> List[str]:
         """
         Get all symbols that have data in the database.
-        
+
         Returns:
             List of symbols
         """
@@ -356,7 +339,7 @@ class DatabaseConnection:
     def get_feature_pairs(self) -> List[tuple]:
         """
         Get all unique stationary feature pairs from the features table.
-        
+
         Returns:
             List of (symbol_a, symbol_b) tuples
         """
@@ -369,27 +352,28 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"Error getting feature pairs: {str(e)}")
             return []
-    
+
     def insert_features(self, df: pd.DataFrame) -> int:
         """
         Insert calculated features into features table.
-        
+
         Args:
-            df: DataFrame with columns: symbol_a, symbol_b, timestamp, spread, 
+            df: DataFrame with columns: symbol_a, symbol_b, timestamp, spread,
                 spread_mean, spread_std, z_score, hedge_ratio
-                
+
         Returns:
             Number of rows inserted
         """
         if df.empty:
             logger.warning("Empty DataFrame provided to insert_features")
             return 0
-        
+
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            
+
             data = []
             for _, row in df.iterrows():
                 data.append((
@@ -402,14 +386,14 @@ class DatabaseConnection:
                     float(row.get('z_score')),
                     float(row.get('hedge_ratio'))
                 ))
-            
+
             query = """
-                INSERT INTO features (symbol_a, symbol_b, timestamp, spread, 
+                INSERT INTO features (symbol_a, symbol_b, timestamp, spread,
                                      spread_mean, spread_std, z_score, hedge_ratio)
                 VALUES %s
                 ON CONFLICT (symbol_a, symbol_b, timestamp) DO NOTHING
             """
-            
+
             execute_values(cursor, query, data, page_size=max(len(data), 1))
             conn.commit()
 
@@ -418,42 +402,39 @@ class DatabaseConnection:
             # the count is accurate rather than just the last page.
             inserted = cursor.rowcount
             logger.info(f"Inserted {inserted} feature records into database")
-            
-            cursor.close()
-            self.return_connection(conn)
-            
             return inserted
-            
+
         except Exception as e:
             logger.error(f"Error inserting features: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def insert_signals(self, df: pd.DataFrame) -> int:
         """
         Insert trading signals into signals table.
-        
+
         Args:
-            df: DataFrame with columns: symbol_a, symbol_b, timestamp, signal, 
+            df: DataFrame with columns: symbol_a, symbol_b, timestamp, signal,
                 z_score, position_a, position_b
-                
+
         Returns:
             Number of rows inserted
         """
         if df.empty:
             logger.warning("Empty DataFrame provided to insert_signals")
             return 0
-        
+
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            
+
             def _to_signal_int(v) -> int:
                 # int() truncates toward zero: int(-0.85) = 0, losing the B-leg
                 # direction entirely when hedge_ratio < 1. round() then int() gives
@@ -474,100 +455,94 @@ class DatabaseConnection:
                     _to_signal_int(row.get('position_a', 0)),
                     _to_signal_int(row.get('position_b', 0))
                 ))
-            
+
             query = """
-                INSERT INTO signals (symbol_a, symbol_b, timestamp, signal, 
+                INSERT INTO signals (symbol_a, symbol_b, timestamp, signal,
                                     z_score, position_a, position_b)
                 VALUES %s
             """
-            
+
             execute_values(cursor, query, data)
             conn.commit()
-            
+
             inserted = len(data)
             logger.info(f"Inserted {inserted} signal records into database")
-            
-            cursor.close()
-            self.return_connection(conn)
-            
             return inserted
-            
+
         except Exception as e:
             logger.error(f"Error inserting signals: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def get_data_stats(self) -> Dict:
         """
         Get statistics about data in the database.
-        
+
         Returns:
             Dictionary with counts and date ranges
         """
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
-            
-            stats = {}
             cursor = conn.cursor()
-            
-            # Count records
+
+            stats = {}
+
             cursor.execute("SELECT COUNT(*) FROM prices")
             stats['total_price_records'] = cursor.fetchone()[0]
-            
-            # Get date range
+
             cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM prices")
             min_date, max_date = cursor.fetchone()
             stats['min_date'] = min_date
             stats['max_date'] = max_date
-            
-            # Count symbols
+
             cursor.execute("SELECT COUNT(DISTINCT symbol) FROM prices")
             stats['num_symbols'] = cursor.fetchone()[0]
-            
-            cursor.close()
-            self.return_connection(conn)
-            
+
             logger.info(f"Database stats: {stats['total_price_records']} records, "
                        f"{stats['num_symbols']} symbols")
-            
             return stats
-            
+
         except Exception as e:
             logger.error(f"Error getting data stats: {str(e)}")
-            self.return_connection(conn)
             return {}
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def insert_backtest_results(self, results: Dict) -> bool:
         """
         Insert backtest results into backtest_results table.
-        
+
         Args:
             results: Dictionary with backtest results including:
                     backtest_id, start_date, end_date, initial_capital,
                     final_value, total_return, sharpe_ratio, max_drawdown,
                     num_trades, win_rate
-                    
+
         Returns:
             True if successful, False otherwise
         """
         if not results:
             logger.warning("Empty results provided to insert_backtest_results")
             return False
-        
+
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            
+
             query = """
-                INSERT INTO backtest_results 
-                (backtest_id, start_date, end_date, initial_capital, final_value, 
+                INSERT INTO backtest_results
+                (backtest_id, start_date, end_date, initial_capital, final_value,
                  total_return, sharpe_ratio, max_drawdown, num_trades, win_rate, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (backtest_id) DO UPDATE SET
@@ -578,7 +553,7 @@ class DatabaseConnection:
                     num_trades = EXCLUDED.num_trades,
                     win_rate = EXCLUDED.win_rate
             """
-            
+
             cursor.execute(query, (
                 results.get('backtest_id'),
                 results.get('start_date'),
@@ -591,44 +566,42 @@ class DatabaseConnection:
                 int(results.get('num_trades', 0)),
                 float(results.get('win_rate', 0))
             ))
-            
+
             conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-            
             logger.info(f"Saved backtest results for {results.get('backtest_id')}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error inserting backtest results: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return False
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def insert_trades(self, df: pd.DataFrame) -> int:
         """
         Insert trade records into trades table.
-        
+
         Args:
             df: DataFrame with columns: symbol, trade_date, entry_price, exit_price,
                 quantity, direction, pnl, return_pct, status
-                
+
         Returns:
             Number of rows inserted
         """
         if df.empty:
             logger.warning("Empty DataFrame provided to insert_trades")
             return 0
-        
+
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            
+
             data = []
             for _, row in df.iterrows():
                 data.append((
@@ -642,34 +615,30 @@ class DatabaseConnection:
                     float(row.get('return_pct')) if pd.notna(row.get('return_pct')) else None,
                     row.get('status', 'OPEN')
                 ))
-            
+
             query = """
-                INSERT INTO trades (symbol, trade_date, entry_price, exit_price, 
+                INSERT INTO trades (symbol, trade_date, entry_price, exit_price,
                                    quantity, direction, pnl, return_pct, status)
                 VALUES %s
             """
-            
+
             execute_values(cursor, query, data)
             conn.commit()
-            
+
             inserted = cursor.rowcount
             logger.info(f"Inserted {inserted} trade records into database")
-            
-            cursor.close()
-            self.return_connection(conn)
-            
             return inserted
-            
+
         except Exception as e:
             logger.error(f"Error inserting trades: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
-    
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
+
     def insert_portfolio(self, df: pd.DataFrame) -> int:
         """
         Insert portfolio snapshots into portfolio table.
@@ -680,6 +649,7 @@ class DatabaseConnection:
         if df.empty:
             return 0
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -707,19 +677,17 @@ class DatabaseConnection:
             execute_values(cursor, query, data)
             conn.commit()
             inserted = cursor.rowcount
-            cursor.close()
-            self.return_connection(conn)
             logger.info(f"Upserted {inserted} portfolio snapshots")
             return inserted
         except Exception as e:
             logger.error(f"Error inserting portfolio: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def delete_signals_for_pair(self, symbol_a: str, symbol_b: str) -> int:
         """Remove signals for a pair before re-inserting."""
@@ -813,6 +781,7 @@ class DatabaseConnection:
         """Row counts for all core tables."""
         counts = {}
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -821,12 +790,14 @@ class DatabaseConnection:
                     sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
                 )
                 counts[table] = cursor.fetchone()[0]
-            cursor.close()
-            self.return_connection(conn)
             return counts
         except Exception as e:
             logger.error(f"Error getting table counts: {str(e)}")
             return counts
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def get_active_production_model(self, model_name: str, symbol: str) -> Optional[Dict[str, Any]]:
         try:
@@ -889,6 +860,7 @@ class DatabaseConnection:
         is_active: bool,
     ) -> bool:
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -915,18 +887,16 @@ class DatabaseConnection:
                 ),
             )
             conn.commit()
-            cursor.close()
-            self.return_connection(conn)
             return True
         except Exception as e:
             logger.error(f"Error saving model registry entry: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return False
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def get_recent_drift_report(self, model_name: str, symbol: str, since: datetime) -> Optional[Dict[str, Any]]:
         try:
@@ -945,6 +915,7 @@ class DatabaseConnection:
 
     def insert_drift_report(self, report: Dict[str, Any]) -> bool:
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -966,21 +937,20 @@ class DatabaseConnection:
                 ),
             )
             conn.commit()
-            cursor.close()
-            self.return_connection(conn)
             return True
         except Exception as e:
             logger.error(f"Error inserting drift report: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return False
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def block_model(self, model_name: str, symbol: str, reason: str) -> bool:
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -989,21 +959,20 @@ class DatabaseConnection:
                 (model_name, symbol, reason),
             )
             conn.commit()
-            cursor.close()
-            self.return_connection(conn)
             return True
         except Exception as e:
             logger.error(f"Error blocking model: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return False
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def unblock_model(self, model_name: str, symbol: str) -> bool:
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -1012,18 +981,16 @@ class DatabaseConnection:
                 (model_name, symbol),
             )
             conn.commit()
-            cursor.close()
-            self.return_connection(conn)
             return True
         except Exception as e:
             logger.error(f"Error unblocking model: {str(e)}")
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return False
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def get_block_status(self, model_name: str, symbol: str) -> Optional[Dict[str, Any]]:
         try:
@@ -1048,6 +1015,7 @@ class DatabaseConnection:
         if not rows:
             return 0
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -1092,19 +1060,17 @@ class DatabaseConnection:
             execute_values(cursor, query, data)
             conn.commit()
             inserted = cursor.rowcount
-            cursor.close()
-            self.return_connection(conn)
             logger.info("Inserted %d engine_results rows", inserted)
             return inserted
         except Exception as e:
             logger.error("Error inserting engine_results: %s", e)
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def insert_funding_rates(self, df: pd.DataFrame) -> int:
         """Insert funding rate rows into funding_rates table.
@@ -1114,6 +1080,7 @@ class DatabaseConnection:
         if df.empty:
             return 0
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -1134,23 +1101,22 @@ class DatabaseConnection:
             execute_values(cursor, query, data)
             conn.commit()
             inserted = cursor.rowcount
-            cursor.close()
-            self.return_connection(conn)
             logger.info("Inserted %d funding_rate rows", inserted)
             return inserted
         except Exception as e:
             logger.error("Error inserting funding_rates: %s", e)
-            try:
+            if conn:
                 conn.rollback()
-                cursor.close()
-                self.return_connection(conn)
-            except Exception:
-                pass
             return 0
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def get_latest_funding_time_ms(self, symbol: str) -> Optional[int]:
         """Return the latest stored funding_time as Unix milliseconds, or None."""
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -1159,8 +1125,6 @@ class DatabaseConnection:
                 (symbol,),
             )
             result = cursor.fetchone()
-            cursor.close()
-            self.return_connection(conn)
             if result and result[0] is not None:
                 ts = result[0]
                 if hasattr(ts, "timestamp"):
@@ -1168,9 +1132,11 @@ class DatabaseConnection:
             return None
         except Exception as e:
             logger.error("Error getting latest funding time for %s: %s", symbol, e)
-            if conn is not None:
-                self.return_connection(conn)
             return None
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def get_funding_rates(self, symbol: str) -> pd.DataFrame:
         """Return funding-rate history for one symbol, ascending by time.
@@ -1202,6 +1168,7 @@ class DatabaseConnection:
     def insert_research_decision(self, decision: Dict[str, Any]) -> bool:
         """Insert one research decision row into research_decisions."""
         conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -1231,18 +1198,16 @@ class DatabaseConnection:
                 ),
             )
             conn.commit()
-            cursor.close()
-            self.return_connection(conn)
             return True
         except Exception as e:
             logger.error("Error inserting research_decision: %s", e)
-            try:
-                if conn:
-                    conn.rollback()
-                    self.return_connection(conn)
-            except Exception:
-                pass
+            if conn:
+                conn.rollback()
             return False
+        finally:
+            if cursor:
+                cursor.close()
+            self.return_connection(conn)
 
     def get_research_decisions(self, last: int = 50) -> List[Dict[str, Any]]:
         """Return the most recent research decisions, newest first."""
