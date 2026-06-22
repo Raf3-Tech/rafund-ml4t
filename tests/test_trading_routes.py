@@ -27,7 +27,7 @@ def client():
     return app.test_client()
 
 
-def test_trading_status_returns_both_exchanges(client):
+def test_trading_status_returns_all_exchanges(client):
     with patch(
         "monitoring.routes.trading_routes.load_position",
         side_effect=lambda db, run_id, **kw: _flat_pos(run_id, kw.get("exchange")),
@@ -40,9 +40,10 @@ def test_trading_status_returns_both_exchanges(client):
         resp = client.get("/api/trading-status?mode=paper")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert set(data.keys()) == {"binance", "kraken"}
+        assert set(data.keys()) == {"binance", "kraken", "htx"}
         assert data["binance"]["position"]["run_id"] == "paper_binance"
         assert data["kraken"]["position"]["run_id"] == "paper_kraken"
+        assert data["htx"]["position"]["run_id"] == "paper_htx"
         assert data["binance"]["recent_orders"] == []
 
 

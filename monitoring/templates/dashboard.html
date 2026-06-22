@@ -432,6 +432,10 @@
       <div class="card-title">Kraken</div>
       <div id="trading-kraken"></div>
     </div>
+    <div class="card">
+      <div class="card-title">HTX</div>
+      <div id="trading-htx"></div>
+    </div>
   </div>
 
   <div class="card" style="margin-top:16px">
@@ -440,6 +444,7 @@
       <select id="chart-exchange" onchange="loadTradingChart()">
         <option value="binance">Binance</option>
         <option value="kraken">Kraken</option>
+        <option value="htx">HTX</option>
       </select>
     </div>
     <div id="trading-chart" style="height:420px;margin-top:10px"></div>
@@ -1016,6 +1021,7 @@ async function loadTradingStatus() {
     const data = await r.json();
     document.getElementById('trading-binance').innerHTML = renderExchangeCard('binance', data.binance);
     document.getElementById('trading-kraken').innerHTML = renderExchangeCard('kraken', data.kraken);
+    document.getElementById('trading-htx').innerHTML = renderExchangeCard('htx', data.htx);
     loadTradingChart();
     loadJournalSummary();
   } catch (e) { showToast('Could not load trading status', 'error'); }

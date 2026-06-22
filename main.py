@@ -6,7 +6,8 @@ dispatches to the appropriate command function.
 Usage:
     python main.py collect                          # Collect OHLCV from Binance (incremental)
     python main.py collect --exchange kraken        # Collect from Kraken instead
-    python main.py collect --exchange all           # Collect from both exchanges
+    python main.py collect --exchange htx           # Collect from HTX instead
+    python main.py collect --exchange all           # Collect from all exchanges
     python main.py collect --funding                # Also collect 8h funding rates (Binance)
     python main.py features             # Calculate spread features
     python main.py signals              # Generate signals
@@ -81,7 +82,7 @@ def main() -> int:
     parser.add_argument("--funding", action="store_true")
     parser.add_argument(
         "--exchange",
-        choices=["binance", "kraken", "all"],
+        choices=["binance", "kraken", "htx", "all"],
         default=None,
         help="Exchange to use. collect: default binance. paper: default all "
              "(runs every exchange in one cycle). live: default $LIVE_EXCHANGE or binance.",
@@ -103,7 +104,12 @@ def main() -> int:
         success: bool
 
         if args.mode == "collect":
-            from cli.collect import collect_data, collect_kraken_data, run_collect_funding_cmd
+            from cli.collect import (
+                collect_data,
+                collect_htx_data,
+                collect_kraken_data,
+                run_collect_funding_cmd,
+            )
             exchange = args.exchange or "binance"
             if exchange in ("binance", "all"):
                 success = collect_data()
@@ -111,6 +117,8 @@ def main() -> int:
                 success = True
             if success and exchange in ("kraken", "all"):
                 success = collect_kraken_data()
+            if success and exchange in ("htx", "all"):
+                success = collect_htx_data()
             if success and args.funding:
                 success = run_collect_funding_cmd()
 
@@ -200,7 +208,7 @@ def main() -> int:
         elif args.mode == "live":
             from cli.backtest import run_live_trading
             if args.exchange == "all":
-                logger.error("live mode requires a single exchange — use --exchange binance or kraken")
+                logger.error("live mode requires a single exchange — use --exchange binance, kraken, or htx")
                 success = False
             else:
                 success = run_live_trading(exchange=args.exchange)

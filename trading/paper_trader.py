@@ -22,7 +22,7 @@ from trading.position import PositionState, load_position, log_order, save_posit
 logger = get_logger(__name__)
 
 _COMMISSION_PCT = 0.001
-SUPPORTED_EXCHANGES = ("binance", "kraken")
+SUPPORTED_EXCHANGES = ("binance", "kraken", "htx")
 
 
 def _run_id(exchange: str) -> str:

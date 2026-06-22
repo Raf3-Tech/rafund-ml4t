@@ -2,7 +2,8 @@
 
 Safety gates (all must pass before any order is placed):
   1. LIVE_TRADING_ENABLED=1  — explicit opt-in required
-  2. BINANCE_API_KEY / BINANCE_API_SECRET set and non-empty
+  2. <EXCHANGE>_API_KEY / <EXCHANGE>_API_SECRET set and non-empty
+     (BINANCE_*, KRAKEN_*, or HTX_*, matching the selected exchange)
   3. account_failed == False
   4. daily_halt == False  (for opens; force-close still runs on breach)
   5. Notional capped at LIVE_MAX_NOTIONAL_USDT (default 200)
@@ -52,12 +53,9 @@ def _max_notional() -> float:
 
 
 def _check_api_keys(exchange_name: str) -> bool:
-    if exchange_name == "kraken":
-        key = os.environ.get("KRAKEN_API_KEY", "")
-        secret = os.environ.get("KRAKEN_API_SECRET", "")
-    else:
-        key = os.environ.get("BINANCE_API_KEY", "")
-        secret = os.environ.get("BINANCE_API_SECRET", "")
+    prefix = exchange_name.upper()
+    key = os.environ.get(f"{prefix}_API_KEY", "")
+    secret = os.environ.get(f"{prefix}_API_SECRET", "")
     if not key or not secret:
         logger.error("live_trader: API keys not set for %s — cannot trade", exchange_name)
         return False
@@ -69,18 +67,18 @@ def _check_api_keys(exchange_name: str) -> bool:
 
 def _build_exchange(exchange_name: str):
     import ccxt
-    if exchange_name == "kraken":
-        return ccxt.kraken({
-            "apiKey": os.environ.get("KRAKEN_API_KEY", ""),
-            "secret": os.environ.get("KRAKEN_API_SECRET", ""),
-            "enableRateLimit": True,
-        })
-    return ccxt.binance({
-        "apiKey": os.environ.get("BINANCE_API_KEY", ""),
-        "secret": os.environ.get("BINANCE_API_SECRET", ""),
+    prefix = exchange_name.upper()
+    creds = {
+        "apiKey": os.environ.get(f"{prefix}_API_KEY", ""),
+        "secret": os.environ.get(f"{prefix}_API_SECRET", ""),
         "enableRateLimit": True,
-        "options": {"defaultType": "spot"},
-    })
+    }
+    if exchange_name == "kraken":
+        return ccxt.kraken(creds)
+    if exchange_name == "htx":
+        return ccxt.htx(creds)
+    creds["options"] = {"defaultType": "spot"}
+    return ccxt.binance(creds)
 
 
 _LIMIT_FILL_TIMEOUT_S = float(os.environ.get("LIVE_LIMIT_FILL_TIMEOUT_S", "30"))

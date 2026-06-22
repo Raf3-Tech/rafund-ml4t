@@ -193,6 +193,26 @@ class Settings:
                 )
             )
 
+        htx_csv = _env("HTX_SYMBOLS", "")
+        if htx_csv:
+            self.htx_symbols = [s.strip() for s in htx_csv.split(",") if s.strip()]
+        else:
+            self.htx_symbols = list(
+                collect.get(
+                    "htx_symbols",
+                    [
+                        "BTC/USDT",
+                        "ETH/USDT",
+                        "SOL/USDT",
+                        "BNB/USDT",
+                        "ADA/USDT",
+                        "DOT/USDT",
+                        "LINK/USDT",
+                        "XRP/USDT",
+                    ],
+                )
+            )
+
         self.collect_start_date = _env(
             "COLLECT_START_DATE", collect.get("start_date", "2017-08-17")
         )

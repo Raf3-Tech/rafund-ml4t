@@ -176,6 +176,76 @@ def collect_kraken_data(full_history: bool = True) -> bool:
         return False
 
 
+def collect_htx_data(full_history: bool = True) -> bool:
+    """Collect OHLCV from HTX into the prices table (incremental by default)."""
+    logger.info("=" * 80)
+    logger.info("STARTING HTX DATA COLLECTION")
+    logger.info("=" * 80)
+    try:
+        from cli.db import get_db_connection
+        from config.loader import get_settings
+        from data.collectors.htx_collector import HTXCollector
+
+        settings = get_settings()
+        collector = HTXCollector(rate_limit_ms=int(os.getenv("RATE_LIMIT_MS", 500)))
+        db = get_db_connection()
+
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            return False
+
+        symbols = settings.htx_symbols
+        if not symbols:
+            logger.error("No HTX symbols configured (HTX_SYMBOLS or collect.htx_symbols)")
+            db.close_pool()
+            return False
+
+        end_date = datetime.now(timezone.utc)
+        default_start = datetime.strptime(settings.collect_start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        total_inserted = 0
+
+        for symbol in symbols:
+            try:
+                latest = db.get_latest_timestamp(symbol, exchange="htx")
+                if full_history or latest is None:
+                    start_date = default_start
+                    logger.info(f"[{symbol}] Full history from {start_date.date()}")
+                else:
+                    start_date = latest + timedelta(days=1)
+                    if start_date.date() >= end_date.date():
+                        logger.info(f"[{symbol}] Already up to date (latest {latest.date()})")
+                        continue
+                    logger.info(f"[{symbol}] Incremental from {start_date.date()}")
+
+                result = collector.collect_symbol(
+                    symbol=symbol,
+                    timeframe=settings.timeframe,
+                    from_date=start_date,
+                    to_date=end_date,
+                )
+                if not collector.last_collection_df.empty:
+                    inserted = db.insert_prices(collector.last_collection_df, exchange="htx")
+                    total_inserted += inserted
+                    logger.info(f"[OK] {symbol}: {inserted} new rows (fetched {result.records_fetched})")
+                else:
+                    logger.warning(f"[SKIP] {symbol}: No valid data to insert")
+
+                if result.errors:
+                    for err in result.errors:
+                        logger.warning(err)
+            except Exception as e:
+                logger.error(f"[ERROR] {symbol}: {str(e)}", exc_info=True)
+
+        stats = db.get_data_stats()
+        logger.info(f"Total records: {stats.get('total_price_records', 0)}")
+        logger.info(f"HTX rows inserted this run: {total_inserted}")
+        db.close_pool()
+        return True
+    except Exception as e:
+        logger.error(f"HTX data collection error: {str(e)}", exc_info=True)
+        return False
+
+
 def run_backfill(
     symbol: Optional[str],
     timeframe: Optional[str],
