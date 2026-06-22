@@ -21,6 +21,7 @@ EXPECTED_NAMES = {
     "HODL with Rebalance",
     "Statistical Arbitrage",
     "Funding Rate Arbitrage",
+    "SMC Breakout",
 }
 
 

@@ -13,15 +13,15 @@ Usage:
     python main.py backtest             # Run evaluation backtest
     python main.py engine               # Walk-forward engine: all strategies × symbols
     python main.py engine --strategy "EMA Crossover" --symbol BTC/USDT
-    python main.py leaderboard          # Print strategy leaderboard
-    python main.py leaderboard --tier conservative
+    python main.py leaderboard          # Print all strategies x symbols, qualifying or not, with reasons
+    python main.py leaderboard --tier qualifying   # Only show ones that pass
     python main.py train-classifier     # Train regime ML classifier
     python main.py validate             # Walk-forward OOS validation
     python main.py retrain              # Retrain + validate models
     python main.py drift                # Feature-drift check for production models
     python main.py research             # Closed-loop research pipeline
     python main.py research --dry-run   # Gate only, skip engine run
-    python main.py research --top-n 5 --tier conservative
+    python main.py research --top-n 5
     python main.py pipeline             # Collect → backtest → persist
     python main.py bootstrap            # Alias for pipeline
     python main.py paper                # Paper trading
@@ -82,8 +82,9 @@ def main() -> int:
     parser.add_argument(
         "--exchange",
         choices=["binance", "kraken", "all"],
-        default="binance",
-        help="Exchange to collect from (default: binance)",
+        default=None,
+        help="Exchange to use. collect: default binance. paper: default all "
+             "(runs every exchange in one cycle). live: default $LIVE_EXCHANGE or binance.",
     )
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--top-n", type=int, default=5, dest="top_n")
@@ -103,7 +104,7 @@ def main() -> int:
 
         if args.mode == "collect":
             from cli.collect import collect_data, collect_kraken_data, run_collect_funding_cmd
-            exchange = args.exchange
+            exchange = args.exchange or "binance"
             if exchange in ("binance", "all"):
                 success = collect_data()
             else:
@@ -183,7 +184,7 @@ def main() -> int:
                 strategy_filter=args.strategy,
                 symbol_filter=args.symbol,
                 top_n=args.top_n,
-                tier_filter=args.tier,
+                qualifying_only=bool(args.tier),
                 dry_run=args.dry_run,
             )
 
@@ -193,11 +194,16 @@ def main() -> int:
 
         elif args.mode == "paper":
             from cli.backtest import run_paper_trading
-            success = run_paper_trading()
+            exchange = None if args.exchange in (None, "all") else args.exchange
+            success = run_paper_trading(exchange=exchange)
 
         elif args.mode == "live":
             from cli.backtest import run_live_trading
-            success = run_live_trading()
+            if args.exchange == "all":
+                logger.error("live mode requires a single exchange — use --exchange binance or kraken")
+                success = False
+            else:
+                success = run_live_trading(exchange=args.exchange)
 
         else:
             logger.error("Unknown mode: %s", args.mode)

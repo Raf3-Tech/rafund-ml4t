@@ -12,6 +12,7 @@ class PositionState:
     run_id: str
     strategy_name: str
     symbol: str
+    exchange: str = "binance"
     side: str = "FLAT"           # FLAT | LONG | SHORT
     qty: float = 0.0
     entry_price: Optional[float] = None
@@ -53,6 +54,7 @@ def load_position(
     initial_capital: float = 5000.0,
     strategy_name: str = "",
     symbol: str = "",
+    exchange: str = "binance",
 ) -> PositionState:
     """Load from DB; returns a fresh state if the run_id has no record yet."""
     conn = db.get_connection()
@@ -60,7 +62,7 @@ def load_position(
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT run_id, strategy_name, symbol, side, qty, entry_price, entry_time,
+            SELECT run_id, strategy_name, symbol, exchange, side, qty, entry_price, entry_time,
                    equity, peak_equity, daily_start_equity, daily_halt, account_failed,
                    last_update
             FROM paper_positions
@@ -75,14 +77,14 @@ def load_position(
 
     if row:
         return PositionState(
-            run_id=row[0], strategy_name=row[1], symbol=row[2], side=row[3],
-            qty=float(row[4]), entry_price=float(row[5]) if row[5] is not None else None,
-            entry_time=row[6], equity=float(row[7]), peak_equity=float(row[8]),
-            daily_start_equity=float(row[9]), daily_halt=bool(row[10]),
-            account_failed=bool(row[11]), last_update=row[12],
+            run_id=row[0], strategy_name=row[1], symbol=row[2], exchange=row[3], side=row[4],
+            qty=float(row[5]), entry_price=float(row[6]) if row[6] is not None else None,
+            entry_time=row[7], equity=float(row[8]), peak_equity=float(row[9]),
+            daily_start_equity=float(row[10]), daily_halt=bool(row[11]),
+            account_failed=bool(row[12]), last_update=row[13],
         )
     return PositionState(
-        run_id=run_id, strategy_name=strategy_name, symbol=symbol,
+        run_id=run_id, strategy_name=strategy_name, symbol=symbol, exchange=exchange,
         equity=initial_capital, peak_equity=initial_capital,
         daily_start_equity=initial_capital,
     )
@@ -96,13 +98,14 @@ def save_position(db, pos: PositionState) -> None:
         cur.execute(
             """
             INSERT INTO paper_positions
-                (run_id, strategy_name, symbol, side, qty, entry_price, entry_time,
+                (run_id, strategy_name, symbol, exchange, side, qty, entry_price, entry_time,
                  equity, peak_equity, daily_start_equity, daily_halt, account_failed,
                  last_update)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
             ON CONFLICT (run_id) DO UPDATE SET
                 strategy_name      = EXCLUDED.strategy_name,
                 symbol             = EXCLUDED.symbol,
+                exchange           = EXCLUDED.exchange,
                 side               = EXCLUDED.side,
                 qty                = EXCLUDED.qty,
                 entry_price        = EXCLUDED.entry_price,
@@ -115,7 +118,7 @@ def save_position(db, pos: PositionState) -> None:
                 last_update        = NOW()
             """,
             (
-                pos.run_id, pos.strategy_name, pos.symbol, pos.side, pos.qty,
+                pos.run_id, pos.strategy_name, pos.symbol, pos.exchange, pos.side, pos.qty,
                 pos.entry_price, pos.entry_time, pos.equity, pos.peak_equity,
                 pos.daily_start_equity, pos.daily_halt, pos.account_failed,
             ),
@@ -136,21 +139,30 @@ def log_order(
     commission: float = 0.0,
     order_type: str = "paper",
     exchange_order_id: Optional[str] = None,
+    setup_tag: Optional[str] = None,
+    close_reason: Optional[str] = None,
 ) -> None:
-    """Append one order event to paper_orders."""
+    """Append one order event to paper_orders.
+
+    setup_tag identifies why an OPEN was taken (e.g. "ema_crossover_buy");
+    close_reason identifies why a CLOSE happened (e.g. "signal_exit",
+    "rotation", "account_failed", "position_flip") — together these make up
+    the trade journal so wins/losses can be traced back to a cause.
+    """
     conn = db.get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO paper_orders
-                (run_id, strategy_name, symbol, event, side, qty, price, pnl,
-                 commission, order_type, exchange_order_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                (run_id, strategy_name, symbol, exchange, event, side, qty, price, pnl,
+                 commission, order_type, exchange_order_id, setup_tag, close_reason)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
-                pos.run_id, pos.strategy_name, pos.symbol, event, pos.side,
+                pos.run_id, pos.strategy_name, pos.symbol, pos.exchange, event, pos.side,
                 pos.qty, price, pnl, commission, order_type, exchange_order_id,
+                setup_tag, close_reason,
             ),
         )
         conn.commit()

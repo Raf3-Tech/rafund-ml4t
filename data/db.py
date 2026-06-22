@@ -193,12 +193,13 @@ class DatabaseConnection:
                 cursor.close()
             self.return_connection(conn)
 
-    def insert_prices(self, df: pd.DataFrame) -> int:
+    def insert_prices(self, df: pd.DataFrame, exchange: str = "binance") -> int:
         """
         Insert OHLCV data into prices table.
 
         Args:
             df: DataFrame with columns: timestamp, open, high, low, close, volume, symbol
+            exchange: Exchange the data was collected from (e.g. "binance", "kraken")
 
         Returns:
             Number of rows inserted
@@ -222,13 +223,14 @@ class DatabaseConnection:
                     float(row['high']),
                     float(row['low']),
                     float(row['close']),
-                    float(row['volume'])
+                    float(row['volume']),
+                    exchange,
                 ))
 
             query = """
-                INSERT INTO prices (symbol, timestamp, open, high, low, close, volume)
+                INSERT INTO prices (symbol, timestamp, open, high, low, close, volume, exchange)
                 VALUES %s
-                ON CONFLICT (symbol, timestamp) DO NOTHING
+                ON CONFLICT (exchange, symbol, timestamp) DO NOTHING
             """
 
             execute_values(cursor, query, data)
@@ -252,7 +254,8 @@ class DatabaseConnection:
         self,
         symbol: str,
         start_date: datetime = None,
-        end_date: datetime = None
+        end_date: datetime = None,
+        exchange: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Retrieve price data from database.
@@ -261,6 +264,7 @@ class DatabaseConnection:
             symbol: Trading symbol
             start_date: Start date (optional)
             end_date: End date (optional)
+            exchange: Restrict to one exchange (optional; default = all exchanges)
 
         Returns:
             DataFrame with price data
@@ -268,6 +272,10 @@ class DatabaseConnection:
         try:
             query = "SELECT * FROM prices WHERE symbol = %s"
             params = [symbol]
+
+            if exchange:
+                query += " AND exchange = %s"
+                params.append(exchange)
 
             if start_date:
                 query += " AND timestamp >= %s"
@@ -288,12 +296,13 @@ class DatabaseConnection:
             logger.error(f"Error retrieving prices: {str(e)}")
             return pd.DataFrame()
 
-    def get_latest_timestamp(self, symbol: str) -> Optional[datetime]:
+    def get_latest_timestamp(self, symbol: str, exchange: str = "binance") -> Optional[datetime]:
         """
-        Get the latest timestamp for a symbol.
+        Get the latest timestamp for a symbol on a given exchange.
 
         Args:
             symbol: Trading symbol
+            exchange: Exchange to filter by (default "binance")
 
         Returns:
             Latest timestamp or None if no data
@@ -304,8 +313,8 @@ class DatabaseConnection:
             conn = self.get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT MAX(timestamp) FROM prices WHERE symbol = %s",
-                (symbol,)
+                "SELECT MAX(timestamp) FROM prices WHERE symbol = %s AND exchange = %s",
+                (symbol, exchange)
             )
             result = cursor.fetchone()
             return result[0] if result[0] else None
@@ -317,16 +326,23 @@ class DatabaseConnection:
                 cursor.close()
             self.return_connection(conn)
 
-    def get_symbols_with_data(self) -> List[str]:
+    def get_symbols_with_data(self, exchange: Optional[str] = None) -> List[str]:
         """
         Get all symbols that have data in the database.
+
+        Args:
+            exchange: Restrict to one exchange (optional; default = all exchanges)
 
         Returns:
             List of symbols
         """
         try:
-            query = "SELECT DISTINCT symbol FROM prices ORDER BY symbol"
-            df = self.read_sql(query)
+            if exchange:
+                query = "SELECT DISTINCT symbol FROM prices WHERE exchange = %s ORDER BY symbol"
+                df = self.read_sql(query, [exchange])
+            else:
+                query = "SELECT DISTINCT symbol FROM prices ORDER BY symbol"
+                df = self.read_sql(query)
 
             symbols = df['symbol'].tolist()
             logger.info(f"Found {len(symbols)} symbols in database")
@@ -1175,25 +1191,23 @@ class DatabaseConnection:
             cursor.execute(
                 """
                 INSERT INTO research_decisions (
-                    created_at, strategy_name, symbol, tier, accepted, reason,
+                    created_at, strategy_name, symbol, accepted, reason,
                     avg_sharpe, avg_max_dd_pct, avg_win_rate_pct,
-                    cons_ratio, std_ratio, perm_ratio, n_windows, params
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    pass_ratio, n_windows, total_num_trades, params
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     decision.get("timestamp"),
                     decision["strategy_name"],
                     decision.get("symbol"),
-                    decision["tier"],
                     bool(decision["accepted"]),
                     decision["reason"],
                     float(decision["avg_sharpe"]),
                     float(decision["avg_max_dd_pct"]),
                     float(decision["avg_win_rate_pct"]),
-                    float(decision["cons_ratio"]),
-                    float(decision["std_ratio"]),
-                    float(decision["perm_ratio"]),
+                    float(decision["pass_ratio"]),
                     int(decision["n_windows"]),
+                    int(decision.get("total_num_trades", 0)),
                     json.dumps(decision.get("params") or {}),
                 ),
             )
@@ -1214,9 +1228,9 @@ class DatabaseConnection:
         try:
             df = self.read_sql(
                 """
-                SELECT created_at, strategy_name, symbol, tier, accepted, reason,
+                SELECT created_at, strategy_name, symbol, accepted, reason,
                        avg_sharpe, avg_max_dd_pct, avg_win_rate_pct,
-                       cons_ratio, std_ratio, perm_ratio, n_windows, params
+                       pass_ratio, n_windows, params
                 FROM research_decisions
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -1229,15 +1243,12 @@ class DatabaseConnection:
                     "timestamp": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
                     "strategy_name": str(r["strategy_name"]),
                     "symbol": r["symbol"] if r["symbol"] is not None else None,
-                    "tier": str(r["tier"]),
                     "accepted": bool(r["accepted"]),
                     "reason": str(r["reason"]),
                     "avg_sharpe": float(r["avg_sharpe"]),
                     "avg_max_dd_pct": float(r["avg_max_dd_pct"]),
                     "avg_win_rate_pct": float(r["avg_win_rate_pct"]),
-                    "cons_ratio": float(r["cons_ratio"]),
-                    "std_ratio": float(r["std_ratio"]),
-                    "perm_ratio": float(r["perm_ratio"]),
+                    "pass_ratio": float(r["pass_ratio"]),
                     "n_windows": int(r["n_windows"]),
                     "params": r["params"] if isinstance(r["params"], dict) else {},
                 })

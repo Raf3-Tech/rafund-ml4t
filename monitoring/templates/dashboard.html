@@ -123,25 +123,15 @@
     .pos { color: var(--success); }
     .neg { color: var(--danger); }
 
-    /* ── Tier pills row ─────────────────────────────────────────────────── */
-    .tier-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-    .tier-btn {
+    /* ── Filter pills row ───────────────────────────────────────────────── */
+    .filter-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .filter-btn {
       padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 600;
       border: 1px solid var(--border); background: var(--surf2); color: var(--muted);
       cursor: pointer; transition: all .15s;
     }
-    .tier-btn:hover { border-color: var(--accent); color: var(--accent); }
-    .tier-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-
-    /* ── Challenge summary ─────────────────────────────────────────────── */
-    .sum-row { display: flex; justify-content: space-between;
-               padding: 9px 0; border-bottom: 1px solid var(--border); }
-    .sum-row:last-child { border-bottom: none; }
-    .sum-label { font-size: 12px; color: var(--muted); }
-    .sum-val { font-size: 13px; font-weight: 600; }
-    .sum-val.green { color: var(--success); }
-    .sum-val.red   { color: var(--danger); }
-    .sum-val.blue  { color: var(--accent); }
+    .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
     /* ── Job log ───────────────────────────────────────────────────────── */
     .job-wrap { margin-top: 16px; }
@@ -208,7 +198,14 @@
     .spinning { animation: spin 1s linear infinite; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .separator { margin: 0 6px; color: var(--border); }
+    .trading-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .trading-orders { max-height: 220px; overflow-y: auto; margin-top: 10px; }
+    .signal-badge { font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+    .signal-BUY  { background: rgba(34,197,94,0.18); color: var(--success); }
+    .signal-SELL { background: rgba(239,68,68,0.18); color: var(--danger); }
+    .signal-HOLD, .signal-null { background: rgba(126,143,168,0.18); color: var(--muted); }
   </style>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 </head>
 <body>
 
@@ -216,11 +213,11 @@
 <div class="topbar">
   <div class="brand">RAF<span>und</span> ML4T</div>
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="challenge" onclick="switchTab('challenge')">⚙ Challenge</button>
-    <button class="tab-btn" data-tab="data"      onclick="switchTab('data')">⬇ Data</button>
+    <button class="tab-btn active" data-tab="data"      onclick="switchTab('data')">⬇ Data</button>
     <button class="tab-btn" data-tab="simulate"  onclick="switchTab('simulate')">▶ Simulate</button>
     <button class="tab-btn" data-tab="results"   onclick="switchTab('results')">📊 Results</button>
     <button class="tab-btn" data-tab="research"  onclick="switchTab('research')">🔬 Research</button>
+    <button class="tab-btn" data-tab="trading"   onclick="switchTab('trading')">📈 Trading</button>
     <button class="tab-btn" data-tab="ops"       onclick="switchTab('ops')">🛡 Ops</button>
   </nav>
 </div>
@@ -228,101 +225,9 @@
 <main>
 
 <!-- ════════════════════════════════════════════════════════════════════════════
-     TAB: CHALLENGE SETUP
-════════════════════════════════════════════════════════════════════════════ -->
-<div id="panel-challenge" class="panel active">
-  <div class="page-title">Prop Challenge Setup</div>
-  <div class="page-sub">Define the rules for your 1-phase prop challenge. These parameters drive the simulation gate and leaderboard win-probability calculation.</div>
-
-  <div class="grid-2">
-    <!-- Config form -->
-    <div class="card">
-      <div class="card-title">Challenge Parameters</div>
-      <div class="inline-fields">
-        <div class="field">
-          <label>Account Size ($)</label>
-          <input type="number" id="cfg-account" min="100" step="100" value="5000" oninput="updateSummary()"/>
-        </div>
-        <div class="field">
-          <label>Profit Target (%)</label>
-          <input type="number" id="cfg-profit" min="0.1" max="50" step="0.1" value="9" oninput="updateSummary()"/>
-          <div class="hint">Cumulative target — not per day</div>
-        </div>
-        <div class="field">
-          <label>Daily Loss Limit (%)</label>
-          <input type="number" id="cfg-daily-loss" min="0.1" max="20" step="0.1" value="3" oninput="updateSummary()"/>
-        </div>
-        <div class="field">
-          <label>Max Drawdown (%)</label>
-          <input type="number" id="cfg-max-dd" min="0.1" max="20" step="0.1" value="3" oninput="updateSummary()"/>
-          <div class="hint">Static from initial balance</div>
-        </div>
-        <div class="field">
-          <label>Max Leverage (×)</label>
-          <input type="number" id="cfg-leverage" min="1" max="100" step="0.5" value="5" oninput="updateSummary()"/>
-        </div>
-        <div class="field">
-          <label>Win Probability Target (%)</label>
-          <input type="number" id="cfg-win-prob" min="0" max="100" step="1" value="70" oninput="updateSummary()"/>
-          <div class="hint">Min % of windows that must pass</div>
-        </div>
-      </div>
-      <div class="btn-row" style="margin-top:4px; margin-bottom:0">
-        <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
-        <button class="btn btn-secondary" onclick="loadConfig()">Reset</button>
-      </div>
-    </div>
-
-    <!-- Live summary -->
-    <div>
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title">Challenge Summary</div>
-        <div class="sum-row">
-          <span class="sum-label">Profit target (absolute)</span>
-          <span class="sum-val green" id="sum-profit-abs">$450.00</span>
-        </div>
-        <div class="sum-row">
-          <span class="sum-label">Daily loss limit (absolute)</span>
-          <span class="sum-val red" id="sum-daily-abs">$150.00</span>
-        </div>
-        <div class="sum-row">
-          <span class="sum-label">Max drawdown limit (absolute)</span>
-          <span class="sum-val red" id="sum-dd-abs">$150.00</span>
-        </div>
-        <div class="sum-row">
-          <span class="sum-label">Equity floor</span>
-          <span class="sum-val" id="sum-floor">$4,850.00</span>
-        </div>
-        <div class="sum-row">
-          <span class="sum-label">Equity target</span>
-          <span class="sum-val green" id="sum-target">$5,450.00</span>
-        </div>
-        <div class="sum-row">
-          <span class="sum-label">Win probability target</span>
-          <span class="sum-val blue" id="sum-win-prob">70%</span>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Quick Actions</div>
-        <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
-          After saving your config, go to <strong>Simulate</strong> to run the walk-forward engine,
-          then <strong>Results</strong> to see which strategies meet your win-probability target.
-        </p>
-        <div class="btn-row" style="margin-bottom:0">
-          <button class="btn btn-secondary btn-sm" onclick="switchTab('simulate')">▶ Run Simulation →</button>
-          <button class="btn btn-secondary btn-sm" onclick="switchTab('results')">📊 View Results →</button>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-<!-- ════════════════════════════════════════════════════════════════════════════
      TAB: DATA
 ════════════════════════════════════════════════════════════════════════════ -->
-<div id="panel-data" class="panel">
+<div id="panel-data" class="panel active">
   <div class="page-title">Market Data</div>
   <div class="page-sub">Refresh OHLCV prices and funding rates from Binance. The engine uses this data for all simulations.</div>
 
@@ -401,17 +306,16 @@
 <div id="panel-results" class="panel">
   <div class="page-title">Strategy Leaderboard</div>
   <div class="page-sub">
-    Ranked by win probability — the % of historical windows that hit the profit target while staying within the drawdown limit.
-    Click any row to see window-by-window breakdown.
+    Every strategy × symbol combo, qualifying or not — the % of historical windows with a positive,
+    sane-drawdown result. Click any row to see window-by-window breakdown and, if it's failing, why.
   </div>
 
   <div class="section-hd">
-    <div class="tier-tabs">
-      <button class="tier-btn active" data-tier="conservative" onclick="loadLeaderboard('conservative')">Conservative</button>
-      <button class="tier-btn" data-tier="standard"     onclick="loadLeaderboard('standard')">Standard</button>
-      <button class="tier-btn" data-tier="permissive"   onclick="loadLeaderboard('permissive')">Permissive</button>
+    <div class="filter-tabs">
+      <button class="filter-btn active" data-filter="all"        onclick="loadLeaderboard('all')">All</button>
+      <button class="filter-btn"        data-filter="qualifying" onclick="loadLeaderboard('qualifying')">Qualifying only</button>
     </div>
-    <button class="btn btn-secondary btn-sm" onclick="loadLeaderboard(currentTier)">↻ Refresh</button>
+    <button class="btn btn-secondary btn-sm" onclick="loadLeaderboard(currentFilter)">↻ Refresh</button>
   </div>
 
   <div class="card" style="padding:0">
@@ -421,16 +325,17 @@
           <tr>
             <th>Strategy</th>
             <th>Symbol</th>
-            <th id="win-pct-header">Win %</th>
+            <th>Pass %</th>
             <th>Avg Sharpe</th>
             <th>Avg Return</th>
             <th>Avg DD</th>
             <th>Avg Win Rate</th>
             <th>Windows</th>
+            <th>Why (if failing)</th>
           </tr>
         </thead>
         <tbody id="leaderboard-body">
-          <tr class="empty-row"><td colspan="8">Loading…</td></tr>
+          <tr class="empty-row"><td colspan="9">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -445,7 +350,7 @@
     <div class="tbl-wrap">
       <table>
         <thead>
-          <tr><th>Start</th><th>End</th><th>Yrs</th><th>Type</th><th>Return</th><th>Max DD</th><th>Sharpe</th><th>Win Rate</th><th>Trades</th><th>Tier</th><th>Params</th></tr>
+          <tr><th>Start</th><th>End</th><th>Yrs</th><th>Type</th><th>Return</th><th>Max DD</th><th>Sharpe</th><th>Win Rate</th><th>Trades</th><th>Pass</th><th>Params</th></tr>
         </thead>
         <tbody id="detail-body"></tbody>
       </table>
@@ -502,6 +407,58 @@
   </div>
 
   <div id="research-decisions" style="margin-top:20px"></div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     TAB: TRADING
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-trading" class="panel">
+  <div class="page-title">Trading Status</div>
+  <div class="page-sub">Live position, current signal, and recent orders per exchange.</div>
+
+  <div class="btn-row">
+    <button class="btn btn-secondary" id="trading-mode-paper" onclick="setTradingMode('paper')">Paper</button>
+    <button class="btn btn-secondary" id="trading-mode-live" onclick="setTradingMode('live')">Live</button>
+    <button class="btn btn-secondary" onclick="loadTradingStatus()">Refresh</button>
+  </div>
+
+  <div class="trading-grid" style="margin-top:12px">
+    <div class="card">
+      <div class="card-title">Binance</div>
+      <div id="trading-binance"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Kraken</div>
+      <div id="trading-kraken"></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Price &amp; Trades</div>
+    <div class="btn-row">
+      <select id="chart-exchange" onchange="loadTradingChart()">
+        <option value="binance">Binance</option>
+        <option value="kraken">Kraken</option>
+      </select>
+    </div>
+    <div id="trading-chart" style="height:420px;margin-top:10px"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Trade Journal — Setup Performance</div>
+    <div class="page-sub" style="margin-top:-4px">Win rate and P&amp;L by setup tag, across every closed paper/live trade — what's working, what isn't.</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Setup</th><th>Trades</th><th>Win Rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr>
+        </thead>
+        <tbody id="journal-summary-body">
+          <tr class="empty-row"><td colspan="5">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 
@@ -586,18 +543,18 @@
 
 <script>
 // ── State ───────────────────────────────────────────────────────────────────
-let currentTier = 'conservative';
+let currentFilter = 'all';
 let pollTimers  = {};   // { jobId: intervalId }
 let jobStarts   = {};   // { jobId: Date }
 let elapsedTimer = null;
+let tradingMode = 'paper';
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  loadConfig();
   loadStrategies();
   loadSymbols();
   loadDataStatus();
-  loadLeaderboard('conservative');
+  loadLeaderboard('all');
   fetchResearchDecisions();
 });
 
@@ -607,57 +564,8 @@ function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   document.querySelector('[data-tab="' + name + '"]').classList.add('active');
-  if (name === 'results') loadLeaderboard(currentTier);
-}
-
-// ── Challenge config ─────────────────────────────────────────────────────────
-function updateSummary() {
-  const acct = parseFloat(document.getElementById('cfg-account').value) || 0;
-  const prof = parseFloat(document.getElementById('cfg-profit').value)  || 0;
-  const dl   = parseFloat(document.getElementById('cfg-daily-loss').value) || 0;
-  const dd   = parseFloat(document.getElementById('cfg-max-dd').value) || 0;
-  const wp   = parseFloat(document.getElementById('cfg-win-prob').value) || 0;
-
-  const fmt = v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-  document.getElementById('sum-profit-abs').textContent  = fmt(acct * prof / 100);
-  document.getElementById('sum-daily-abs').textContent   = fmt(acct * dl / 100);
-  document.getElementById('sum-dd-abs').textContent      = fmt(acct * dd / 100);
-  document.getElementById('sum-floor').textContent       = fmt(acct * (1 - dd / 100));
-  document.getElementById('sum-target').textContent      = fmt(acct * (1 + prof / 100));
-  document.getElementById('sum-win-prob').textContent    = wp + '%';
-}
-
-async function loadConfig() {
-  try {
-    const r = await fetch('/api/prop-config');
-    const cfg = await r.json();
-    document.getElementById('cfg-account').value    = cfg.account_size;
-    document.getElementById('cfg-profit').value     = cfg.profit_pct;
-    document.getElementById('cfg-daily-loss').value = cfg.daily_loss_pct;
-    document.getElementById('cfg-max-dd').value     = cfg.max_dd_pct;
-    document.getElementById('cfg-leverage').value   = cfg.max_leverage;
-    document.getElementById('cfg-win-prob').value   = cfg.win_prob_target;
-    updateSummary();
-  } catch(e) { showToast('Could not load config', 'error'); }
-}
-
-async function saveConfig() {
-  const cfg = {
-    account_size:    parseFloat(document.getElementById('cfg-account').value),
-    profit_pct:      parseFloat(document.getElementById('cfg-profit').value),
-    daily_loss_pct:  parseFloat(document.getElementById('cfg-daily-loss').value),
-    max_dd_pct:      parseFloat(document.getElementById('cfg-max-dd').value),
-    max_leverage:    parseFloat(document.getElementById('cfg-leverage').value),
-    win_prob_target: parseFloat(document.getElementById('cfg-win-prob').value),
-  };
-  try {
-    const r = await fetch('/api/prop-config', {
-      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfg)
-    });
-    const data = await r.json();
-    if (data.ok) { showToast('Config saved ✓', 'success'); }
-    else         { showToast('Save failed: ' + data.error, 'error'); }
-  } catch(e) { showToast('Save error: ' + e, 'error'); }
+  if (name === 'results') loadLeaderboard(currentFilter);
+  if (name === 'trading') loadTradingStatus();
 }
 
 // ── Data status ──────────────────────────────────────────────────────────────
@@ -762,7 +670,7 @@ async function runEngine() {
       btn.disabled = false; btn.textContent = '▶ Run Simulation';
       stopElapsed();
       if (job.status === 'done') {
-        loadLeaderboard(currentTier);
+        loadLeaderboard(currentFilter);
         showToast('Simulation complete ✓', 'success');
       } else {
         showToast('Simulation failed — check log', 'error');
@@ -830,13 +738,12 @@ function renderResearchDecisions(decisions) {
       <div class="decision-card ${d.accepted ? 'accepted' : 'rejected'}">
         <div class="decision-top">
           <span class="decision-name">${esc(d.strategy_name)}${d.symbol ? ' / ' + esc(d.symbol) : ''}</span>
-          <span class="badge badge-${d.accepted ? 'fresh' : 'old'}">${d.accepted ? 'ACCEPTED — ' + esc(d.tier) : 'REJECTED'}</span>
+          <span class="badge badge-${d.accepted ? 'fresh' : 'old'}">${d.accepted ? 'ACCEPTED' : 'REJECTED'}</span>
         </div>
         <div class="decision-reason">${esc(d.reason)}</div>
         <div class="decision-meta">
           <span>Sharpe: ${(d.avg_sharpe||0).toFixed(2)}</span>
-          <span>Cons: ${((d.cons_ratio||0)*100).toFixed(1)}%</span>
-          <span>Std: ${((d.std_ratio||0)*100).toFixed(1)}%</span>
+          <span>Pass: ${((d.pass_ratio||0)*100).toFixed(1)}%</span>
           <span>Windows: ${d.n_windows||0}</span>
           <span style="color:var(--muted);margin-left:auto">${(d.timestamp||'').slice(0,10)}</span>
         </div>
@@ -845,54 +752,46 @@ function renderResearchDecisions(decisions) {
 }
 
 // ── Leaderboard ───────────────────────────────────────────────────────────────
-async function loadLeaderboard(tier) {
-  currentTier = tier;
-  document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('active'));
-  const activeBtn = document.querySelector('[data-tier="' + tier + '"]');
+async function loadLeaderboard(filter) {
+  currentFilter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  const activeBtn = document.querySelector('[data-filter="' + filter + '"]');
   if (activeBtn) activeBtn.classList.add('active');
 
-  // Update header label
-  const labels = {conservative:'Win % (9% prof / 3% DD)', standard:'Win % (10% DD)', permissive:'Win % (25% DD)'};
-  document.getElementById('win-pct-header').textContent = labels[tier] || 'Win %';
-
   const tbody = document.getElementById('leaderboard-body');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="8">Loading…</td></tr>';
+  tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Loading…</td></tr>';
 
   try {
-    const r = await fetch('/api/leaderboard?tier=' + tier);
+    const r = await fetch('/api/leaderboard?tier=' + filter);
     const rows = await r.json();
 
     if (rows.error) {
-      tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Error: ${esc(rows.error)}</td></tr>`;
+      tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Error: ${esc(rows.error)}</td></tr>`;
       return;
     }
     if (!rows.length) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No results. Run the simulation first (Simulate tab).</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="9">No results. Run the simulation first (Simulate tab).</td></tr>';
       return;
     }
 
-    // Win-prob target for highlighting
-    const target = parseFloat(document.getElementById('cfg-win-prob').value) || 70;
-    const winPctField = tier === 'conservative' ? 'cons_pct' : tier === 'standard' ? 'std_pct' : 'perm_pct';
-
     tbody.innerHTML = rows.map(row => {
-      const wp = row[winPctField];
-      const wpClass = wp >= target ? 'pos' : (wp >= target * 0.5 ? '' : 'neg');
+      const wpClass = row.qualifies ? 'pos' : 'neg';
       const sharpeClass = row.avg_sharpe > 0 ? 'pos' : 'neg';
       return `
         <tr class="clickable" onclick="loadDetail('${esc(row.strategy)}','${esc(row.symbol)}',this)">
           <td>${esc(row.strategy)}</td>
           <td>${esc(row.symbol)}</td>
-          <td class="${wpClass}"><strong>${wp}%</strong></td>
+          <td class="${wpClass}"><strong>${row.pass_pct}%</strong></td>
           <td class="${sharpeClass}">${row.avg_sharpe.toFixed(3)}</td>
           <td class="${row.avg_ret >= 9 ? 'pos' : ''}">${row.avg_ret.toFixed(1)}%</td>
           <td class="${row.avg_dd <= 3 ? 'pos' : row.avg_dd <= 10 ? '' : 'neg'}">${row.avg_dd.toFixed(1)}%</td>
           <td>${row.avg_win_rate.toFixed(1)}%</td>
           <td style="color:var(--muted)">${row.n_windows}</td>
+          <td style="color:var(--muted);font-size:11px">${esc(row.reason || '')}</td>
         </tr>`;
     }).join('');
   } catch(e) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Error loading leaderboard.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Error loading leaderboard.</td></tr>`;
   }
 }
 
@@ -919,10 +818,7 @@ async function loadDetail(strategy, symbol, rowEl) {
     }
 
     document.getElementById('detail-body').innerHTML = rows.map(w => {
-      const tier = w.cons ? '<span class="badge badge-fresh">C</span>'
-                 : w.std  ? '<span class="badge badge-stale">S</span>'
-                 : w.perm ? '<span class="badge badge-old">P</span>'
-                 : '<span class="badge badge-none">—</span>';
+      const passBadge = w.pass ? '<span class="badge badge-fresh">OK</span>' : '<span class="badge badge-old">FAIL</span>';
       const params = Object.entries(w.params||{}).map(([k,v])=>`${k}=${v}`).join(', ') || '—';
       return `
         <tr>
@@ -935,7 +831,7 @@ async function loadDetail(strategy, symbol, rowEl) {
           <td class="${w.sharpe > 0 ? 'pos' : 'neg'}">${w.sharpe.toFixed(3)}</td>
           <td>${w.wr.toFixed(1)}%</td>
           <td style="color:var(--muted)">${w.trades}</td>
-          <td>${tier}</td>
+          <td>${passBadge}</td>
           <td style="font-size:11px;color:var(--muted)">${esc(params)}</td>
         </tr>`;
     }).join('');
@@ -1041,6 +937,130 @@ function esc(s) {
   return String(s ?? '')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+}
+
+// ── Trading tab ────────────────────────────────────────────────────────────────
+function setTradingMode(mode) {
+  tradingMode = mode;
+  document.getElementById('trading-mode-paper').classList.toggle('btn-primary', mode === 'paper');
+  document.getElementById('trading-mode-live').classList.toggle('btn-primary', mode === 'live');
+  loadTradingStatus();
+}
+
+function renderExchangeCard(exchange, data) {
+  const pos = data.position;
+  const sig = data.current_signal;
+  const flat = !pos.side || pos.side === 'FLAT';
+  const sigClass = 'signal-' + (sig.signal || 'null');
+
+  let html = '<div style="display:flex;justify-content:space-between;align-items:center">';
+  html += '<div>' + (flat ? 'FLAT' : '<b>' + esc(pos.side) + '</b> ' + esc(pos.symbol) + ' qty=' + Number(pos.qty).toFixed(6)) + '</div>';
+  html += '<span class="signal-badge ' + sigClass + '">' + esc(sig.signal || 'NO SIGNAL') + '</span>';
+  html += '</div>';
+  html += '<div style="margin-top:6px;color:var(--muted);font-size:13px">';
+  html += 'strategy: ' + esc(sig.strategy_name || '-') + (sig.symbol ? ' / ' + esc(sig.symbol) : '');
+  html += '</div>';
+  if (!flat && pos.entry_price) {
+    html += '<div style="margin-top:4px;font-size:13px">entry @ ' + Number(pos.entry_price).toFixed(4) + '</div>';
+  }
+  html += '<div style="margin-top:4px;font-size:13px">equity: $' + Number(pos.equity).toFixed(2);
+  html += '  (peak $' + Number(pos.peak_equity).toFixed(2) + ')</div>';
+  if (pos.daily_halt) html += '<div style="margin-top:4px"><span class="badge badge-old">DAILY HALT</span></div>';
+  if (pos.account_failed) html += '<div style="margin-top:4px"><span class="badge badge-old">ACCOUNT FAILED</span></div>';
+
+  html += '<div class="trading-orders"><table><thead><tr><th>Event</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>Setup / Reason</th><th>When</th></tr></thead><tbody>';
+  if (data.recent_orders.length === 0) {
+    html += '<tr class="empty-row"><td colspan="7">No orders yet.</td></tr>';
+  } else {
+    for (const o of data.recent_orders) {
+      const tag = o.setup_tag || o.close_reason || '-';
+      html += '<tr><td>' + esc(o.event) + '</td><td>' + esc(o.side) + '</td><td>' + Number(o.qty).toFixed(6) + '</td>'
+            + '<td>' + Number(o.price).toFixed(4) + '</td><td>' + (o.pnl != null ? Number(o.pnl).toFixed(2) : '-') + '</td>'
+            + '<td style="color:var(--muted);font-size:11px">' + esc(tag) + '</td>'
+            + '<td>' + esc(o.created_at) + '</td></tr>';
+    }
+  }
+  html += '</tbody></table></div>';
+  return html;
+}
+
+async function loadJournalSummary() {
+  const tbody = document.getElementById('journal-summary-body');
+  try {
+    const r = await fetch('/api/trade-journal-summary');
+    const rows = await r.json();
+    if (rows.error) {
+      tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Error: ${esc(rows.error)}</td></tr>`;
+      return;
+    }
+    if (!rows.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No closed trades with a setup tag yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => `
+      <tr>
+        <td>${esc(r.setup_tag)}</td>
+        <td>${r.n_trades}</td>
+        <td class="${r.win_rate_pct >= 50 ? 'pos' : 'neg'}">${r.win_rate_pct}%</td>
+        <td class="${r.avg_pnl >= 0 ? 'pos' : 'neg'}">${r.avg_pnl.toFixed(2)}</td>
+        <td class="${r.total_pnl >= 0 ? 'pos' : 'neg'}">${r.total_pnl.toFixed(2)}</td>
+      </tr>`).join('');
+  } catch(e) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Error loading journal summary.</td></tr>';
+  }
+}
+
+async function loadTradingStatus() {
+  try {
+    const r = await fetch('/api/trading-status?mode=' + tradingMode);
+    const data = await r.json();
+    document.getElementById('trading-binance').innerHTML = renderExchangeCard('binance', data.binance);
+    document.getElementById('trading-kraken').innerHTML = renderExchangeCard('kraken', data.kraken);
+    loadTradingChart();
+    loadJournalSummary();
+  } catch (e) { showToast('Could not load trading status', 'error'); }
+}
+
+async function loadTradingChart() {
+  const exchange = document.getElementById('chart-exchange').value;
+  try {
+    const r = await fetch('/api/trading-chart?exchange=' + exchange + '&mode=' + tradingMode);
+    const data = await r.json();
+    const bars = data.bars || [];
+    const trades = data.trades || [];
+
+    const candle = {
+      type: 'candlestick',
+      x: bars.map(b => b.timestamp),
+      open: bars.map(b => b.open), high: bars.map(b => b.high),
+      low: bars.map(b => b.low), close: bars.map(b => b.close),
+      name: data.symbol || exchange,
+      increasing: {line: {color: '#22c55e'}}, decreasing: {line: {color: '#ef4444'}},
+    };
+
+    const opens = trades.filter(t => t.event === 'OPEN');
+    const closes = trades.filter(t => t.event === 'CLOSE');
+    const openMarker = {
+      type: 'scatter', mode: 'markers', name: 'OPEN',
+      x: opens.map(t => t.created_at), y: opens.map(t => t.price),
+      marker: {symbol: 'triangle-up', size: 11, color: '#3b7ef6'},
+    };
+    const closeMarker = {
+      type: 'scatter', mode: 'markers', name: 'CLOSE',
+      x: closes.map(t => t.created_at), y: closes.map(t => t.price),
+      marker: {symbol: 'triangle-down', size: 11, color: '#f59e0b'},
+    };
+
+    Plotly.newPlot('trading-chart', [candle, openMarker, closeMarker], {
+      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+      font: {color: '#e2e8f0'},
+      margin: {t: 10, r: 10, l: 50, b: 30},
+      xaxis: {rangeslider: {visible: false}, gridcolor: '#2a3150'},
+      yaxis: {gridcolor: '#2a3150'},
+      showlegend: true,
+      legend: {orientation: 'h'},
+    }, {responsive: true, displayModeBar: false});
+  } catch (e) { showToast('Could not load chart', 'error'); }
 }
 </script>
 </body>

@@ -22,7 +22,11 @@ from trading.position import PositionState, load_position, log_order, save_posit
 logger = get_logger(__name__)
 
 _COMMISSION_PCT = 0.001
-RUN_ID = "paper"
+SUPPORTED_EXCHANGES = ("binance", "kraken")
+
+
+def _run_id(exchange: str) -> str:
+    return f"paper_{exchange}"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -47,16 +51,16 @@ def _top_strategy(db) -> Optional[Tuple[str, str, dict]]:
     return str(row["strategy_name"]), symbol, params
 
 
-def _latest_bars(db, symbol: str, n: int) -> Optional[pd.DataFrame]:
+def _latest_bars(db, symbol: str, n: int, exchange: str = "binance") -> Optional[pd.DataFrame]:
     df = db.read_sql(
         """
         SELECT timestamp, open, high, low, close, volume
         FROM prices
-        WHERE symbol = %s
+        WHERE symbol = %s AND exchange = %s
         ORDER BY timestamp DESC
         LIMIT %s
         """,
-        [symbol, n],
+        [symbol, exchange, n],
     )
     if df.empty:
         return None
@@ -128,14 +132,16 @@ def _update_propfirm(pos: PositionState, current_equity: float, cfg) -> None:
 # ── main cycle ────────────────────────────────────────────────────────────────
 
 
-def run_paper_cycle(db) -> bool:
-    """One paper-trading cycle. Safe to call even before any research decisions exist."""
+def run_paper_cycle(db, exchange: str = "binance") -> bool:
+    """One paper-trading cycle for one exchange. Safe to call even before any
+    research decisions exist, or before that exchange has price history yet."""
     from config.loader import get_settings
     cfg = get_settings()
+    run_id = _run_id(exchange)
 
     result = _top_strategy(db)
     if result is None:
-        logger.info("paper_trader: no accepted strategy yet — skipping cycle")
+        logger.info("paper_trader[%s]: no accepted strategy yet — skipping cycle", exchange)
         return True
 
     strategy_name, symbol, params = result
@@ -146,25 +152,26 @@ def run_paper_cycle(db) -> bool:
     try:
         strategy = StrategyRegistry.instantiate(strategy_name)
     except KeyError:
-        logger.error("paper_trader: unknown strategy %s", strategy_name)
+        logger.error("paper_trader[%s]: unknown strategy %s", exchange, strategy_name)
         return False
 
     n_bars = strategy.get_min_bars(params) * 2 + 10
-    df = _latest_bars(db, symbol, n_bars)
+    df = _latest_bars(db, symbol, n_bars, exchange=exchange)
     if df is None or len(df) < strategy.get_min_bars(params):
-        logger.warning("paper_trader: not enough bars for %s (%d)", symbol, 0 if df is None else len(df))
+        logger.warning("paper_trader[%s]: not enough bars for %s (%d)",
+                        exchange, symbol, 0 if df is None else len(df))
         return True
 
     signal = _last_signal(df, strategy_name, params)
     price = float(df["close"].iloc[-1])
 
-    pos = load_position(db, RUN_ID, initial_capital=cfg.account_size,
-                        strategy_name=strategy_name, symbol=symbol)
+    pos = load_position(db, run_id, initial_capital=cfg.account_size,
+                        strategy_name=strategy_name, symbol=symbol, exchange=exchange)
 
     # Close stale position if the top strategy/symbol rotated
     if not pos.is_flat and (pos.strategy_name != strategy_name or pos.symbol != symbol):
         pnl = _close(pos, price)
-        log_order(db, pos, "CLOSE", price, pnl=pnl)
+        log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="rotation")
         pos.strategy_name = strategy_name
         pos.symbol = symbol
 
@@ -180,7 +187,7 @@ def run_paper_cycle(db) -> bool:
     if pos.account_failed:
         if not pos.is_flat:
             pnl = _close(pos, price)
-            log_order(db, pos, "CLOSE", price, pnl=pnl)
+            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="account_failed")
         save_position(db, pos)
         return True
 
@@ -192,28 +199,30 @@ def run_paper_cycle(db) -> bool:
     else:
         target = None
 
+    setup_tag = f"{strategy_name}_{signal.lower()}" if signal in ("BUY", "SELL") else None
+
     if target is not None:
         if pos.is_flat:
             if not pos.daily_halt:
                 notional = pos.equity * cfg.leg_allocation_pct
                 _open(pos, target, price, notional)
-                log_order(db, pos, "OPEN", price)
+                log_order(db, pos, "OPEN", price, setup_tag=setup_tag)
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
                             target, symbol, price, pos.equity)
         elif pos.side != target:
             pnl = _close(pos, price)
-            log_order(db, pos, "CLOSE", price, pnl=pnl)
+            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="position_flip")
             logger.info("paper_trader: CLOSE (flip) @ %.4f  pnl=%.2f", price, pnl)
             if not pos.daily_halt:
                 notional = pos.equity * cfg.leg_allocation_pct
                 _open(pos, target, price, notional)
-                log_order(db, pos, "OPEN", price)
+                log_order(db, pos, "OPEN", price, setup_tag=setup_tag)
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
                             target, symbol, price, pos.equity)
     else:
         if not pos.is_flat:
             pnl = _close(pos, price)
-            log_order(db, pos, "CLOSE", price, pnl=pnl)
+            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="signal_exit")
             logger.info("paper_trader: CLOSE %s @ %.4f  pnl=%.2f", symbol, price, pnl)
 
     pos.equity = pos.mark_to_market(price)
@@ -221,7 +230,21 @@ def run_paper_cycle(db) -> bool:
 
     dd_pct = (pos.peak_equity - pos.equity) / pos.peak_equity * 100 if pos.peak_equity > 0 else 0
     logger.info(
-        "paper_trader: %s | %s | signal=%-4s | equity=%.2f | dd=%.2f%% | halt=%s",
-        strategy_name, symbol, signal, pos.equity, dd_pct, pos.daily_halt,
+        "paper_trader[%s]: %s | %s | signal=%-4s | equity=%.2f | dd=%.2f%% | halt=%s",
+        exchange, strategy_name, symbol, signal, pos.equity, dd_pct, pos.daily_halt,
     )
     return True
+
+
+def run_paper_cycle_all(db, exchange: Optional[str] = None) -> bool:
+    """Run one paper cycle for each configured exchange (default: all of them).
+
+    A single ``python main.py paper`` invocation tracks every exchange at once —
+    paper trading carries no real-funds risk, so convenience wins over the
+    explicit single-exchange-per-call discipline used for live trading.
+    """
+    exchanges = [exchange] if exchange else list(SUPPORTED_EXCHANGES)
+    ok = True
+    for ex in exchanges:
+        ok = run_paper_cycle(db, exchange=ex) and ok
+    return ok

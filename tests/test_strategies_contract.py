@@ -18,11 +18,12 @@ from strategies.atr_volatility_breakout import ATRVolatilityBreakout
 from strategies.keltner_squeeze import KeltnerSqueeze
 from strategies.dca import DCAStrategy
 from strategies.hodl_rebalance import HODLRebalance
+from strategies.smc_breakout import SMCBreakout
 
 STRATEGIES = [
     EMACrossover, MACDStrategy, SupertrendStrategy, DonchianBreakout,
     BollingerReversion, RSIExtremes, ATRVolatilityBreakout, KeltnerSqueeze,
-    DCAStrategy, HODLRebalance,
+    DCAStrategy, HODLRebalance, SMCBreakout,
 ]
 
 

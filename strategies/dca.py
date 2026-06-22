@@ -20,10 +20,6 @@ class DCAStrategy(BaseStrategy):
     min_bars = 1
     param_grid = {"interval_days": 7}
 
-    # DCA will always fail CONSERVATIVE drawdown (crypto drawdowns 50-85%).
-    # Only valid for STANDARD and PERMISSIVE tiers.
-    tier_note = "STANDARD/PERMISSIVE only — never prop-compatible"
-
     def generate_signals(self, df: pd.DataFrame, params: Dict) -> pd.Series:
         interval = int(params.get("interval_days", self.param_grid["interval_days"]))
         signals = ["HOLD"] * len(df)
@@ -35,6 +31,6 @@ class DCAStrategy(BaseStrategy):
     def describe_failure(self, results: Dict) -> str:
         dd = results.get("max_drawdown_pct", 0.0)
         return (
-            f"DCA failed CONSERVATIVE drawdown ({dd:.1f}%) — expected, as crypto assets "
-            "have historical drawdowns of 50-85%. This strategy is STANDARD/PERMISSIVE only."
+            f"DCA's drawdown ({dd:.1f}%) reflects full exposure to crypto's "
+            "historical 50-85% drawdowns — buying on a schedule doesn't avoid them."
         )

@@ -4,12 +4,12 @@ Flow:
   1. propose  — select a strategy + symbol to investigate (from registry or leaderboard)
   2. campaign  — run the walk-forward engine on that target
   3. evaluate  — pull engine_results, score via leaderboard + statistical gates
-  4. decide    — accept / reject / watch based on tier qualification + Sharpe floor
+  4. decide    — accept / reject based on consistency + Sharpe floor
   5. log       — append the decision to tmp/research_decisions.jsonl + DB (if db provided)
 
 CLI entry point (via main.py):
     python main.py research --strategy "EMA Crossover" --symbol BTC/USDT
-    python main.py research --top-n 3 --tier conservative
+    python main.py research --top-n 3
 """
 
 from __future__ import annotations
@@ -30,19 +30,10 @@ _DECISIONS_LOG = DECISIONS_LOG_PATH
 
 _SHARPE_FLOOR = 0.3
 
-# Standard and permissive floors are fixed; only the conservative floor is
-# user-configurable via the prop challenge config (win_prob_target).
-_STANDARD_FLOOR = 0.60
-_PERMISSIVE_FLOOR = 0.50
-
-
-def _conservative_floor() -> float:
-    """Read the conservative pass threshold from prop_challenge.json."""
-    try:
-        from config.prop_config import read_prop_config
-        return read_prop_config().get("win_prob_target", 70.0) / 100.0
-    except Exception:
-        return 0.70
+# Minimum total trades a strategy-symbol combo needs across all windows
+# before its win rate is trusted enough to promote — too few trades and a
+# lucky streak looks identical to a real edge.
+_MIN_TRADES_FLOOR = 100
 
 
 @dataclass
@@ -50,16 +41,14 @@ class ResearchDecision:
     timestamp: str
     strategy_name: str
     symbol: Optional[str]
-    tier: str
     accepted: bool
     reason: str
     avg_sharpe: float
     avg_max_dd_pct: float
     avg_win_rate_pct: float
-    cons_ratio: float
-    std_ratio: float
-    perm_ratio: float
+    pass_ratio: float
     n_windows: int
+    total_num_trades: int
     params: Dict
 
 
@@ -70,51 +59,39 @@ def _gate(row: Dict) -> ResearchDecision:
     avg_sharpe = float(row.get("avg_sharpe", 0.0))
     avg_dd = float(row.get("avg_max_dd_pct", 0.0))
     avg_wr = float(row.get("avg_win_rate_pct", 0.0))
-    cons_ratio = float(row.get("cons_ratio", 0.0))
-    std_ratio = float(row.get("std_ratio", 0.0))
-    perm_ratio = float(row.get("perm_ratio", 0.0))
+    pass_ratio = float(row.get("pass_ratio", 0.0))
     n_windows = int(row.get("n_windows", 0))
+    total_num_trades = int(row.get("total_num_trades", 0))
     params = row.get("params") or {}
 
-    cons_floor = _conservative_floor()
-
-    tier = "NONE"
-    if cons_ratio >= cons_floor and avg_sharpe >= _SHARPE_FLOOR:
-        tier = "CONSERVATIVE"
-    elif std_ratio >= _STANDARD_FLOOR and avg_sharpe >= _SHARPE_FLOOR:
-        tier = "STANDARD"
-    elif perm_ratio >= _PERMISSIVE_FLOOR and avg_sharpe >= _SHARPE_FLOOR:
-        tier = "PERMISSIVE"
-
-    accepted = tier != "NONE"
-
-    if accepted:
-        active_ratio = cons_ratio if tier == "CONSERVATIVE" else (std_ratio if tier == "STANDARD" else perm_ratio)
+    if total_num_trades < _MIN_TRADES_FLOOR:
+        accepted = False
         reason = (
-            f"Qualifies for {tier} tier: "
-            f"consistency={active_ratio:.2f}, avg_sharpe={avg_sharpe:.2f}"
+            f"Rejected: only {total_num_trades} trades, below the "
+            f"{_MIN_TRADES_FLOOR}-trade minimum required for live promotion"
         )
+    elif bool(row.get("qualifies")) and avg_sharpe >= _SHARPE_FLOOR:
+        accepted = True
+        reason = f"Qualifies: pass_ratio={pass_ratio:.2f}, avg_sharpe={avg_sharpe:.2f}"
     else:
+        accepted = False
         reason = (
-            f"Rejected: best consistency "
-            f"(cons={cons_ratio:.2f}, std={std_ratio:.2f}, perm={perm_ratio:.2f}) "
-            f"or Sharpe ({avg_sharpe:.2f}) below floor ({_SHARPE_FLOOR})"
+            f"Rejected: pass_ratio={pass_ratio:.2f} or Sharpe ({avg_sharpe:.2f}) "
+            f"below floor ({_SHARPE_FLOOR})"
         )
 
     return ResearchDecision(
         timestamp=datetime.now(timezone.utc).isoformat(),
         strategy_name=name,
         symbol=symbol,
-        tier=tier,
         accepted=accepted,
         reason=reason,
         avg_sharpe=avg_sharpe,
         avg_max_dd_pct=avg_dd,
         avg_win_rate_pct=avg_wr,
-        cons_ratio=cons_ratio,
-        std_ratio=std_ratio,
-        perm_ratio=perm_ratio,
+        pass_ratio=pass_ratio,
         n_windows=n_windows,
+        total_num_trades=total_num_trades,
         params=params,
     )
 
@@ -128,7 +105,6 @@ def _log_decision(decision: ResearchDecision) -> None:
         "research_decision_logged",
         strategy=decision.strategy_name,
         symbol=decision.symbol,
-        tier=decision.tier,
         accepted=decision.accepted,
     )
 
@@ -138,7 +114,7 @@ def run_research_pipeline(
     strategy_filter: Optional[str] = None,
     symbol_filter: Optional[str] = None,
     top_n: int = 5,
-    tier_filter: Optional[str] = None,
+    qualifying_only: bool = False,
     dry_run: bool = False,
 ) -> List[ResearchDecision]:
     """Run the full research loop and return a list of decisions.
@@ -148,7 +124,8 @@ def run_research_pipeline(
         strategy_filter: Restrict engine run to this strategy name.
         symbol_filter: Restrict engine run to this symbol.
         top_n: Number of leaderboard candidates to gate when no filter given.
-        tier_filter: Leaderboard tier to draw candidates from.
+        qualifying_only: If True, only draw candidates that already pass the
+            leaderboard's consistency bar.
         dry_run: If True, skip the engine run (re-use existing engine_results).
     """
     from backtesting.window_engine import WalkForwardWindowEngine
@@ -176,7 +153,7 @@ def run_research_pipeline(
         logger.info("research_pipeline_campaign_done", n_results=len(results))
 
     # --- Step 2: evaluate (leaderboard) ---
-    lb = build_leaderboard(db, tier=tier_filter)
+    lb = build_leaderboard(db, tier="qualifying" if qualifying_only else None)
     if lb.empty:
         logger.warning("research_pipeline_no_leaderboard_results")
         return decisions
@@ -225,9 +202,9 @@ def print_research_summary(decisions: List[ResearchDecision]) -> None:
     if accepted:
         print(f"\nACCEPTED ({len(accepted)}):")
         for d in accepted:
-            print(f"  + {d.strategy_name} / {d.symbol or 'all'} → {d.tier}  "
-                  f"(Sharpe={d.avg_sharpe:.2f}, cons={d.cons_ratio:.2f}, "
-                  f"std={d.std_ratio:.2f}, windows={d.n_windows})")
+            print(f"  + {d.strategy_name} / {d.symbol or 'all'}  "
+                  f"(Sharpe={d.avg_sharpe:.2f}, pass_ratio={d.pass_ratio:.2f}, "
+                  f"windows={d.n_windows})")
 
     if rejected:
         print(f"\nREJECTED ({len(rejected)}):")

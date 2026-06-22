@@ -20,3 +20,4 @@ from strategies.dca import DCAStrategy  # noqa: F401
 from strategies.hodl_rebalance import HODLRebalance  # noqa: F401
 from strategies.stat_arb import StatArbPairsStrategy  # noqa: F401
 from strategies.funding_rate_arb import FundingRateArb  # noqa: F401
+from strategies.smc_breakout import SMCBreakout  # noqa: F401

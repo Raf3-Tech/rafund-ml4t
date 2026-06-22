@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# One-shot bootstrap for a fresh Ubuntu 22.04/24.04 EC2 instance.
-# Run as the default user (ubuntu / ec2-user), not root.
-# Usage:  bash deploy/ec2-bootstrap.sh
+# One-shot bootstrap for a fresh Ubuntu 22.04/24.04 instance on Oracle Cloud's
+# "Always Free" ARM (Ampere A1) tier.
+# Run as the default user (ubuntu), not root.
+# Usage:  bash deploy/oracle-bootstrap.sh
 set -euo pipefail
 
 log() { echo "[bootstrap] $*"; }
@@ -60,13 +61,12 @@ log "  To update to latest code:"
 log "    bash ${APP_DIR}/deploy/update.sh"
 log ""
 log "  ACCESS SERVICES (via SSH tunnel from your local machine):"
-log "    ssh -L 8000:localhost:8000 -L 5000:localhost:5000 ubuntu@<EC2_PUBLIC_IP>"
+log "    ssh -L 8000:localhost:8000 -L 5000:localhost:5000 ubuntu@<INSTANCE_PUBLIC_IP>"
 log "    Then open:"
 log "      http://localhost:8000  — ops dashboard"
 log "      http://localhost:5000  — MLflow UI"
 log ""
-log "  RECOMMENDED EC2 INSTANCE TYPES:"
-log "    t3.medium  (2 vCPU /  4 GB) — light workloads, cheapest"
-log "    c5.xlarge  (4 vCPU /  8 GB) — comfortable for full engine runs"
-log "    c5.2xlarge (8 vCPU / 16 GB) — fastest training cycles"
-log "    Storage: 30 GB gp3 EBS"
+log "  RECOMMENDED ORACLE ALWAYS-FREE SHAPES (Ampere A1, ARM64):"
+log "    VM.Standard.A1.Flex  2 OCPU / 12 GB — light workloads, cheapest"
+log "    VM.Standard.A1.Flex  4 OCPU / 24 GB — full engine runs + training"
+log "    Storage: Always Free block storage, up to 200 GB total"

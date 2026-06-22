@@ -191,21 +191,25 @@ def run_validation_cmd() -> bool:
         return False
 
 
-def run_paper_trading() -> bool:
-    """Real-time paper trading: consume live DB prices, track virtual position with prop-firm rules."""
+def run_paper_trading(exchange: Optional[str] = None) -> bool:
+    """Real-time paper trading: consume live DB prices, track virtual position with prop-firm rules.
+
+    Runs all configured exchanges in one cycle by default (no real funds at
+    risk); pass ``exchange`` to restrict to just one.
+    """
     logger.info("=" * 80)
     logger.info("STARTING PAPER TRADING CYCLE")
     logger.info("=" * 80)
     try:
         from cli.db import get_db_connection
-        from trading.paper_trader import run_paper_cycle
+        from trading.paper_trader import run_paper_cycle_all
 
         db = get_db_connection()
         if not db.test_connection():
             logger.error("Database connection failed")
             db.close_pool()
             return False
-        result = run_paper_cycle(db)
+        result = run_paper_cycle_all(db, exchange=exchange)
         db.close_pool()
         return result
     except Exception as e:
@@ -213,11 +217,12 @@ def run_paper_trading() -> bool:
         return False
 
 
-def run_live_trading() -> bool:
+def run_live_trading(exchange: Optional[str] = None) -> bool:
     """Live order execution via CCXT with prop-firm risk enforcement.
 
     Requires LIVE_TRADING_ENABLED=1 in .env.  Without it, runs in shadow mode
-    (logs what it would do, places no orders).
+    (logs what it would do, places no orders). Single exchange per call —
+    pass ``exchange`` or set LIVE_EXCHANGE; real funds means no auto-looping.
     """
     logger.info("=" * 80)
     logger.info("STARTING LIVE TRADING CYCLE")
@@ -231,7 +236,7 @@ def run_live_trading() -> bool:
             logger.error("Database connection failed")
             db.close_pool()
             return False
-        result = run_live_cycle(db)
+        result = run_live_cycle(db, exchange=exchange)
         db.close_pool()
         return result
     except Exception as e:

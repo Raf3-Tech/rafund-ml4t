@@ -14,16 +14,31 @@ from portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
 
-# Minimum consistency ratio to appear in each tier.
-# CONSERVATIVE is set to 0.70 — matches the 70% historical win-probability
-# target for the 1-phase prop challenge (9% profit, 3% DD).
-CONSERVATIVE_MIN_CONSISTENCY = 0.70
-STANDARD_MIN_CONSISTENCY = 0.60
-PERMISSIVE_MIN_CONSISTENCY = 0.50
+# Minimum fraction of windows that must pass (positive Sharpe, sane drawdown)
+# for a strategy-symbol combo to be considered "working." Strategies below
+# this still appear on the leaderboard (with a reason) so it's visible what
+# doesn't work and why, not just what does.
+MIN_CONSISTENCY = 0.50
 
 
 def _score(sharpe: float, win_rate: float, consistency: float) -> float:
     return sharpe * win_rate * consistency
+
+
+def _failure_reason(strategy_name: str, results: Dict) -> str:
+    """Ask the strategy itself why it likely failed (BaseStrategy.describe_failure),
+    falling back to a generic message if the strategy isn't registered or
+    doesn't override it."""
+    try:
+        from strategies.registry import StrategyRegistry
+        strategy = StrategyRegistry.instantiate(strategy_name)
+        return strategy.describe_failure(results)
+    except Exception:
+        return (
+            f"pass_ratio={results.get('pass_ratio', 0):.2f} below the "
+            f"{MIN_CONSISTENCY:.0%} consistency floor "
+            f"(sharpe={results.get('sharpe_ratio', 0):.2f})"
+        )
 
 
 def _fetch_returns_history(db) -> pd.DataFrame:
@@ -127,17 +142,16 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         if n_total == 0:
             continue
 
-        n_cons = int(group["conservative_pass"].sum())
-        n_std = int(group["standard_pass"].sum())
-        n_perm = int(group["permissive_pass"].sum())
-
-        cons_ratio = n_cons / n_total
-        std_ratio = n_std / n_total
-        perm_ratio = n_perm / n_total
+        # permissive_pass is the least restrictive per-window flag already
+        # computed by the engine (positive Sharpe, sane drawdown) — used as
+        # the single consistency measure now that there's no tier system.
+        n_pass = int(group["permissive_pass"].sum())
+        pass_ratio = n_pass / n_total
 
         avg_sharpe = float(group["sharpe_ratio"].mean())
         avg_dd = float(group["max_drawdown_pct"].mean())
         avg_wr = float(group["win_rate_pct"].mean())
+        total_num_trades = int(group["num_trades"].sum())
 
         # Dominant regime description
         trend_avg = float(group["regime_trend"].mean())
@@ -152,23 +166,15 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         except Exception:
             params_dict = {}
 
-        # Determine which tiers this combo qualifies for
-        qualifies_conservative = cons_ratio >= CONSERVATIVE_MIN_CONSISTENCY
-        qualifies_standard = std_ratio >= STANDARD_MIN_CONSISTENCY
-        qualifies_permissive = perm_ratio >= PERMISSIVE_MIN_CONSISTENCY
-
-        if qualifies_conservative:
-            best_tier = "CONSERVATIVE"
-        elif qualifies_standard:
-            best_tier = "STANDARD"
-        elif qualifies_permissive:
-            best_tier = "PERMISSIVE"
-        else:
-            continue  # Does not qualify for any tier
-
-        score_cons = _score(avg_sharpe, avg_wr, cons_ratio) if qualifies_conservative else 0.0
-        score_std = _score(avg_sharpe, avg_wr, std_ratio) if qualifies_standard else 0.0
-        score_perm = _score(avg_sharpe, avg_wr, perm_ratio) if qualifies_permissive else 0.0
+        qualifies = pass_ratio >= MIN_CONSISTENCY
+        score = _score(avg_sharpe, avg_wr, pass_ratio) if qualifies else 0.0
+        reason = "" if qualifies else _failure_reason(strategy_name, {
+            "num_trades": total_num_trades,
+            "sharpe_ratio": avg_sharpe,
+            "max_drawdown_pct": avg_dd,
+            "win_rate_pct": avg_wr,
+            "pass_ratio": pass_ratio,
+        })
 
         records.append({
             "strategy_name": strategy_name,
@@ -178,46 +184,26 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
             "avg_max_dd_pct": round(avg_dd, 2),
             "avg_win_rate_pct": round(avg_wr, 1),
             "n_windows": n_total,
-            "cons_ratio": round(cons_ratio, 3),
-            "std_ratio": round(std_ratio, 3),
-            "perm_ratio": round(perm_ratio, 3),
-            "best_tier": best_tier,
+            "total_num_trades": total_num_trades,
+            "pass_ratio": round(pass_ratio, 3),
             "regime": regime_label,
-            "score_conservative": round(score_cons, 4),
-            "score_standard": round(score_std, 4),
-            "score_permissive": round(score_perm, 4),
-            "qualifies_conservative": qualifies_conservative,
-            "qualifies_standard": qualifies_standard,
-            "qualifies_permissive": qualifies_permissive,
+            "score": round(score, 4),
+            "qualifies": qualifies,
+            "reason": reason,
         })
 
     if not records:
-        logger.warning("No strategy-symbol combinations meet minimum consistency thresholds.")
+        logger.warning("No engine_results rows to build a leaderboard from.")
         return pd.DataFrame()
 
     result = pd.DataFrame(records)
 
-    # Filter by requested tier
+    # tier kept as a CLI-compatible filter: any truthy value means
+    # "qualifying only," since there's a single bar now rather than tiers.
     if tier:
-        tier_upper = tier.upper()
-        col_map = {
-            "CONSERVATIVE": "qualifies_conservative",
-            "STANDARD": "qualifies_standard",
-            "PERMISSIVE": "qualifies_permissive",
-        }
-        col = col_map.get(tier_upper)
-        if col:
-            result = result[result[col]]
-            result = result.sort_values(f"score_{tier_upper.lower()}", ascending=False)
-        else:
-            logger.warning("Unknown tier '%s'. Valid: conservative, standard, permissive", tier)
-    else:
-        # Sort by CONSERVATIVE score, then STANDARD, then PERMISSIVE
-        result = result.sort_values(
-            ["score_conservative", "score_standard", "score_permissive"],
-            ascending=False,
-        )
+        result = result[result["qualifies"]]
 
+    result = result.sort_values(["qualifies", "score"], ascending=[False, False])
     result = result.reset_index(drop=True)
     result.index += 1
 
@@ -232,32 +218,35 @@ def print_leaderboard(lb: pd.DataFrame, tier: Optional[str] = None) -> None:
         print("No leaderboard results available.")
         return
 
-    tier_label = tier.upper() if tier else "ALL TIERS"
+    label = "QUALIFYING ONLY" if tier else "ALL STRATEGIES x SYMBOLS"
     print("=" * 100)
-    print(f"STRATEGY LEADERBOARD — {tier_label}")
+    print(f"STRATEGY LEADERBOARD — {label}")
     print("=" * 100)
 
     header = (
         f"{'#':>4} | {'Strategy':25} | {'Symbol':10} | {'Sharpe':7} | {'MaxDD':6} | "
-        f"{'WinRate':7} | {'Windows':7} | {'Tier':13} | {'Regime'}"
+        f"{'WinRate':7} | {'Windows':7} | {'Pass%':6} | {'Regime'}"
     )
     print(header)
     print("-" * len(header))
 
     for rank, row in lb.iterrows():
         params_str = ", ".join(f"{k}={v}" for k, v in row["params"].items()) if row["params"] else ""
+        status = "OK" if row["qualifies"] else "FAIL"
         alloc = row.get("risk_parity_alloc_pct", 0.0)
         print(
             f"{rank:>4} | {row['strategy_name']:25} | {row['symbol']:10} | "
             f"{row['avg_sharpe']:7.2f} | {row['avg_max_dd_pct']:6.1f} | "
             f"{row['avg_win_rate_pct']:7.1f} | {row['n_windows']:7} | "
-            f"{row['best_tier']:13} | {alloc:5.1f}% | {row['regime']}"
+            f"{row['pass_ratio']*100:5.1f}% | [{status}] alloc={alloc:.1f}% {row['regime']}"
         )
         if params_str:
             print(f"{'':4}   params: {params_str}")
+        if row["reason"]:
+            print(f"{'':4}   why: {row['reason']}")
 
     print("=" * 100)
-    print(f"Total qualifying strategies: {len(lb)}")
+    print(f"Qualifying: {int(lb['qualifies'].sum())} / {len(lb)} strategy-symbol combos")
 
 
 def write_leaderboard_md(lb: pd.DataFrame, tier: Optional[str] = None) -> None:
@@ -265,21 +254,22 @@ def write_leaderboard_md(lb: pd.DataFrame, tier: Optional[str] = None) -> None:
     project_root = Path(__file__).resolve().parent.parent
     out_path = project_root / "LEADERBOARD.md"
 
-    tier_label = tier.upper() if tier else "ALL TIERS"
+    label = "QUALIFYING ONLY" if tier else "ALL STRATEGIES x SYMBOLS"
     lines = [
-        f"# Raf3nd Strategy Leaderboard — {tier_label}",
+        f"# Raf3nd Strategy Leaderboard — {label}",
         "",
-        "| Rank | Strategy | Symbol | Sharpe | MaxDD | WinRate | Windows | Tier | Regime |",
-        "|------|----------|--------|--------|-------|---------|---------|------|--------|",
+        "| Rank | Strategy | Symbol | Sharpe | MaxDD | WinRate | Windows | Pass% | Status | Regime | Why (if failing) |",
+        "|------|----------|--------|--------|-------|---------|---------|-------|--------|--------|-------------------|",
     ]
 
     for rank, row in lb.iterrows():
         params_str = str(row["params"]) if row["params"] else ""
+        status = "OK" if row["qualifies"] else "FAIL"
         lines.append(
             f"| {rank} | {row['strategy_name']} `{params_str}` | {row['symbol']} | "
             f"{row['avg_sharpe']:.2f} | {row['avg_max_dd_pct']:.1f}% | "
             f"{row['avg_win_rate_pct']:.1f}% | {row['n_windows']} | "
-            f"{row['best_tier']} | {row['regime']} |"
+            f"{row['pass_ratio']*100:.1f}% | {status} | {row['regime']} | {row['reason']} |"
         )
 
     out_path.write_text("\n".join(lines) + "\n")
@@ -290,8 +280,10 @@ def run_leaderboard_cmd(db, tier: Optional[str] = None) -> bool:
     """Entry point called from main.py leaderboard command."""
     lb = build_leaderboard(db, tier=tier)
     if lb.empty:
-        print("No results qualify for the leaderboard yet.")
-        print("Run: python main.py engine   (to populate engine_results)")
+        if tier:
+            print("No strategy-symbol combos currently qualify. Run without --tier to see all results and why they failed.")
+        else:
+            print("No engine_results yet. Run: python main.py engine")
         return False
 
     print_leaderboard(lb, tier=tier)
@@ -328,4 +320,5 @@ def _print_classifier_recommendations(lb: pd.DataFrame) -> None:
         print("=== Recommended Strategies for Current Market Regime ===")
         top5 = lb.head(5)
         for rank, row in top5.iterrows():
-            print(f"  {rank}. {row['strategy_name']} on {row['symbol']} ({row['best_tier']}) — {row['regime']}")
+            status = "OK" if row["qualifies"] else "FAIL"
+            print(f"  {rank}. {row['strategy_name']} on {row['symbol']} [{status}] — {row['regime']}")

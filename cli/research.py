@@ -13,7 +13,7 @@ def run_research_cmd(
     strategy_filter: Optional[str] = None,
     symbol_filter: Optional[str] = None,
     top_n: int = 5,
-    tier_filter: Optional[str] = None,
+    qualifying_only: bool = False,
     dry_run: bool = False,
 ) -> bool:
     try:
@@ -31,7 +31,7 @@ def run_research_cmd(
             strategy_filter=strategy_filter,
             symbol_filter=symbol_filter,
             top_n=top_n,
-            tier_filter=tier_filter,
+            qualifying_only=qualifying_only,
             dry_run=dry_run,
         )
         db.close_pool()

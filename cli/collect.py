@@ -41,7 +41,7 @@ def collect_data(full_history: bool = True) -> bool:
 
         for symbol in symbols:
             try:
-                latest = db.get_latest_timestamp(symbol)
+                latest = db.get_latest_timestamp(symbol, exchange="binance")
                 if full_history or latest is None:
                     start_date = default_start
                     logger.info(f"[{symbol}] Full history from {start_date.date()}")
@@ -59,7 +59,7 @@ def collect_data(full_history: bool = True) -> bool:
                     to_date=end_date,
                 )
                 if not collector.last_collection_df.empty:
-                    inserted = db.insert_prices(collector.last_collection_df)
+                    inserted = db.insert_prices(collector.last_collection_df, exchange="binance")
                     total_inserted += inserted
                     logger.info(f"[OK] {symbol}: {inserted} new rows (fetched {result.records_fetched})")
                 else:
@@ -136,7 +136,7 @@ def collect_kraken_data(full_history: bool = True) -> bool:
 
         for symbol in symbols:
             try:
-                latest = db.get_latest_timestamp(symbol)
+                latest = db.get_latest_timestamp(symbol, exchange="kraken")
                 if full_history or latest is None:
                     start_date = default_start
                     logger.info(f"[{symbol}] Full history from {start_date.date()}")
@@ -154,7 +154,7 @@ def collect_kraken_data(full_history: bool = True) -> bool:
                     to_date=end_date,
                 )
                 if not collector.last_collection_df.empty:
-                    inserted = db.insert_prices(collector.last_collection_df)
+                    inserted = db.insert_prices(collector.last_collection_df, exchange="kraken")
                     total_inserted += inserted
                     logger.info(f"[OK] {symbol}: {inserted} new rows (fetched {result.records_fetched})")
                 else:
