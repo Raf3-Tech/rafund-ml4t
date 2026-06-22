@@ -1,6 +1,6 @@
 # Raf3nd ML4T
 
-A research-grade, multi-strategy walk-forward backtesting engine for cryptocurrency markets. Phases 1–6 are functionally complete.
+A research-grade, multi-strategy walk-forward backtesting engine for cryptocurrency markets, with paper and live trading on top of the same signal path.
 
 > **Status: Research-grade / pre-production.** Numbers are structurally sound but known limitations (documented below) mean no headline metric should be taken as production-validated. Read the Known Limitations section before drawing any conclusions from backtest results.
 
@@ -8,7 +8,7 @@ A research-grade, multi-strategy walk-forward backtesting engine for cryptocurre
 
 ## What This Is
 
-Raf3nd ML4T is a quantitative trading research platform built around a walk-forward window engine that ranks strategies across three regime tiers (CONSERVATIVE / STANDARD / PERMISSIVE). It supports 12 strategies spanning single-asset, pairs, and perpetual-funding approaches, with ML-assisted regime detection, model lifecycle management, and an ops dashboard.
+Raf3nd ML4T is a quantitative trading research platform built around a walk-forward window engine that ranks strategies across three regime tiers (CONSERVATIVE / STANDARD / PERMISSIVE). It supports 13 strategies spanning single-asset, pairs, and perpetual-funding approaches, with ML-assisted regime detection, model lifecycle management, an ops dashboard, and a trade journal. Market data is collected from three exchanges (Binance, Kraken, HTX), and accepted strategies can be run as paper trades or routed to live limit orders.
 
 ---
 
@@ -17,7 +17,7 @@ Raf3nd ML4T is a quantitative trading research platform built around a walk-forw
 ```
 rafund-ml4t/
 ├── backtesting/
-│   ├── engine.py              # Single-asset backtest engine (mark-to-market, prop-firm rules)
+│   ├── engine.py              # Single-asset backtest engine (mark-to-market, risk controls)
 │   ├── window_engine.py       # Walk-forward window engine — dispatches all three strategy kinds
 │   ├── engine_eval.py         # Pairs evaluation helpers
 │   ├── costs.py               # Transaction cost model (flat + slippage)
@@ -29,11 +29,11 @@ rafund-ml4t/
 │   └── persist.py             # Result persistence helpers
 │
 ├── strategies/
-│   ├── base.py                # BaseSingleAssetStrategy / BasePairsStrategy contracts
+│   ├── base.py                # BaseStrategy / BasePairsStrategy contracts
 │   ├── registry.py            # StrategyRegistry — decorator-based, agents discover strategies without parsing main.py
 │   ├── stat_arb.py            # StatArbStrategy (unified signal core) + StatArbPairsStrategy
 │   ├── funding_rate_arb.py    # FundingRateArb (8h perpetual carry)
-│   ├── factor_model.py        # ML factor model strategy
+│   ├── smc_breakout.py        # SMC Breakout — structure/BOS + premium-discount zone + engulfing-bar trigger
 │   ├── ema_crossover.py
 │   ├── macd.py
 │   ├── rsi_extremes.py
@@ -44,6 +44,11 @@ rafund-ml4t/
 │   ├── supertrend.py
 │   ├── dca.py
 │   └── hodl_rebalance.py
+│
+├── trading/
+│   ├── position.py            # PositionState — persisted paper/live position + risk-control state
+│   ├── paper_trader.py        # Paper trading cycle: top accepted strategy → signal → virtual fill → journal
+│   └── live_trader.py         # CCXT limit-order execution (opt-in, capped notional, per-exchange API keys)
 │
 ├── monitoring/
 │   ├── leaderboard.py         # Strategy leaderboard scoring (score = sharpe×win_rate×consistency)
@@ -74,6 +79,8 @@ rafund-ml4t/
 │   ├── clear_database.py      # DB maintenance
 │   └── collectors/
 │       ├── binance_collector.py
+│       ├── kraken_collector.py
+│       ├── htx_collector.py
 │       └── binance_funding_collector.py  # 8h funding rate collector
 │
 ├── features/
@@ -84,26 +91,41 @@ rafund-ml4t/
 │   ├── triple_barrier.py      # Triple-barrier label generation
 │   └── barrier_ga.py          # GA-assisted barrier tuning
 │
+├── cli/
+│   ├── collect.py             # Per-exchange OHLCV + funding-rate collection
+│   ├── features.py            # Feature + signal generation
+│   ├── backtest.py            # Single backtest, validation, full pipeline, paper/live entry points
+│   ├── engine.py               # Walk-forward engine command
+│   ├── research.py            # Closed-loop research pipeline + leaderboard command
+│   ├── models_cmd.py          # train-classifier / retrain / drift / model status
+│   └── db.py                  # DB maintenance commands
+│
 ├── config/
 │   ├── settings.yaml          # Strategy + engine parameters
 │   ├── constants.py           # PERIODS_PER_YEAR = 365 (24/7 crypto)
 │   ├── loader.py              # Config loading
+│   ├── logging_config.py      # Logging setup
+│   ├── paths.py                # Path resolution
 │   └── mlflow_config.py       # MLflow run utilities
 │
 ├── alembic/
-│   └── versions/
-│       ├── 0001_...           # Initial schema
-│       ├── 0002_...           # engine_results table
-│       └── 0003_add_engine_results_funding_rates.py  # funding_rates table
+│   └── versions/               # 0001 baseline → 0009 (drift reports, engine_results/funding_rates,
+│                                # research_decisions, paper trading, exchange column, trade journal)
 │
 ├── research/
 │   └── pipeline.py            # Closed-loop research pipeline: propose → engine run → gate → JSONL decision log
 │
-├── tests/                     # 299 passed, 1 xpassed
+├── deploy/
+│   ├── oracle-bootstrap.sh    # One-shot bootstrap for a fresh Oracle Cloud "Always Free" ARM instance (git clone + Docker Compose)
+│   └── update.sh              # Manual update: git pull + rebuild + restart services on the running instance
+│
+├── tests/                     # 349 passed
 ├── docs/
+│   ├── CANDLESTICK_PATTERNS.md          # Objective candlestick patterns (engulfing bar) feeding SMC Breakout
+│   ├── STRATEGY_ENGINE_DESIGN.md
 │   ├── QUANT_AUDIT_REPORT.md
-│   └── STRATEGY_ENGINE_DESIGN.md
-├── .github/workflows/ci.yml   # CI with ratcheting coverage gate
+│   └── ANALYSIS_ROLLING_WINDOW_PROBLEM.md
+├── docker-compose.yml          # trainer (continuous engine/research loop) + dashboard services
 ├── main.py                    # CLI entry point
 ├── requirements.txt
 └── requirements.lock          # Pinned reproducible environment
@@ -117,18 +139,22 @@ rafund-ml4t/
 |---|---|---|
 | 0 | Regime tiers (CONSERVATIVE/STANDARD/PERMISSIVE) | ✅ complete |
 | 1 | Unified signal path | ✅ complete — all call sites route through `StatArbStrategy.signals_from_pair_prices` |
-| 2 | Strategy library (base + 12 strategies) | ✅ complete |
+| 2 | Strategy library (base + 13 strategies) | ✅ complete |
 | 3 | Walk-forward window engine (carry, NaN-guard, √365 Sharpe) | ✅ complete |
 | 4 | Strategy leaderboard with tier scoring | ✅ complete |
 | 5 | Regime classifier | ✅ present (needs 200+ rows of engine results to activate) |
 | 6 | Funding data pipeline (collector + table + strategy + engine dispatch) | ✅ complete |
-| — | Alembic schema (0003: engine_results + funding_rates) | ✅ complete |
-| — | Strategy registry (`strategies/registry.py`) | ✅ complete — `@StrategyRegistry.register` on all 12 strategies; `instantiate_all()` replaces hardcoded list in `run_engine_cmd` |
+| — | Alembic schema (0001–0009: engine_results, funding_rates, research_decisions, paper trading, exchange column, trade journal) | ✅ complete |
+| — | Strategy registry (`strategies/registry.py`) | ✅ complete — `@StrategyRegistry.register` on all 13 strategies; `instantiate_all()` replaces hardcoded list in `run_engine_cmd` |
 | — | Portfolio construction | ✅ complete — `risk_parity_weights`, `kelly_fraction`, `multi_strategy_allocate`; `correlation_matrix`, `diversification_ratio`, `concentration_check` |
 | — | Closed-loop research pipeline (`research/pipeline.py`) | ✅ complete — `python main.py research` runs propose→engine→gate→JSONL |
-| — | CLI (engine, leaderboard, train-classifier, collect --funding, research) | ✅ complete |
+| — | Multi-exchange data (Binance, Kraken, HTX) | ✅ complete — `python main.py collect --exchange {binance,kraken,htx,all}` |
+| — | Paper trading (`trading/paper_trader.py`) | ✅ complete — runs the top accepted strategy per exchange, persists virtual fills to `paper_positions`/`paper_orders` |
+| — | Trade journal (`setup_tag`, `close_reason` on `paper_orders`) | ✅ complete |
+| — | Live trading (`trading/live_trader.py`) | ✅ complete — CCXT limit orders only, opt-in via `LIVE_TRADING_ENABLED=1`, notional-capped |
+| — | CLI (collect, features, engine, leaderboard, train-classifier, research, paper, live) | ✅ complete |
 
-**Test suite: 299 passed, 1 xpassed.**
+**Test suite: 349 passed.**
 
 ---
 
@@ -138,6 +164,8 @@ rafund-ml4t/
 2. **No real engine run yet:** `python main.py engine` has not been run against a populated DB. Synthetic funding Sharpe looked very high on clean sine input — sanity-check on real data is pending.
 3. **`BacktestEngine` reuse (optional / architectural):** the window engine has three private P&L loops (single-asset, pairs, funding). Consolidating onto `BacktestEngine` is an architectural cleanup, not a correctness bug — current loops are tested and produce sane results.
 4. **Portfolio layer not wired into engine:** `risk_parity_weights`, `kelly_fraction`, and `multi_strategy_allocate` exist as tested library utilities but are not yet called per-bar from the engine. Kelly sizing and VaR limits are computed separately and do not feed back into position sizing during a run (see Phase E in AGENTS.md).
+5. **SMC Breakout has no structural stop:** it emits BUY/SELL/HOLD like every other strategy — exits are whatever the engine/paper trader does on opposite-signal or HOLD, not a stop below the order block. Tracked as future work.
+6. **Live trading is unexercised against a real exchange account:** the safety gates (opt-in flag, API-key presence, notional cap, limit-only fills) are implemented and unit-tested, but no live order has yet been placed/verified end-to-end on an exchange.
 
 ---
 
@@ -147,12 +175,12 @@ These are documented research-stage constraints, not hidden bugs:
 
 | Limitation | Where | Impact |
 |---|---|---|
-| **Single-asset mark-to-market** — open single-asset positions contribute $0 to equity | `backtesting/engine.py` | Prop-firm drawdown/daily-loss controls see only realised P&L. Pairs backtest is correctly marked. |
-| **Same-bar fills** — signals and fills resolve on the same bar | `backtesting/engine.py` | Look-ahead bias in execution; next-bar-open fills would be more conservative. |
+| **Single-asset mark-to-market** — open single-asset positions contribute $0 to equity in the *backtest* engine | `backtesting/engine.py` | Drawdown/daily-loss controls in the backtest see only realised P&L. Pairs backtest is correctly marked. Paper/live trading (`trading/position.py`) does mark-to-market correctly. |
+| **Same-bar fills (backtest)** — signals and fills resolve on the same bar | `backtesting/engine.py` | Look-ahead bias in execution; next-bar-open fills would be more conservative. Paper/live trading fills against the next available price/limit order, not same-bar. |
 | **Flat slippage** — cost model uses a fixed fraction regardless of volume or volatility | `backtesting/costs.py` | Understates costs in thin markets; overstates in deep liquid markets. |
 | **`portfolio/` not wired into per-bar engine loop** — `RiskManager` / `PortfolioOptimizer` are library-level utilities (risk-parity allocation, half-Kelly sizing, VaR/CVaR, diversification ratio now present) but not called per-bar from the backtest engine | `portfolio/` | Kelly sizing and VaR limits do not yet feed back into position sizing during an engine run. Phase E in AGENTS.md tracks this. |
-| ~~**Prop-firm control bugs**~~ — daily-loss parenthesization (F2) and leverage-clip clearing daily halt (F3) | `backtesting/engine.py` | **Fixed.** Both controls verified by `tests/test_risk_engine_stress.py`. |
 | **Regime classifier needs data** — the classifier is non-blocking by design but returns `None` until the `engine_results` table has 200+ rows | `models/regime_classifier.py` | Regime-gated decisions fall back to default tier until enough engine runs accumulate. |
+| **Fair Value Gap not used as an entry gate in SMC Breakout** — on this project's daily-bar, 24/7 crypto data a true 3-candle FVG occurs roughly once per 800+ bars | `strategies/smc_breakout.py` | Gating on FVG produced zero trades in walk-forward testing; FVG is defined but not required for entry. Worth revisiting on an intraday timeframe. |
 
 See `RAFUND_MASTER_AUDIT.md`, `docs/QUANT_AUDIT_REPORT.md`, and `RISK_ENGINE_AUDIT.md` for the full audit trail.
 
@@ -193,28 +221,37 @@ For a hosted DB (e.g. Supabase), append `?sslmode=require` to the URL and use th
 ### Collect data
 
 ```bash
-python main.py collect                     # OHLCV from Binance
-python main.py collect --funding           # 8h funding rates
-python main.py features                    # compute features
+python main.py collect                        # OHLCV from Binance (default)
+python main.py collect --exchange kraken       # OHLCV from Kraken
+python main.py collect --exchange htx          # OHLCV from HTX
+python main.py collect --exchange all          # All three exchanges
+python main.py collect --funding               # 8h funding rates (Binance)
+python main.py features                        # compute features
 ```
+
+### Deployment
+
+`deploy/oracle-bootstrap.sh` bootstraps a fresh Oracle Cloud "Always Free" ARM instance (Docker + git clone + `docker compose up`) running the `trainer` (continuous research/engine loop) and `dashboard` services from `docker-compose.yml`. `deploy/update.sh` pulls latest and rebuilds in place. GitHub Actions CI is intentionally not used — updates are manual via SSH.
 
 ---
 
 ## CLI Reference
 
 ```bash
-python main.py collect [--funding]                          # Fetch market / funding data
+python main.py collect [--exchange binance|kraken|htx|all] [--funding]  # Fetch market / funding data
 python main.py features                                     # Compute features
 python main.py backtest                                     # Single backtest run
 python main.py validate                                     # Walk-forward OOS validation
-python main.py retrain                                      # Model retraining cycle
-python main.py drift                                        # Feature drift check
-python main.py engine [--strategy NAME] [--symbol SYM]     # Walk-forward engine: all strategies × all symbols
-python main.py leaderboard [--tier TIER]                    # Print ranked strategy leaderboard
-python main.py train-classifier                             # Train regime classifier
-python main.py research [--strategy NAME] [--symbol SYM]   # Closed-loop research pipeline (propose→backtest→gate)
-python main.py research --dry-run                           # Gate only, skip engine run (re-use existing results)
-python main.py research --top-n 5 --tier conservative       # Top-5 conservative candidates
+python main.py retrain                                       # Model retraining cycle
+python main.py drift                                         # Feature drift check
+python main.py engine [--strategy NAME] [--symbol SYM]      # Walk-forward engine: all strategies × all symbols
+python main.py leaderboard [--tier TIER]                     # Print ranked strategy leaderboard
+python main.py train-classifier                              # Train regime classifier
+python main.py research [--strategy NAME] [--symbol SYM]    # Closed-loop research pipeline (propose→backtest→gate)
+python main.py research --dry-run                            # Gate only, skip engine run (re-use existing results)
+python main.py research --top-n 5 --tier conservative        # Top-5 conservative candidates
+python main.py paper [--exchange binance|kraken|htx]          # Paper trade the top accepted strategy (default: all exchanges)
+python main.py live --exchange binance|kraken|htx             # Live limit-order trading (opt-in, see Known Gaps)
 ```
 
 ---
@@ -222,7 +259,7 @@ python main.py research --top-n 5 --tier conservative       # Top-5 conservative
 ## Running the Test Suite
 
 ```bash
-pytest                     # 299 passed, 1 xpassed (expected)
+pytest                     # 349 passed
 pytest --cov=. -q          # with coverage
 ```
 
@@ -230,17 +267,21 @@ pytest --cov=. -q          # with coverage
 
 ## Architecture Notes
 
-- **Single signal code path (Phase 1):** All three call sites for stat-arb signal generation (signals CLI, pairs backtest, engine_eval) delegate to `StatArbStrategy.signals_from_pair_prices` + `to_db_signals`. No duplicate z-score implementations exist.
+- **Single signal code path (Phase 1):** All call sites for stat-arb signal generation (signals CLI, pairs backtest, engine_eval) delegate to `StatArbStrategy.signals_from_pair_prices` + `to_db_signals`. No duplicate z-score implementations exist.
 - **Window engine dispatch:** `window_engine.py` routes by strategy kind: `timeframe=='8h'` → `_run_funding_strategy`; `BasePairsStrategy` → `_run_pairs_strategy`; else single-asset. Each kind has its own mark-to-market loop with the appropriate annualization factor (√365 daily, √1095 for 8h).
 - **Position carry:** HOLD signals now maintain the open position and mark it to market each bar. Prior to the Phase-3 fix, every HOLD bar flattened the position, producing artificial 1-bar trades.
+- **Multi-exchange data:** `prices`, `paper_positions`, and `paper_orders` all carry an `exchange` column (binance/kraken/htx). Paper and live trading run per-exchange; `python main.py paper` with no `--exchange` cycles all three.
+- **Trading methodology pivot:** strategy research is now anchored on Smart Money Concepts (market structure, break of structure, premium/discount zones — see `strategies/smc_breakout.py`) plus the one objective candlestick pattern (engulfing bar, see `docs/CANDLESTICK_PATTERNS.md`), rather than prop-firm challenge framing. Drawdown/daily-loss risk controls remain in the engine and paper/live trader as risk management, not as a pass/fail challenge gate.
+- **Trade journal:** `paper_orders.setup_tag` and `close_reason` (Alembic 0009) record why a trade was entered and why it was closed, for post-hoc review.
+- **Live trading is limit-orders-only:** every live order is placed at the signal bar's close and given a timeout to fill; unfilled orders are cancelled rather than chased at a worse price (see `trading/live_trader.py`).
 - **Alembic is the schema source of truth.** `data/schema.sql` is a reference overview only; do not load it directly.
 
 ---
 
 ## Disclaimer
 
-**Research and educational use only.** This system has not been validated for live capital deployment. Past backtest performance does not predict future results. All known limitations are documented above — do not treat any headline metric as a production signal until the audit roadmap items (particularly the mark-to-market and prop-firm control bugs) are resolved.
+**Research and educational use only.** This system has not been validated for live capital deployment. Past backtest performance does not predict future results. All known limitations are documented above — do not treat any headline metric as a production signal until the audit roadmap items (particularly the mark-to-market and per-bar portfolio wiring) are resolved.
 
 ---
 
-**Last Updated:** 2026-06-09
+**Last Updated:** 2026-06-22
