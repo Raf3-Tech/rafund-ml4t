@@ -280,7 +280,7 @@ def run_backfill(
             return False
 
         timeframe = timeframe or settings.timeframe
-        if timeframe not in ("1m", "5m", "15m", "1h", "1d"):
+        if timeframe not in ("1m", "5m", "15m", "1h", "4h", "1d"):
             logger.error(f"Unsupported timeframe: {timeframe}")
             db.close_pool()
             return False

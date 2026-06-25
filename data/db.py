@@ -214,6 +214,7 @@ class DatabaseConnection:
             conn = self.get_connection()
             cursor = conn.cursor()
 
+            has_timeframe = 'timeframe' in df.columns
             data = []
             for _, row in df.iterrows():
                 data.append((
@@ -225,12 +226,13 @@ class DatabaseConnection:
                     float(row['close']),
                     float(row['volume']),
                     exchange,
+                    row['timeframe'] if has_timeframe else '1d',
                 ))
 
             query = """
-                INSERT INTO prices (symbol, timestamp, open, high, low, close, volume, exchange)
+                INSERT INTO prices (symbol, timestamp, open, high, low, close, volume, exchange, timeframe)
                 VALUES %s
-                ON CONFLICT (exchange, symbol, timestamp) DO NOTHING
+                ON CONFLICT (exchange, symbol, timeframe, timestamp) DO NOTHING
             """
 
             execute_values(cursor, query, data)
@@ -256,6 +258,7 @@ class DatabaseConnection:
         start_date: datetime = None,
         end_date: datetime = None,
         exchange: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Retrieve price data from database.
@@ -265,6 +268,7 @@ class DatabaseConnection:
             start_date: Start date (optional)
             end_date: End date (optional)
             exchange: Restrict to one exchange (optional; default = all exchanges)
+            timeframe: Restrict to one timeframe (optional; default = all timeframes)
 
         Returns:
             DataFrame with price data
@@ -276,6 +280,10 @@ class DatabaseConnection:
             if exchange:
                 query += " AND exchange = %s"
                 params.append(exchange)
+
+            if timeframe:
+                query += " AND timeframe = %s"
+                params.append(timeframe)
 
             if start_date:
                 query += " AND timestamp >= %s"

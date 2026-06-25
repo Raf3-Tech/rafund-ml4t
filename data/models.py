@@ -9,7 +9,7 @@ from config.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-Timeframe = Literal['1m', '5m', '15m', '1h', '1d']
+Timeframe = Literal['1m', '5m', '15m', '1h', '4h', '1d']
 
 
 class OHLCVRecord(BaseModel):
