@@ -52,6 +52,74 @@ def api_retrain():
     return jsonify({"results": [dataclasses.asdict(r) for r in results]}), 200
 
 
+@bp.route("/api/model-confidence", methods=["GET"])
+def api_model_confidence():
+    """Regime classifier's pass-probability + feature importance for a symbol.
+
+    Scoped to the regime classifier specifically (not an arbitrary production
+    model) because its feature-engineering is fully known (models/regime_classifier.py
+    `_prepare_features`) — surfacing a confidence number for an arbitrary MLflow
+    model would require guessing its feature schema, which risks showing a
+    mislabeled or wrong value. This is real, not fabricated: it's the same
+    `predict_proba` call regime_classifier already makes internally.
+    """
+    import pickle
+    from models.regime_classifier import MODEL_PATH, _prepare_features
+
+    db = current_app.config["DB"]
+    symbol = request.args.get("symbol")
+    target = request.args.get("target", "standard")
+    if not symbol:
+        return jsonify({"available": False, "reason": "symbol is required"}), 400
+    if not MODEL_PATH.exists():
+        return jsonify({"available": False, "reason": "regime classifier not trained yet"})
+
+    row_df = db.read_sql(
+        """
+        SELECT regime_trend, regime_volatility, regime_direction, window_years, symbol
+        FROM engine_results
+        WHERE symbol = %s AND regime_trend IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        [symbol],
+    )
+    if row_df.empty:
+        return jsonify({"available": False, "reason": f"no regime data yet for {symbol}"})
+
+    with open(MODEL_PATH, "rb") as f:
+        bundle = pickle.load(f)
+    model = bundle.get(f"model_{target}") or bundle.get("model")
+    if model is None:
+        return jsonify({"available": False, "reason": "no trained model in bundle"})
+
+    encoder_state = bundle.get("encoder_state", [])
+    X, feature_names, _ = _prepare_features(row_df, fit_encoder=False, encoder_state=encoder_state)
+    try:
+        confidence = float(model.predict_proba(X)[:, 1][0])
+    except Exception as exc:
+        return jsonify({"available": False, "reason": str(exc)}), 500
+
+    importances = None
+    if hasattr(model, "feature_importances_"):
+        importances = dict(zip(feature_names, [float(v) for v in model.feature_importances_]))
+    elif hasattr(model, "coef_"):
+        coefs = model.coef_[0] if model.coef_.ndim > 1 else model.coef_
+        importances = dict(zip(feature_names, [float(v) for v in coefs]))
+
+    top_features = None
+    if importances:
+        top_features = dict(sorted(importances.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5])
+
+    return jsonify({
+        "available": True,
+        "symbol": symbol,
+        "target": target,
+        "confidence": round(confidence, 4),
+        "feature_importance": top_features,
+    })
+
+
 @bp.route("/api/drift-check", methods=["POST"])
 @require_token
 def api_drift_check():

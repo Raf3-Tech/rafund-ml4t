@@ -43,3 +43,11 @@ htmlcov/
 
 # Local model-training output (feature importance plots, tmp JSON)
 tmp/
+
+# Dashboard asset bundle — built by monitoring/static/build.sh (docker build
+# or local `npx esbuild`), never checked in
+monitoring/static/dist/
+node_modules/
+
+# Claude Code local tool state (settings, worktrees) — not part of the app
+.claude/

@@ -26,12 +26,14 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config.logging_config import get_logger
+from trading.alerts import send_alert
 from trading.paper_trader import (
     _close,
     _last_signal,
     _latest_bars,
     _open,
-    _top_strategy,
+    _target_notional,
+    _top_accepted_strategy,
     _update_propfirm,
 )
 from trading.position import load_position, log_order, save_position
@@ -132,6 +134,47 @@ def _fill_price(order: dict, fallback: float) -> float:
     return float(order.get("average") or order.get("price") or fallback)
 
 
+# ── kill switch ────────────────────────────────────────────────────────────────
+
+
+def force_close_live(db, pos) -> dict:
+    """Flatten a live position (real limit order, or in-memory close if
+    LIVE_TRADING_ENABLED=0 / API keys absent) and set manual_halt."""
+    exchange_name = pos.exchange or "binance"
+
+    if pos.is_flat:
+        pos.manual_halt = True
+        save_position(db, pos)
+        send_alert(f"KILL SWITCH — LIVE/{exchange_name}", "Triggered with no open position. Trading halted.")
+        return {"exchange": exchange_name, "closed": False, "manual_halt": True}
+
+    shadow = not _live_enabled() or not _check_api_keys(exchange_name)
+
+    df = _latest_bars(db, pos.symbol, 5, exchange=exchange_name)
+    if df is None or df.empty:
+        return {"exchange": exchange_name, "closed": False, "error": "no price data"}
+    price = float(df["close"].iloc[-1])
+
+    if shadow:
+        pnl = _close(pos, price)
+        log_order(db, pos, "CLOSE", price, pnl=pnl, order_type="shadow", close_reason="kill_switch")
+    else:
+        exchange = _build_exchange(exchange_name)
+        ccxt_side = "sell" if pos.side == "LONG" else "buy"
+        order = _place_limit_order(exchange, pos.symbol, ccxt_side, abs(pos.qty), price)
+        fill = _fill_price(order, price) if order else price
+        oid = order["id"] if order else None
+        pnl = _close(pos, fill)
+        log_order(db, pos, "CLOSE", fill, pnl=pnl, order_type="live", exchange_order_id=oid,
+                  close_reason="kill_switch")
+
+    pos.manual_halt = True
+    save_position(db, pos)
+    logger.warning("live_trader[%s]: KILL SWITCH — closed  pnl=%.2f", exchange_name, pnl)
+    send_alert(f"KILL SWITCH — LIVE/{exchange_name}", f"Closed @ {price:.4f}  pnl={pnl:.2f}. Trading halted.")
+    return {"exchange": exchange_name, "closed": True, "pnl": pnl, "manual_halt": True}
+
+
 # ── main cycle ────────────────────────────────────────────────────────────────
 
 
@@ -153,7 +196,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
     if not shadow and not _check_api_keys(exchange_name):
         return False
 
-    result = _top_strategy(db)
+    result = _top_accepted_strategy(db)
     if result is None:
         logger.info("live_trader[%s]: no accepted strategy yet — skipping", exchange_name)
         return True
@@ -206,7 +249,26 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
         pos.daily_halt = False
 
     current_equity = pos.mark_to_market(price)
+    was_account_failed, was_daily_halt = pos.account_failed, pos.daily_halt
     _update_propfirm(pos, current_equity, cfg)
+
+    mode_tag = "shadow" if shadow else "LIVE"
+    if pos.account_failed and not was_account_failed:
+        send_alert(
+            f"ACCOUNT FAILED — {mode_tag}/{exchange_name}/{symbol}",
+            f"Equity {current_equity:.2f} breached the drawdown floor "
+            f"({cfg.max_drawdown_pct:.0%} of {cfg.account_size:.2f}). Trading halted.",
+        )
+    elif pos.daily_halt and not was_daily_halt:
+        send_alert(
+            f"DAILY LOSS HALT — {mode_tag}/{exchange_name}/{symbol}",
+            f"Equity {current_equity:.2f} hit the daily loss limit "
+            f"({cfg.max_daily_loss_pct:.0%} of {cfg.account_size:.2f}). Halted until tomorrow.",
+        )
+
+    if pos.manual_halt:
+        save_position(db, pos)
+        return True
 
     # Force-close on limit breach
     if (pos.account_failed or pos.daily_halt) and not pos.is_flat:
@@ -244,7 +306,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
     if target is not None:
         if pos.is_flat:
             if not pos.daily_halt:
-                notional = min(pos.equity * cfg.leg_allocation_pct, _max_notional())
+                notional = _target_notional(pos, cfg, extra_cap=_max_notional())
                 qty = notional / price
                 if shadow:
                     logger.info("live_trader: [shadow] would OPEN %s %s qty=%.6f @ %.4f",
@@ -267,7 +329,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                 pnl = _close(pos, price)
                 log_order(db, pos, "CLOSE", price, pnl=pnl, order_type="shadow", close_reason="position_flip")
                 if not pos.daily_halt:
-                    notional = min(pos.equity * cfg.leg_allocation_pct, _max_notional())
+                    notional = _target_notional(pos, cfg, extra_cap=_max_notional())
                     _open(pos, target, price, notional)
                     log_order(db, pos, "OPEN", price, order_type="shadow", setup_tag=setup_tag)
             else:
@@ -280,7 +342,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                           close_reason="position_flip")
                 logger.info("live_trader: CLOSE (flip) @ %.4f  pnl=%.2f", fill, pnl)
                 if not pos.daily_halt:
-                    notional = min(pos.equity * cfg.leg_allocation_pct, _max_notional())
+                    notional = _target_notional(pos, cfg, extra_cap=_max_notional())
                     qty = notional / fill
                     ccxt_side2 = "buy" if target == "LONG" else "sell"
                     order2 = _place_limit_order(exchange, symbol, ccxt_side2, qty, fill)

@@ -94,6 +94,11 @@ def main() -> int:
     parser.add_argument("--from", dest="date_from")
     parser.add_argument("--to", dest="date_to")
     parser.add_argument("--timeframe")
+    parser.add_argument(
+        "--replay-days", type=int, dest="replay_days",
+        help="paper mode: replay the paper-trading mechanism over this many days of "
+             "already-collected price history instead of running one live cycle.",
+    )
     args = parser.parse_args()
 
     logger.info("=" * 80)
@@ -201,9 +206,13 @@ def main() -> int:
             success = run_full_pipeline()
 
         elif args.mode == "paper":
-            from cli.backtest import run_paper_trading
             exchange = None if args.exchange in (None, "all") else args.exchange
-            success = run_paper_trading(exchange=exchange)
+            if args.replay_days:
+                from cli.backtest import run_paper_backfill
+                success = run_paper_backfill(exchange=exchange, lookback_days=args.replay_days)
+            else:
+                from cli.backtest import run_paper_trading
+                success = run_paper_trading(exchange=exchange)
 
         elif args.mode == "live":
             from cli.backtest import run_live_trading

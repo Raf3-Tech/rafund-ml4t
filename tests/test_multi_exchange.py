@@ -57,6 +57,21 @@ def test_position_round_trip_preserves_exchange(db):
         _cleanup(db, [run_id])
 
 
+def test_manual_halt_round_trip(db):
+    run_id = "test_paper_kraken_halt"
+    try:
+        pos = load_position(db, run_id, initial_capital=1000.0, strategy_name="Test",
+                             symbol=_SYMBOL, exchange="kraken")
+        assert pos.manual_halt is False
+        pos.manual_halt = True
+        save_position(db, pos)
+
+        reloaded = load_position(db, run_id, exchange="kraken")
+        assert reloaded.manual_halt is True
+    finally:
+        _cleanup(db, [run_id])
+
+
 def test_two_exchanges_with_same_strategy_dont_collide(db):
     run_binance = "test_paper_binance_collide"
     run_kraken = "test_paper_kraken_collide"

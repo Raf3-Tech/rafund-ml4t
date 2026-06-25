@@ -42,13 +42,13 @@ def api_data_status():
     db = current_app.config["DB"]
     try:
         df = db.read_sql("""
-            SELECT symbol,
+            SELECT symbol, exchange,
                    MIN(timestamp) AS earliest,
                    MAX(timestamp) AS latest,
                    COUNT(*)       AS bars
             FROM prices
-            GROUP BY symbol
-            ORDER BY symbol
+            GROUP BY symbol, exchange
+            ORDER BY symbol, exchange
         """)
         now = datetime.now(timezone.utc)
         rows = []
@@ -60,6 +60,7 @@ def api_data_status():
             stale = max(0, (now - latest).days)
             rows.append({
                 "symbol": r["symbol"],
+                "exchange": r["exchange"],
                 "earliest": str(r["earliest"])[:10],
                 "latest": str(r["latest"])[:10],
                 "bars": int(r["bars"]),
@@ -71,19 +72,65 @@ def api_data_status():
         return jsonify({"error": str(exc)}), 500
 
 
+_EXCHANGES = ("binance", "kraken", "htx", "all")
+
+
 @bp.route("/api/collect", methods=["POST"])
 @require_token
 def api_collect():
     body = request.get_json(silent=True) or {}
     funding = bool(body.get("funding", False))
+    exchange = body.get("exchange", "binance")
+    if exchange not in _EXCHANGES:
+        return jsonify({"error": f"exchange must be one of {_EXCHANGES}"}), 400
     job_type = "collect_funding" if funding else "collect"
     if has_running_job(job_type):
         return jsonify({"error": f"{job_type} already running"}), 409
-    cmd = [sys.executable, "main.py", "collect"]
+    cmd = [sys.executable, "main.py", "collect", "--exchange", exchange]
     if funding:
         cmd.append("--funding")
     job_id = submit_job(job_type, cmd)
-    logger.info("pipeline_collect_started", job_id=job_id, funding=funding)
+    logger.info("pipeline_collect_started", job_id=job_id, funding=funding, exchange=exchange)
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/api/features", methods=["POST"])
+@require_token
+def api_features():
+    if has_running_job("features"):
+        return jsonify({"error": "features already running"}), 409
+    job_id = submit_job("features", [sys.executable, "main.py", "features"])
+    logger.info("pipeline_features_started", job_id=job_id)
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/api/backtest", methods=["POST"])
+@require_token
+def api_backtest():
+    if has_running_job("backtest"):
+        return jsonify({"error": "backtest already running"}), 409
+    job_id = submit_job("backtest", [sys.executable, "main.py", "backtest"])
+    logger.info("pipeline_backtest_started", job_id=job_id)
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/api/validate", methods=["POST"])
+@require_token
+def api_validate():
+    if has_running_job("validate"):
+        return jsonify({"error": "validate already running"}), 409
+    job_id = submit_job("validate", [sys.executable, "main.py", "validate"])
+    logger.info("pipeline_validate_started", job_id=job_id)
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/api/train-classifier", methods=["POST"])
+@require_token
+def api_train_classifier():
+    if has_running_job("train_classifier"):
+        return jsonify({"error": "train-classifier already running"}), 409
+    job_id = submit_job("train_classifier", [sys.executable, "main.py", "train-classifier"])
+    logger.info("pipeline_train_classifier_started", job_id=job_id)
     return jsonify({"job_id": job_id}), 202
 
 

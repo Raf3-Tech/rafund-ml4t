@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from flask import Blueprint, current_app, render_template, request
 
 from models.retraining_scheduler import run_drift_check
@@ -14,13 +17,37 @@ logger = structlog.get_logger(__name__)
 
 bp = Blueprint("pages", __name__)
 
+_MANIFEST_PATH = Path(__file__).resolve().parent.parent / "static" / "dist" / "manifest.json"
+_DEV_ASSETS = {"css": "/static/src/dashboard.css", "js": "/static/src/dashboard.js"}
+
+
+def _asset_paths() -> dict:
+    """Hashed bundle paths from the esbuild manifest, or unbundled dev sources.
+
+    The manifest only exists after `monitoring/static/build.sh` has run (normally
+    during `docker build`) — falling back to the raw src/ files keeps local
+    development working without requiring Node.
+    """
+    if _MANIFEST_PATH.exists():
+        try:
+            manifest = json.loads(_MANIFEST_PATH.read_text())
+            return {
+                "css": f"/static/dist/{manifest['css']}",
+                "js": f"/static/dist/{manifest['js']}",
+            }
+        except Exception:
+            logger.warning("dashboard_manifest_unreadable", path=str(_MANIFEST_PATH))
+    return _DEV_ASSETS
+
 
 @bp.route("/", methods=["GET"])
 def index():
     db = current_app.config["DB"]
     model_rows = get_model_status(db)
     drift_rows = get_drift_status(db)
-    return render_template("dashboard.html", model_rows=model_rows, drift_rows=drift_rows)
+    return render_template(
+        "dashboard.html", model_rows=model_rows, drift_rows=drift_rows, assets=_asset_paths(),
+    )
 
 
 @bp.route("/drift", methods=["GET"])

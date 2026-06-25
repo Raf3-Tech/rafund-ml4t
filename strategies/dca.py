@@ -21,12 +21,22 @@ class DCAStrategy(BaseStrategy):
     param_grid = {"interval_days": 7}
 
     def generate_signals(self, df: pd.DataFrame, params: Dict) -> pd.Series:
+        """BUY on calendar days where epoch-day % interval_days == 0.
+
+        Anchored to absolute calendar time rather than position within `df`
+        — live/paper trading always passes a freshly-sliced "last N bars"
+        window, so a position-relative schedule (e.g. "every 7th row") would
+        land on the same bar-offset every single cycle and could permanently
+        miss every buy day. Calendar-anchoring makes the schedule the same
+        regardless of where the window happens to start.
+        """
         interval = int(params.get("interval_days", self.param_grid["interval_days"]))
-        signals = ["HOLD"] * len(df)
-        # Bar 0 is warmup; first BUY at bar `interval`
-        for i in range(interval, len(df), interval):
-            signals[i] = "BUY"
-        return pd.Series(signals, index=df.index)
+        epoch_day = (
+            pd.to_datetime(df["timestamp"], utc=True).dt.floor("D") - pd.Timestamp("1970-01-01", tz="UTC")
+        ).dt.days
+        signals = (epoch_day % interval == 0).map({True: "BUY", False: "HOLD"})
+        signals.iloc[: self.min_bars] = "HOLD"  # warmup
+        return signals
 
     def describe_failure(self, results: Dict) -> str:
         dd = results.get("max_drawdown_pct", 0.0)

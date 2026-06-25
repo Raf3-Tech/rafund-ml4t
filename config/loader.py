@@ -239,6 +239,30 @@ class Settings:
             "MAX_LEVERAGE", float(eval_cfg.get("max_leverage", 5.0))
         )
 
+        # Gap-risk safety clip for live/paper position sizing (see
+        # trading.position.max_safe_notional): caps a single new position so
+        # that even a `max_adverse_move_pct`-sized adverse move right after
+        # entry only burns `risk_buffer_pct` of the remaining headroom to the
+        # daily-loss/drawdown floor, instead of leg_allocation_pct alone
+        # (which has no awareness of how close equity already is to the
+        # floor, or of single-bar gap risk). Defaults are calibrated to the
+        # worst single-bar BTC move observed in our own price history
+        # (~40% on "Black Thursday", 2020-03-12).
+        self.max_adverse_move_pct = _env_float(
+            "MAX_ADVERSE_MOVE_PCT", float(eval_cfg.get("max_adverse_move_pct", 0.40))
+        )
+        self.risk_buffer_pct = _env_float(
+            "RISK_BUFFER_PCT", float(eval_cfg.get("risk_buffer_pct", 0.7))
+        )
+
+        # Email alerts on risk events (halts, kill switch, account failure).
+        # Silently disabled (logged, not sent) unless all three are set.
+        self.alert_email_to = _env("ALERT_EMAIL_TO", "")
+        self.smtp_host = _env("SMTP_HOST", "smtp.gmail.com")
+        self.smtp_port = _env_int("SMTP_PORT", 587)
+        self.smtp_user = _env("SMTP_USER", "")
+        self.smtp_password = _env("SMTP_PASSWORD", "")
+
         self.entry_threshold = _env_float(
             "ENTRY_THRESHOLD", float(strat.get("entry_threshold", STAT_ARB_ENTRY_Z))
         )
@@ -315,6 +339,14 @@ class Settings:
         _check(
             0.0 < self.leg_allocation_pct <= 1.0,
             f"leg_allocation_pct must be in (0, 1], got {self.leg_allocation_pct}",
+        )
+        _check(
+            0.0 < self.max_adverse_move_pct <= 1.0,
+            f"max_adverse_move_pct must be in (0, 1], got {self.max_adverse_move_pct}",
+        )
+        _check(
+            0.0 < self.risk_buffer_pct <= 1.0,
+            f"risk_buffer_pct must be in (0, 1], got {self.risk_buffer_pct}",
         )
         _check(self.lookback > 0, f"lookback must be > 0, got {self.lookback}")
         _check(

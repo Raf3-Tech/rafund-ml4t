@@ -217,6 +217,32 @@ def run_paper_trading(exchange: Optional[str] = None) -> bool:
         return False
 
 
+def run_paper_backfill(exchange: Optional[str] = None, lookback_days: int = 180) -> bool:
+    """Replay paper trading day-by-day over already-collected price history
+    so the journal/equity-curve populate with real results immediately,
+    instead of waiting for live signals to trickle in one bar at a time.
+    """
+    logger.info("=" * 80)
+    logger.info("STARTING PAPER TRADING BACKFILL (%d days)", lookback_days)
+    logger.info("=" * 80)
+    try:
+        from cli.db import get_db_connection
+        from trading.paper_trader import backfill_paper_cycle_all
+
+        db = get_db_connection()
+        if not db.test_connection():
+            logger.error("Database connection failed")
+            db.close_pool()
+            return False
+        n_orders = backfill_paper_cycle_all(db, exchange=exchange, lookback_days=lookback_days)
+        logger.info("Backfill complete — %d orders written", n_orders)
+        db.close_pool()
+        return True
+    except Exception as e:
+        logger.error("Paper backfill error: %s", str(e), exc_info=True)
+        return False
+
+
 def run_live_trading(exchange: Optional[str] = None) -> bool:
     """Live order execution via CCXT with prop-firm risk enforcement.
 
