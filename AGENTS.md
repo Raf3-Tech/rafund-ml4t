@@ -9,6 +9,18 @@ next agent doesn't re-create forks or clobber work.
 > Instructions" (multi-strategy, multi-window walk-forward engine → ranked
 > leaderboard across CONSERVATIVE/STANDARD/PERMISSIVE tiers).
 
+> **⚠️ Phases A–F below predate a methodology pivot (commit `d57cfd7`, 2026-06-20)
+> that dropped the prop-firm challenge framing entirely** (no more pass/fail tiers
+> as the trading goal — drawdown/daily-loss controls remain only as risk
+> management). Phase A's "prop-firm bug fixes" and the CONSERVATIVE/STANDARD/
+> PERMISSIVE tier language are stale relative to that pivot. SMC Breakout, the
+> trade journal, multi-exchange paper trading, and the trade journal/backfill
+> work below were all built *after* the pivot and are not reflected in the Phase
+> A–F backlog. **`README.md`'s "Known Gaps" and "Known Limitations" sections are
+> the current source of truth for what's actually outstanding** — treat the
+> backlog below as a historical record of the pre-pivot plan, not a live TODO
+> list, unless you're specifically resuming prop-firm-era work.
+
 ---
 
 ## How to use this file
@@ -29,13 +41,15 @@ next agent doesn't re-create forks or clobber work.
 Before any agent does anything else in any session, execute this checklist in order:
 
 1. **Check DB connectivity**
-   Run: `python main.py collect --dry-run` (or equivalent ping).
+   `--dry-run`/`--status` flags do not exist on `collect` (this rule predates the
+   actual CLI). Use: `python -c "from cli.db import get_db_connection; db=get_db_connection(); print(db.test_connection())"`.
    If the DB is unreachable, stop and report. Do not proceed.
 
 2. **Check data freshness**
-   Run: `python main.py collect --status` and inspect the most recent timestamp
-   per symbol. If any symbol has a gap > 48 hours from now, run:
-   `python main.py collect` to pull fresh data from Binance before continuing.
+   `db.get_latest_timestamp(symbol, exchange=...)` (used internally by `cli/collect.py`)
+   gives the most recent timestamp per symbol/exchange. If any symbol has a gap
+   > 48 hours from now, run `python main.py collect [--exchange ...]` to pull
+   fresh data before continuing.
 
 3. **Validate data integrity**
    Run: `python data/verify_data.py` (or equivalent).
@@ -283,6 +297,41 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-06-25 — session "multi-tf-and-paper-overhaul" (Claude) — COMPLETE
+**Phase worked:** none of A–F (post-pivot work — see staleness banner at top of this file)
+**DB health check:** PASSED — `db.test_connection()` OK; `prices` had 65,213 rows pre-migration, all auto-backfilled as `timeframe='1d'` with zero loss
+**engine_results row count at session start:** not checked (no engine-loop changes this session)
+**Files changed (commit `af52cee` — 4h timeframe support):**
+  - `alembic/versions/0011_add_timeframe_column.py` (new) — adds `prices.timeframe`, widens unique constraint/index to `(exchange, symbol, timeframe, timestamp)`
+  - `data/collectors/{binance,kraken,htx}_collector.py` — added `'4h'` to `TIMEFRAME_TO_MS`
+  - `data/models.py` — `Timeframe` literal includes `'4h'`
+  - `data/db.py` — `insert_prices()` now writes the `timeframe` column (was silently discarded); `get_prices()` gained an optional `timeframe` filter
+  - `cli/collect.py` — `run_backfill` timeframe validation accepts `'4h'`
+**Files changed (commit `99ea344` — multi-strategy paper trading; carried over from an earlier uncommitted session, committed now):**
+  - `trading/paper_trader.py`, `trading/position.py`, `trading/live_trader.py`, `trading/alerts.py` (new)
+  - `strategies/dca.py` — fixed calendar-anchoring bug that made DCA permanently unable to BUY
+  - `monitoring/routes/{ops,pages,pipeline,trading_routes}.py`, `monitoring/templates/*.html`, `monitoring/static/` (new dashboard JS/CSS bundle + build script)
+  - `alembic/versions/0010_add_manual_halt.py` (new)
+  - `cli/backtest.py`, `main.py`, `config/loader.py` — `--replay-days` paper backfill wiring, risk-sizing gap-clip
+  - `tests/test_ops_routes.py`, `tests/test_pipeline_routes.py`, `tests/test_risk_sizing_and_alerts.py` (new)
+**Tests added:** 45 net new (349 → 394)
+**Suite result:** 394 passed, 0 failed
+**Phase checklist progress:** n/a (see staleness banner)
+**Phase completion %:** n/a
+**Blocking issues found:** none
+**Bugs discovered and logged:** none new this session (DCA bug and trade-journal-summary SQL bug were fixed in the carried-over session and are no longer open)
+**Resume point for next session:** Multi-timeframe data storage now exists (4h alongside 1d, no migration needed) but has no consumer — `strategies/base.py::generate_signals(df, params)` still takes one DataFrame and `backtesting/window_engine.py` still slices one timeframe per run. A scoped, low-risk next step (discussed but not started): wire the already-computed `compute_regime()` trend/direction into `trading/paper_trader.py::_paper_candidates()` as a live long/short bias filter before attempting a full multi-timeframe strategy interface + engine rewrite (see plan notes from this session — engine slicing across timeframes without lookahead leakage is the highest-risk piece of that larger effort).
+**Session limit hit:** no (docs-only follow-up after the two commits)
+
+Committed two logical commits (not pushed): 4h timeframe storage capability across
+collectors/schema/DB, and the larger multi-strategy-per-exchange paper trading +
+trade journal + backfill/replay + DCA fix body of work that had accumulated
+uncommitted across prior sessions. Verified the 4h path live end-to-end (real
+Binance backfill of BTC/USDT 4h candles, no constraint collisions with existing
+1d rows) and confirmed the full test suite (394) plus a manual round-trip
+insert/filter test all pass. Updated `README.md` (module tree, Phase Completion
+table, CLI reference, Known Gaps, Architecture Notes) and this file to match.
 
 ### 2026-06-11 — session "signal-fork-fix" (Claude) — COMPLETE
 **Phase worked:** pre-commit stabilization (z-score threshold fork)

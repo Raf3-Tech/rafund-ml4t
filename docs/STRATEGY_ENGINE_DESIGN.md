@@ -2,6 +2,14 @@
 
 **Author:** Backtesting & Risk Engineer
 **Date:** 2026-06-05
+
+> **⚠️ Predates the 2026-06-20 methodology pivot** (commit `d57cfd7`) that
+> dropped prop-firm challenge framing as the trading goal — drawdown/daily-loss
+> controls below are still accurate as *risk management*, but "prop-firm
+> restrictions/pass" throughout this doc no longer describes the actual
+> objective. See `README.md`'s Architecture Notes for the current framing
+> (Smart Money Concepts + trade journal, no pass/fail tier gate).
+
 **Goal:** Let the system *generate its own strategy per asset* by price-predicting,
 gated behind *robust* backtesting, with prop-firm restrictions and all known
 trading-research biases controlled for.

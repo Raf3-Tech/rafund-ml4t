@@ -2,6 +2,14 @@
 
 All notable changes to the ML4T project are documented in this file.
 
+> **⚠️ This file is historical and stale.** It describes an early prototype
+> state (`engine_v2.py`, Binance-only, no dashboard/live trading) that no
+> longer matches the codebase — all of that has since been superseded
+> (`engine.py` is now the only engine, three exchanges are collected, a Flask
+> dashboard and live/paper trading exist). For the current state, see
+> `README.md` (architecture, CLI, known gaps/limitations) and `AGENTS.md`
+> (session-by-session change log, newest entries first).
+
 ---
 
 ## [Current State] - May 4, 2026
