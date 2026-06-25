@@ -297,6 +297,15 @@ class Settings:
 
         self.save_to_db = _env_bool("SAVE_TO_DB", True)
 
+        # Paper trading: skip a BUY/SELL whose direction disagrees with the
+        # recent-history regime trend (see trading.paper_trader's regime
+        # filter) — the "golden rule" of top-down analysis (only trade with
+        # the dominant trend), applied with data the engine already computes
+        # (backtesting.window_engine.compute_regime) rather than new data.
+        self.paper_regime_filter_enabled = _env_bool(
+            "PAPER_REGIME_FILTER_ENABLED", bool(strat.get("paper_regime_filter_enabled", True))
+        )
+
         # Retraining symbols may intentionally be a *subset* of collect symbols
         # (only some pairs have feature rows) — see settings.yaml. We enforce
         # the subset relationship, not equality, in _validate().

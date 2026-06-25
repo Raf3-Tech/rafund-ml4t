@@ -110,6 +110,42 @@ def _paper_candidates(db) -> List[Tuple[str, str, dict]]:
     return candidates
 
 
+def _capital_weighted_equity(
+    db, candidates: List[Tuple[str, str, dict]], total_capital: float,
+) -> dict:
+    """Risk-parity-weighted starting equity per (strategy_name, symbol) slot.
+
+    Reuses the same `_fetch_returns_history` + `PortfolioOptimizer.multi_strategy_allocate`
+    machinery monitoring/leaderboard.py already uses to compute its display-only
+    risk_parity_alloc_pct column — here it actually sizes paper capital instead
+    of just showing a percentage. Falls back to equal-weight automatically
+    (handled inside multi_strategy_allocate) when there isn't enough per-window
+    return history yet for a candidate. Only affects a slot's *starting* equity
+    the first time it's created (see trading.position.load_position) — an
+    existing slot's compounded equity is never reset by a weight recompute.
+    """
+    import json as _json
+    from monitoring.leaderboard import _fetch_returns_history
+    from portfolio.optimizer import PortfolioOptimizer
+
+    if not candidates:
+        return {}
+
+    keys = [
+        f"{name}|{symbol}|{_json.dumps(params, sort_keys=True)}"
+        for name, symbol, params in candidates
+    ]
+    returns_pivot = _fetch_returns_history(db)
+    optimizer = PortfolioOptimizer(initial_capital=1.0, max_position_size=1.0)
+    allocations = optimizer.multi_strategy_allocate(
+        strategy_names=keys, returns_history=returns_pivot, capital=total_capital,
+    )
+    return {
+        (name, symbol): allocations[key]
+        for (name, symbol, _params), key in zip(candidates, keys)
+    }
+
+
 def _latest_bars(db, symbol: str, n: int, exchange: str = "binance") -> Optional[pd.DataFrame]:
     df = db.read_sql(
         """
@@ -142,7 +178,10 @@ def _last_signal(df: pd.DataFrame, strategy_name: str, params: dict) -> str:
 # ── position accounting ───────────────────────────────────────────────────────
 
 
-def _open(pos: PositionState, side: str, price: float, notional: float, as_of=None) -> None:
+def _open(
+    pos: PositionState, side: str, price: float, notional: float, as_of=None,
+    stop_price: Optional[float] = None,
+) -> None:
     commission = notional * _COMMISSION_PCT
     pos.qty = notional / price
     pos.side = side
@@ -150,6 +189,7 @@ def _open(pos: PositionState, side: str, price: float, notional: float, as_of=No
     from datetime import datetime, timezone
     pos.entry_time = as_of if as_of is not None else datetime.now(timezone.utc)
     pos.equity -= commission
+    pos.stop_price = stop_price
 
 
 def _close(pos: PositionState, price: float) -> float:
@@ -167,7 +207,17 @@ def _close(pos: PositionState, price: float) -> float:
     pos.side = "FLAT"
     pos.entry_price = None
     pos.entry_time = None
+    pos.stop_price = None
     return pnl
+
+
+def _stop_breached(pos: PositionState, price: float) -> bool:
+    """True if `price` has moved through pos.stop_price against the open side."""
+    if pos.is_flat or pos.stop_price is None:
+        return False
+    if pos.side == "LONG":
+        return price <= pos.stop_price
+    return price >= pos.stop_price
 
 
 def _target_notional(pos: PositionState, cfg, extra_cap: Optional[float] = None) -> float:
@@ -214,24 +264,49 @@ def run_paper_cycle(db, exchange: str = "binance") -> bool:
         logger.info("paper_trader[%s]: no qualifying strategies yet — skipping cycle", exchange)
         return True
 
+    weighted_equity = _capital_weighted_equity(
+        db, candidates, total_capital=cfg.account_size * len(candidates),
+    )
+
     ok = True
     for strategy_name, symbol, params in candidates:
         run_id = _paper_run_id(exchange, strategy_name, symbol)
-        ok = _run_paper_slot(db, cfg, exchange, run_id, strategy_name, symbol, params) and ok
+        initial_capital = weighted_equity.get((strategy_name, symbol), cfg.account_size)
+        ok = _run_paper_slot(
+            db, cfg, exchange, run_id, strategy_name, symbol, params,
+            initial_capital=initial_capital,
+        ) and ok
     return ok
 
 
 def _apply_paper_step(
     db, cfg, pos: PositionState, strategy_name: str, symbol: str, signal: str,
     price: float, bar_time, *, send_alerts: bool = True,
+    regime_direction: Optional[str] = None, stop_price: Optional[float] = None,
 ) -> int:
     """Apply one signal/price/time observation to `pos` in-place: rotation
-    close, day rollover, prop-firm checks, open/close/hold. Shared by the
-    live per-cycle path (_run_paper_slot) and the historical backfill
-    replay (backfill_paper_slot) — the only differences are where
+    close, day rollover, prop-firm checks, stop check, open/close/hold.
+    Shared by the live per-cycle path (_run_paper_slot) and the historical
+    backfill replay (backfill_paper_slot) — the only differences are where
     signal/price/bar_time come from and whether halt transitions page out
     via send_alert (suppressed during replay — halts from months ago
     shouldn't notify anyone). Returns the number of orders logged.
+
+    regime_direction ("bull"/"bear"/"neutral"/None), when given, blocks
+    *opening new* exposure that fights the recent-history trend (top-down
+    analysis's "golden rule": only trade with the higher-timeframe bias) —
+    it never blocks closing/reducing an existing position. None disables
+    the filter entirely (the default — only _run_paper_slot passes a real
+    value, gated behind cfg.paper_regime_filter_enabled; backfill replay
+    deliberately doesn't use this, to keep historical replay comparable to
+    runs made before the filter existed).
+
+    stop_price, when given, is recorded on `pos` if a new position is
+    opened this step (see strategies.base.BaseStrategy.get_stop_level —
+    only SMCBreakout currently returns one). An existing open position's
+    stop is checked *before* the new signal is evaluated; if breached, the
+    position is force-closed with close_reason="stop" and no new signal is
+    processed this step.
     """
     exchange = pos.exchange
     n_orders = 0
@@ -280,6 +355,15 @@ def _apply_paper_step(
     if pos.manual_halt:
         return n_orders
 
+    # Structural stop: force-close before evaluating any new signal this step.
+    if _stop_breached(pos, price):
+        pnl = _close(pos, price)
+        log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="stop", created_at=bar_time)
+        n_orders += 1
+        logger.info("paper_trader: STOP %s @ %.4f  pnl=%.2f", symbol, price, pnl)
+        pos.equity = pos.mark_to_market(price)
+        return n_orders
+
     # Determine target side
     if signal == "BUY":
         target = "LONG"
@@ -290,11 +374,21 @@ def _apply_paper_step(
 
     setup_tag = f"{strategy_name}_{signal.lower()}" if signal in ("BUY", "SELL") else None
 
+    regime_blocks_open = (
+        (target == "LONG" and regime_direction == "bear")
+        or (target == "SHORT" and regime_direction == "bull")
+    )
+    if regime_blocks_open:
+        logger.info(
+            "paper_trader: regime filter skipped %s open for %s %s (regime=%s)",
+            target, strategy_name, symbol, regime_direction,
+        )
+
     if target is not None:
         if pos.is_flat:
-            if not pos.daily_halt:
+            if not pos.daily_halt and not regime_blocks_open:
                 notional = _target_notional(pos, cfg)
-                _open(pos, target, price, notional, as_of=bar_time)
+                _open(pos, target, price, notional, as_of=bar_time, stop_price=stop_price)
                 log_order(db, pos, "OPEN", price, setup_tag=setup_tag, created_at=bar_time)
                 n_orders += 1
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
@@ -304,9 +398,9 @@ def _apply_paper_step(
             log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="position_flip", created_at=bar_time)
             n_orders += 1
             logger.info("paper_trader: CLOSE (flip) @ %.4f  pnl=%.2f", price, pnl)
-            if not pos.daily_halt:
+            if not pos.daily_halt and not regime_blocks_open:
                 notional = _target_notional(pos, cfg)
-                _open(pos, target, price, notional, as_of=bar_time)
+                _open(pos, target, price, notional, as_of=bar_time, stop_price=stop_price)
                 log_order(db, pos, "OPEN", price, setup_tag=setup_tag, created_at=bar_time)
                 n_orders += 1
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
@@ -324,8 +418,15 @@ def _apply_paper_step(
 
 def _run_paper_slot(
     db, cfg, exchange: str, run_id: str, strategy_name: str, symbol: str, params: dict,
+    initial_capital: Optional[float] = None,
 ) -> bool:
-    """One paper-trading cycle for one (exchange, strategy, symbol) slot."""
+    """One paper-trading cycle for one (exchange, strategy, symbol) slot.
+
+    initial_capital only matters the first time this run_id is created (see
+    trading.position.load_position) — defaults to cfg.account_size (the
+    pre-risk-parity flat allocation) when not given, e.g. for direct callers
+    that don't go through run_paper_cycle's weighting step.
+    """
     from strategies.registry import StrategyRegistry
     try:
         strategy = StrategyRegistry.instantiate(strategy_name)
@@ -343,11 +444,18 @@ def _run_paper_slot(
     signal = _last_signal(df, strategy_name, params)
     price = float(df["close"].iloc[-1])
     bar_time = df["timestamp"].iloc[-1]
+    stop_level = strategy.get_stop_level(df, params)
 
-    pos = load_position(db, run_id, initial_capital=cfg.account_size,
+    regime_direction = None
+    if cfg.paper_regime_filter_enabled:
+        from backtesting.window_engine import compute_regime
+        _, _, regime_direction = compute_regime(df)
+
+    pos = load_position(db, run_id, initial_capital=initial_capital or cfg.account_size,
                         strategy_name=strategy_name, symbol=symbol, exchange=exchange)
 
-    _apply_paper_step(db, cfg, pos, strategy_name, symbol, signal, price, bar_time, send_alerts=True)
+    _apply_paper_step(db, cfg, pos, strategy_name, symbol, signal, price, bar_time,
+                       send_alerts=True, regime_direction=regime_direction, stop_price=stop_level)
     save_position(db, pos)
 
     dd_pct = (pos.peak_equity - pos.equity) / pos.peak_equity * 100 if pos.peak_equity > 0 else 0

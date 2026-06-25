@@ -23,6 +23,7 @@ class PositionState:
     daily_halt: bool = False
     account_failed: bool = False
     manual_halt: bool = False
+    stop_price: Optional[float] = None  # structural stop (e.g. SMCBreakout's order block edge); None = no stop
     last_update: Optional[datetime] = None
 
     @property
@@ -72,7 +73,7 @@ def max_safe_notional(pos: PositionState, cfg) -> float:
 
 _POSITION_COLUMNS = """run_id, strategy_name, symbol, exchange, side, qty, entry_price, entry_time,
                    equity, peak_equity, daily_start_equity, daily_halt, account_failed,
-                   manual_halt, last_update"""
+                   manual_halt, stop_price, last_update"""
 
 
 def _row_to_position(row) -> PositionState:
@@ -81,7 +82,8 @@ def _row_to_position(row) -> PositionState:
         qty=float(row[5]), entry_price=float(row[6]) if row[6] is not None else None,
         entry_time=row[7], equity=float(row[8]), peak_equity=float(row[9]),
         daily_start_equity=float(row[10]), daily_halt=bool(row[11]),
-        account_failed=bool(row[12]), manual_halt=bool(row[13]), last_update=row[14],
+        account_failed=bool(row[12]), manual_halt=bool(row[13]),
+        stop_price=float(row[14]) if row[14] is not None else None, last_update=row[15],
     )
 
 
@@ -151,8 +153,8 @@ def save_position(db, pos: PositionState, last_update: Optional[datetime] = None
             INSERT INTO paper_positions
                 (run_id, strategy_name, symbol, exchange, side, qty, entry_price, entry_time,
                  equity, peak_equity, daily_start_equity, daily_halt, account_failed,
-                 manual_halt, last_update)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
+                 manual_halt, stop_price, last_update)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
             ON CONFLICT (run_id) DO UPDATE SET
                 strategy_name      = EXCLUDED.strategy_name,
                 symbol             = EXCLUDED.symbol,
@@ -167,13 +169,14 @@ def save_position(db, pos: PositionState, last_update: Optional[datetime] = None
                 daily_halt         = EXCLUDED.daily_halt,
                 account_failed     = EXCLUDED.account_failed,
                 manual_halt        = EXCLUDED.manual_halt,
+                stop_price         = EXCLUDED.stop_price,
                 last_update        = EXCLUDED.last_update
             """,
             (
                 pos.run_id, pos.strategy_name, pos.symbol, pos.exchange, pos.side, pos.qty,
                 pos.entry_price, pos.entry_time, pos.equity, pos.peak_equity,
                 pos.daily_start_equity, pos.daily_halt, pos.account_failed, pos.manual_halt,
-                last_update,
+                pos.stop_price, last_update,
             ),
         )
         conn.commit()

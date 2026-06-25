@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -23,6 +23,13 @@ class BaseStrategy(ABC):
         The first get_min_bars(params) entries must always be 'HOLD'.
         df must contain at minimum a 'close' column (OHLCV frame).
         """
+
+    def get_stop_level(self, df: pd.DataFrame, params: Dict) -> Optional[float]:
+        """Return a structural stop price for a position opened on df's last
+        bar, or None if this strategy doesn't define one (the default for
+        every strategy except SMCBreakout, which overrides this). Optional —
+        callers (trading/paper_trader.py) must treat None as "no stop"."""
+        return None
 
     def describe_failure(self, results: Dict) -> str:
         trades = results.get("num_trades", 0)

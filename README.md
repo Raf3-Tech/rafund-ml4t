@@ -47,7 +47,7 @@ rafund-ml4t/
 │
 ├── trading/
 │   ├── position.py            # PositionState — persisted paper/live position + risk-control state
-│   ├── paper_trader.py        # Paper trading: one concurrent slot per (strategy × symbol × exchange) with avg_sharpe > 0; day-by-day backfill/replay
+│   ├── paper_trader.py        # Paper trading: one concurrent slot per (strategy × symbol × exchange) with avg_sharpe > 0, risk-parity-weighted starting capital, regime-filtered opens, structural-stop force-close; day-by-day backfill/replay
 │   ├── live_trader.py         # CCXT limit-order execution (opt-in, capped notional, per-exchange API keys)
 │   └── alerts.py              # Paper/live trade + risk-control alert dispatch
 │
@@ -72,7 +72,9 @@ rafund-ml4t/
 ├── portfolio/
 │   ├── risk.py                # VaR, CVaR, max drawdown, correlation, diversification ratio, concentration check
 │   └── optimizer.py           # Position sizing, risk-parity weights, half-Kelly fraction, multi-strategy allocation
-│   (Note: library-level allocation utilities; not yet wired into the per-bar engine loop — see Known Limitations)
+│   (Note: not wired into the per-bar backtest engine loop — deliberately, see Known Limitations — but
+│    `multi_strategy_allocate` is wired into both the leaderboard's display-only column and, since this
+│    session, real paper-trading capital sizing in `trading/paper_trader.py`)
 │
 ├── data/
 │   ├── db.py                  # PostgreSQL connection + all query methods (insert/get_prices are timeframe-aware)
@@ -110,9 +112,9 @@ rafund-ml4t/
 │   └── mlflow_config.py       # MLflow run utilities
 │
 ├── alembic/
-│   └── versions/               # 0001 baseline → 0011 (drift reports, engine_results/funding_rates,
+│   └── versions/               # 0001 baseline → 0012 (drift reports, engine_results/funding_rates,
 │                                # research_decisions, paper trading, exchange column, trade journal,
-│                                # manual halt switch, prices.timeframe column)
+│                                # manual halt switch, prices.timeframe, paper_positions.stop_price)
 │
 ├── research/
 │   └── pipeline.py            # Closed-loop research pipeline: propose → engine run → gate → JSONL decision log
@@ -121,7 +123,7 @@ rafund-ml4t/
 │   ├── oracle-bootstrap.sh    # One-shot bootstrap for a fresh Oracle Cloud "Always Free" ARM instance (git clone + Docker Compose)
 │   └── update.sh              # Manual update: git pull + rebuild + restart services on the running instance
 │
-├── tests/                     # 394 passed
+├── tests/                     # 415 passed
 ├── docs/
 │   ├── CANDLESTICK_PATTERNS.md          # Objective candlestick patterns (engulfing bar) feeding SMC Breakout
 │   ├── STRATEGY_ENGINE_DESIGN.md
@@ -146,7 +148,7 @@ rafund-ml4t/
 | 4 | Strategy leaderboard with tier scoring | ✅ complete |
 | 5 | Regime classifier | ✅ present (needs 200+ rows of engine results to activate) |
 | 6 | Funding data pipeline (collector + table + strategy + engine dispatch) | ✅ complete |
-| — | Alembic schema (0001–0011: engine_results, funding_rates, research_decisions, paper trading, exchange column, trade journal, manual halt, `prices.timeframe`) | ✅ complete |
+| — | Alembic schema (0001–0012: engine_results, funding_rates, research_decisions, paper trading, exchange column, trade journal, manual halt, `prices.timeframe`, `paper_positions.stop_price`) | ✅ complete |
 | — | Strategy registry (`strategies/registry.py`) | ✅ complete — `@StrategyRegistry.register` on all 13 strategies; `instantiate_all()` replaces hardcoded list in `run_engine_cmd` |
 | — | Portfolio construction | ✅ complete — `risk_parity_weights`, `kelly_fraction`, `multi_strategy_allocate`; `correlation_matrix`, `diversification_ratio`, `concentration_check` |
 | — | Closed-loop research pipeline (`research/pipeline.py`) | ✅ complete — `python main.py research` runs propose→engine→gate→JSONL |
@@ -158,20 +160,25 @@ rafund-ml4t/
 | — | Manual halt switch (dashboard kill switch per paper position) | ✅ complete — `paper_positions.manual_halt` (Alembic 0010) |
 | — | CLI (collect, features, engine, leaderboard, train-classifier, research, paper, live, backfill) | ✅ complete |
 
-**Test suite: 394 passed.**
+**Test suite: 415 passed.**
 
 ---
 
 ## Known Gaps (honest)
 
-1. **Missing tests:** leaderboard scoring/tiers, funding collector pagination, regime classifier gate, and a true end-to-end engine run against a temp DB are not yet covered by tests.
-2. **No real engine run yet:** `python main.py engine` has not been run against a populated DB. Synthetic funding Sharpe looked very high on clean sine input — sanity-check on real data is pending.
-3. **`BacktestEngine` reuse (optional / architectural):** the window engine has three private P&L loops (single-asset, pairs, funding). Consolidating onto `BacktestEngine` is an architectural cleanup, not a correctness bug — current loops are tested and produce sane results.
-4. **Portfolio layer not wired into engine:** `risk_parity_weights`, `kelly_fraction`, and `multi_strategy_allocate` exist as tested library utilities but are not yet called per-bar from the engine. Kelly sizing and VaR limits are computed separately and do not feed back into position sizing during a run (see Phase E in AGENTS.md).
-5. **SMC Breakout has no structural stop:** it emits BUY/SELL/HOLD like every other strategy — exits are whatever the engine/paper trader does on opposite-signal or HOLD, not a stop below the order block. Tracked as future work.
-6. **Live trading is unexercised against a real exchange account:** the safety gates (opt-in flag, API-key presence, notional cap, limit-only fills) are implemented and unit-tested, but no live order has yet been placed/verified end-to-end on an exchange.
-7. **Multi-timeframe data has no consumer yet:** `4h` candles can now be collected and stored (`prices.timeframe`, Alembic 0011) without colliding with `1d` rows, but `strategies/base.py`'s `generate_signals(df, params)` still takes exactly one DataFrame and the walk-forward engine (`backtesting/window_engine.py`) still slices exactly one timeframe per run. A true bias/location/trigger multi-timeframe strategy (e.g. daily bias → 4h location → 1h/15m trigger) needs a new strategy interface and engine support — tracked as future work, not yet started.
-8. **Regime classifier output is not a live filter:** `regime_trend`/`regime_direction` (`backtesting/window_engine.py::compute_regime`) are computed per backtest window and shown on the leaderboard, but neither `trading/paper_trader.py`'s candidate selection nor `research/pipeline.py`'s gate check live/recent trend direction before opening a position — there's no "don't go long against the trend" filter yet.
+**Still open:**
+
+1. **Live trading is unexercised against a real exchange account:** the safety gates (opt-in flag, API-key presence, notional cap, limit-only fills) are implemented and unit-tested, but no live order has yet been placed/verified end-to-end on an exchange.
+2. **Multi-timeframe data has no consumer yet:** `4h` candles can now be collected and stored (`prices.timeframe`, Alembic 0011) without colliding with `1d` rows, but `strategies/base.py`'s `generate_signals(df, params)` still takes exactly one DataFrame and the walk-forward engine (`backtesting/window_engine.py`) still slices exactly one timeframe per run. A true bias/location/trigger multi-timeframe strategy (e.g. daily bias → 4h location → 1h/15m trigger) needs a new strategy interface and engine support — tracked as future work, not yet started.
+
+**Resolved (2026-06-25 session):**
+
+3. ~~Missing tests~~ — `tests/test_leaderboard.py` and `tests/test_funding_collector.py` already existed (this list was stale); added `tests/test_regime_classifier.py` (the <200/≥200-row training gate) and extended `tests/test_window_engine.py` with an engine→`build_leaderboard()` NaN/Inf check.
+4. ~~No real engine run yet~~ — also stale; `engine_results` already had 83,497 real rows before this session.
+5. ~~`BacktestEngine` reuse~~ — investigated, **deliberately deferred**: the window engine's 3 private P&L loops and `BacktestEngine` are incompatible state machines (unit-position vs. real capital/leverage, no funding cadence support, different pairs control flow), and there's no regression-pinning test to catch a consolidation silently shifting historical Sharpe. See `AGENTS.md`'s Phase D note.
+6. ~~Portfolio layer not wired into engine~~ — **redirected, not done as literally asked**: wiring `risk_parity_weights`/`kelly_fraction` into the per-bar engine loop would change every strategy's historical Sharpe comparability for no stated benefit (the loops are intentionally unit-position). Wired `multi_strategy_allocate` into **paper-trading capital allocation** instead (`trading/paper_trader.py::_capital_weighted_equity`) — each new paper slot's starting equity is now risk-parity-weighted across today's candidates instead of a flat amount per slot.
+7. ~~SMC Breakout has no structural stop~~ — added `SMCBreakout.get_stop_level()` (the active post-BOS range's near boundary) and wired it into `trading/paper_trader.py`: a paper position now force-closes with `close_reason="stop"` if price breaches it, checked before any new signal each step. Not added to the backtest engine (no intrabar stop-checking framework today — same gap as same-bar fills below).
+8. ~~Regime classifier output is not a live filter~~ — `trading/paper_trader.py` now calls `compute_regime()` on each slot's recent bars before opening a new position and skips a BUY/SELL that fights the bull/bear direction (gated behind `PAPER_REGIME_FILTER_ENABLED`, default on); never blocks closing an existing position.
 
 ---
 
@@ -267,7 +274,7 @@ python main.py live --exchange binance|kraken|htx             # Live limit-order
 ## Running the Test Suite
 
 ```bash
-pytest                     # 394 passed
+pytest                     # 415 passed
 pytest --cov=. -q          # with coverage
 ```
 
@@ -280,7 +287,10 @@ pytest --cov=. -q          # with coverage
 - **Position carry:** HOLD signals now maintain the open position and mark it to market each bar. Prior to the Phase-3 fix, every HOLD bar flattened the position, producing artificial 1-bar trades.
 - **Multi-exchange data:** `prices`, `paper_positions`, and `paper_orders` all carry an `exchange` column (binance/kraken/htx). Paper and live trading run per-exchange; `python main.py paper` with no `--exchange` cycles all three.
 - **Trading methodology pivot:** strategy research is now anchored on Smart Money Concepts (market structure, break of structure, premium/discount zones — see `strategies/smc_breakout.py`) plus the one objective candlestick pattern (engulfing bar, see `docs/CANDLESTICK_PATTERNS.md`), rather than prop-firm challenge framing. Drawdown/daily-loss risk controls remain in the engine and paper/live trader as risk management, not as a pass/fail challenge gate.
-- **Trade journal:** `paper_orders.setup_tag` and `close_reason` (Alembic 0009) record why a trade was entered and why it was closed, for post-hoc review.
+- **Trade journal:** `paper_orders.setup_tag` and `close_reason` (Alembic 0009) record why a trade was entered and why it was closed, for post-hoc review — `close_reason` values include `signal_exit`, `position_flip`, `rotation`, `account_failed`, `kill_switch`, and (since this session) `stop`.
+- **Risk-parity paper capital:** `trading/paper_trader.py::_capital_weighted_equity` reuses `monitoring/leaderboard.py`'s same `_fetch_returns_history`/`PortfolioOptimizer.multi_strategy_allocate` machinery (previously display-only) to size each new paper slot's starting equity by historical risk-parity weight instead of a flat amount — only affects a slot's first-ever creation, never an already-compounding slot.
+- **Regime-as-live-filter:** before opening a new paper position, `trading/paper_trader.py` calls `backtesting/window_engine.py::compute_regime()` on the slot's recent bars and skips a BUY against a bear regime / SELL against a bull regime (`PAPER_REGIME_FILTER_ENABLED`, default on) — never blocks closing an existing position.
+- **SMC structural stop:** `SMCBreakout.get_stop_level()` (the only strategy overriding `BaseStrategy.get_stop_level`, which defaults to `None`) returns the active post-BOS range's near boundary; `trading/paper_trader.py` records it on `PositionState.stop_price` (Alembic 0012) at open and force-closes if breached, before evaluating that step's new signal. Not used by the backtest engine — no intrabar stop-checking framework exists there today.
 - **Paper trading is multi-slot:** every strategy×symbol combination with `avg_sharpe > 0` on the leaderboard gets its own independent concurrent `PositionState`, per exchange — paper trading is no longer gated by the live-capital `research_decisions.accepted` flag (live trading still is). `backfill_paper_slot`/`backfill_paper_cycle_all` replay this day-by-day over historical bars to populate the journal without waiting for real time to pass.
 - **Live trading is limit-orders-only:** every live order is placed at the signal bar's close and given a timeout to fill; unfilled orders are cancelled rather than chased at a worse price (see `trading/live_trader.py`).
 - **Multi-timeframe storage, single-timeframe consumption:** `prices` can hold `1m`/`5m`/`15m`/`1h`/`4h`/`1d` rows per symbol side by side (Alembic 0011), but every strategy, the walk-forward engine, and paper/live trading still operate on one timeframe at a time (`config/settings.yaml`'s global `timeframe`). Storing a second timeframe today requires the manual `python main.py backfill --timeframe 4h ...` path; nothing consumes it yet.

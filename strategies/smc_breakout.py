@@ -40,10 +40,14 @@ Entry: BUY when bias is bullish AND an active post-BOS bullish range exists
 AND price has pulled back into its discount zone AND the current candle is
 a bullish engulfing bar. SELL is the mirror condition. HOLD otherwise.
 
-Known limitation: this returns only BUY/SELL/HOLD like every other strategy
-in this codebase — it does not emit a structural stop (e.g. below the order
-block), so exits are still whatever the engine/paper trader does on
-opposite-signal or HOLD. Tracked as future work, not solved here.
+generate_signals() itself still returns only BUY/SELL/HOLD like every other
+strategy (the BaseStrategy contract is unchanged) — but get_stop_level()
+exposes the active range's near boundary (the order block edge) as a
+structural stop, which trading/paper_trader.py uses to force-close a paper
+position if price breaches it, instead of relying solely on the next
+opposite signal or HOLD. Not used by the walk-forward backtest engine,
+which has no intrabar stop-checking framework today (same realism gap as
+same-bar fills — see README's Known Limitations).
 """
 
 from __future__ import annotations
@@ -167,6 +171,87 @@ class SMCBreakout(BaseStrategy):
                 signals[i] = "SELL"
 
         return pd.Series(signals, index=df.index)
+
+    def get_stop_level(self, df: pd.DataFrame, params: Dict) -> Optional[float]:
+        """Structural stop for a position opened on df's last bar: the near
+        boundary of the active post-BOS range (the order block itself) —
+        zone_low for a long, zone_high for a short.
+
+        Deliberately a separate, self-contained replay of the swing/bias/
+        range portion of generate_signals (not a refactor of it) so the
+        already-tested, already-live signal path above is untouched. Only
+        the range bookkeeping is needed here, not the discount/premium zone
+        check or engulfing trigger — those only gate *whether* to enter,
+        not where the order block's edge is.
+        """
+        swing_period = int(params.get("swing_period", self.param_grid["swing_period"]))
+        min_bars = self.get_min_bars(params)
+
+        high = df["high"].astype(float).reset_index(drop=True)
+        low = df["low"].astype(float).reset_index(drop=True)
+        close = df["close"].astype(float).reset_index(drop=True)
+        n = len(df)
+        if n < min_bars:
+            return None
+
+        swing_highs: List[Tuple[int, float]] = []
+        swing_lows: List[Tuple[int, float]] = []
+        bull_range: Optional[Tuple[float, float]] = None
+        bear_range: Optional[Tuple[float, float]] = None
+        bias = "neutral"
+
+        for i in range(n):
+            j = i - swing_period
+            if j - swing_period >= 0 and j + swing_period < n:
+                window_high = high[j - swing_period: j + swing_period + 1]
+                if high[j] == window_high.max():
+                    swing_highs.append((j, high[j]))
+                window_low = low[j - swing_period: j + swing_period + 1]
+                if low[j] == window_low.min():
+                    swing_lows.append((j, low[j]))
+
+            if i < min_bars or i < 2 or len(swing_highs) < 2 or len(swing_lows) < 2:
+                continue
+
+            last_sh, prev_sh = swing_highs[-1][1], swing_highs[-2][1]
+            last_sl, prev_sl = swing_lows[-1][1], swing_lows[-2][1]
+
+            if last_sh > prev_sh and last_sl > prev_sl:
+                bias = "bullish"
+            elif last_sh < prev_sh and last_sl < prev_sl:
+                bias = "bearish"
+            else:
+                bias = "neutral"
+
+            if bias != "bullish":
+                bull_range = None
+            if bias != "bearish":
+                bear_range = None
+            if bias == "neutral":
+                continue
+
+            if bias == "bullish":
+                if close[i] > last_sh:
+                    if bull_range is None:
+                        bull_range = (last_sl, close[i])
+                    else:
+                        bull_range = (bull_range[0], max(bull_range[1], close[i]))
+                if bull_range is not None and close[i] < bull_range[0]:
+                    bull_range = None
+            else:
+                if close[i] < last_sl:
+                    if bear_range is None:
+                        bear_range = (close[i], last_sh)
+                    else:
+                        bear_range = (min(bear_range[0], close[i]), bear_range[1])
+                if bear_range is not None and close[i] > bear_range[1]:
+                    bear_range = None
+
+        if bias == "bullish" and bull_range is not None:
+            return bull_range[0]
+        if bias == "bearish" and bear_range is not None:
+            return bear_range[1]
+        return None
 
     def describe_failure(self, results: Dict) -> str:
         trades = results.get("num_trades", 0)

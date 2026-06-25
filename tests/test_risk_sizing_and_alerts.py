@@ -11,8 +11,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pandas as pd
+import pytest
+
 from trading.alerts import send_alert
-from trading.paper_trader import _target_notional
+from trading.paper_trader import _apply_paper_step, _capital_weighted_equity, _target_notional
 from trading.position import PositionState, max_safe_notional
 
 
@@ -103,3 +107,160 @@ def test_send_alert_failure_does_not_raise():
          patch("smtplib.SMTP", side_effect=OSError("network down")):
         sent = send_alert("DAILY LOSS HALT", "body")
     assert sent is False
+
+
+# ── risk-parity-weighted paper capital sizing ─────────────────────────────────
+
+
+class _StubDB:
+    def __init__(self, returns_df):
+        self._returns_df = returns_df
+
+    def read_sql(self, query, params=None):
+        return self._returns_df
+
+
+def test_capital_weighted_equity_equal_split_with_no_history():
+    candidates = [("EMA Crossover", "BTC/USDT", {}), ("MACD", "ETH/USDT", {})]
+    db = _StubDB(pd.DataFrame())  # no engine_results history yet
+
+    weights = _capital_weighted_equity(db, candidates, total_capital=10_000.0)
+
+    assert set(weights) == {("EMA Crossover", "BTC/USDT"), ("MACD", "ETH/USDT")}
+    assert sum(weights.values()) == pytest.approx(10_000.0)
+    assert weights[("EMA Crossover", "BTC/USDT")] == pytest.approx(5_000.0)
+    assert weights[("MACD", "ETH/USDT")] == pytest.approx(5_000.0)
+
+
+def test_capital_weighted_equity_favors_lower_volatility_strategy():
+    candidates = [("Steady", "BTC/USDT", {}), ("Volatile", "ETH/USDT", {})]
+    key_steady = "Steady|BTC/USDT|{}"
+    key_volatile = "Volatile|ETH/USDT|{}"
+
+    rng = np.random.RandomState(0)
+    n = 60
+    returns_df = pd.DataFrame({
+        "strategy_name": ["Steady"] * n + ["Volatile"] * n,
+        "symbol": ["BTC/USDT"] * n + ["ETH/USDT"] * n,
+        "params": ["{}"] * (2 * n),
+        "window_end": list(range(n)) * 2,
+        "total_return_pct": list(rng.normal(1.0, 0.5, n)) + list(rng.normal(1.0, 8.0, n)),
+    })
+    db = _StubDB(returns_df)
+
+    weights = _capital_weighted_equity(db, candidates, total_capital=10_000.0)
+
+    assert weights[("Steady", "BTC/USDT")] > weights[("Volatile", "ETH/USDT")]
+    assert sum(weights.values()) == pytest.approx(10_000.0)
+
+
+# ── regime-as-live-filter (top-down analysis "golden rule") ──────────────────
+
+
+def test_regime_filter_blocks_long_open_in_bear_regime():
+    pos = _pos()
+    n = _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+        regime_direction="bear",
+    )
+    assert n == 0
+    assert pos.is_flat
+
+
+def test_regime_filter_blocks_short_open_in_bull_regime():
+    pos = _pos()
+    n = _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "SELL", 100.0, "2026-01-01",
+        regime_direction="bull",
+    )
+    assert n == 0
+    assert pos.is_flat
+
+
+def test_regime_filter_allows_aligned_open():
+    pos = _pos()
+    n = _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+        regime_direction="bull",
+    )
+    assert n == 1
+    assert pos.side == "LONG"
+
+
+def test_regime_filter_does_not_block_closing_existing_position():
+    pos = _pos()
+    # Open LONG with no filter active.
+    _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+    )
+    assert pos.side == "LONG"
+
+    # SELL flips: bull regime blocks the *new* SHORT open, but must not
+    # block closing the existing LONG — should end up flat, not still long.
+    n = _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "SELL", 110.0, "2026-01-02",
+        regime_direction="bull",
+    )
+    assert n == 1  # the flip-close only, no new open
+    assert pos.is_flat
+
+
+def test_regime_filter_disabled_passthrough_when_direction_none():
+    pos = _pos()
+    n = _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+        regime_direction=None,
+    )
+    assert n == 1
+    assert pos.side == "LONG"
+
+
+# ── structural stop (SMCBreakout.get_stop_level) ─────────────────────────────
+
+
+def test_open_records_stop_price():
+    pos = _pos()
+    _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+        stop_price=95.0,
+    )
+    assert pos.side == "LONG"
+    assert pos.stop_price == 95.0
+
+
+def test_stop_breach_force_closes_before_new_signal():
+    pos = _pos()
+    _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+        stop_price=95.0,
+    )
+    assert pos.side == "LONG"
+
+    with patch("trading.paper_trader.log_order") as mock_log_order:
+        # Price gapped through the stop; strategy still says HOLD/BUY this
+        # bar — the stop must fire regardless of what the new signal says.
+        n = _apply_paper_step(
+            MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 90.0, "2026-01-02",
+            stop_price=80.0,
+        )
+
+    assert n == 1
+    assert pos.is_flat
+    assert pos.stop_price is None
+    mock_log_order.assert_called_once()
+    _, kwargs = mock_log_order.call_args
+    assert kwargs.get("close_reason") == "stop"
+
+
+def test_no_stop_set_never_force_closes():
+    pos = _pos()
+    _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 100.0, "2026-01-01",
+    )
+    # Same-side signal repeats (no flip, no close-on-HOLD in play here) and
+    # price drops a lot — with no stop set, nothing should force-close.
+    n = _apply_paper_step(
+        MagicMock(), _cfg(), pos, "Test", "BTC/USDT", "BUY", 90.0, "2026-01-02",
+    )
+    assert n == 0
+    assert pos.side == "LONG"

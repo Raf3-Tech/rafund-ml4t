@@ -221,6 +221,16 @@ def _fake_db():
             self.rows = rows
             return len(rows)
 
+        def read_sql(self, query, params=None):
+            # Mirrors monitoring.leaderboard.build_leaderboard's two queries:
+            # the main engine_results read (returns what insert_engine_results
+            # just captured) and the returns-history pivot (empty here — the
+            # risk-parity allocator falls back to equal-weight, which is fine
+            # for this test since it's about NaN/Inf, not allocation weights).
+            if "window_end" in query and "total_return_pct" in query:
+                return pd.DataFrame()
+            return pd.DataFrame(getattr(self, "rows", []))
+
     return FakeDB()
 
 
@@ -244,6 +254,36 @@ def test_engine_routes_single_pairs_and_funding():
     assert any("|" in r.symbol for r in res)
     assert all(np.isfinite(r.sharpe_ratio) for r in res)
     assert all(r.max_drawdown_pct <= 100.0001 for r in res)
+
+
+def test_engine_results_produce_nan_free_leaderboard():
+    """End-to-end: engine.run() persists results, then build_leaderboard()
+    reads them back — no NaN/Inf should survive into the actual leaderboard
+    rows a user or paper_trader would read, for any of the 3 strategy kinds."""
+    from monitoring.leaderboard import build_leaderboard
+    from strategies.ema_crossover import EMACrossover
+    from strategies.stat_arb import StatArbPairsStrategy
+    from strategies.funding_rate_arb import FundingRateArb
+
+    db = _fake_db()
+    engine = WalkForwardWindowEngine(
+        db=db,
+        strategies=[EMACrossover(), StatArbPairsStrategy(), FundingRateArb()],
+        symbols=["BTC/USDT", "ETH/USDT"],
+    )
+    engine.run()
+
+    lb = build_leaderboard(db)
+    assert not lb.empty
+
+    numeric_cols = [
+        "avg_sharpe", "avg_max_dd_pct", "avg_win_rate_pct", "n_windows",
+        "total_num_trades", "pass_ratio", "score", "risk_parity_alloc_pct",
+    ]
+    for col in numeric_cols:
+        assert col in lb.columns
+        values = lb[col].to_numpy(dtype=float)
+        assert np.isfinite(values).all(), f"{col} has NaN/Inf: {lb[col].tolist()}"
 
 
 # ── Promotion gate ────────────────────────────────────────────────────────────
