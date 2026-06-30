@@ -31,6 +31,7 @@ Usage:
 
 import argparse
 import logging
+import logging.handlers
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +48,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(log_dir / "ml4t.log"),
+        logging.handlers.RotatingFileHandler(
+            log_dir / "ml4t.log",
+            maxBytes=50 * 1024 * 1024,  # 50 MB per file
+            backupCount=7,              # keep 7 rotated files (~350 MB max)
+        ),
         logging.StreamHandler(),
     ],
 )
@@ -211,6 +216,11 @@ def main() -> int:
                 from cli.backtest import run_paper_backfill
                 success = run_paper_backfill(exchange=exchange, lookback_days=args.replay_days)
             else:
+                from cli.db import get_db_connection
+                from monitoring.startup_status import print_startup_status
+                _db = get_db_connection()
+                print_startup_status(_db, exchange=exchange)
+                _db.close_pool()
                 from cli.backtest import run_paper_trading
                 success = run_paper_trading(exchange=exchange)
 

@@ -72,41 +72,65 @@ def _top_accepted_strategy(db) -> Optional[Tuple[str, str, dict]]:
 
 
 def _paper_candidates(db) -> List[Tuple[str, str, dict]]:
-    """Best single-symbol strategy per symbol, by avg_sharpe, for paper trading.
+    """All single-symbol strategy-symbol combos with engine_results, for paper trading.
 
-    Deliberately ignores research_decisions.accepted and the leaderboard's
-    qualifies/pass_ratio gate — both are calibrated for live-capital
-    promotion (100+ trades, consistency across windows) and currently reject
-    everything single-symbol even when avg_sharpe is strongly positive.
-    Paper trading has no capital risk, so it runs on the best signal
-    available today and lets the journal accumulate real trade history.
-    Pairs strategies (e.g. Statistical Arbitrage) are excluded — paper
-    trading's signal path only supports single-symbol generate_signals().
+    Paper mode runs ALL strategies simultaneously — no strategy is excluded.
+    Every strategy logs entries, exits, PnL, drawdown, and timeframe chain to the
+    journal so the leaderboard can compute ready_for_live scores from real paper data.
+
+    Exclusions:
+      - Pairs strategies (require generate_signals_pair, not generate_signals).
+      - DCA / HODL when eval_mode=True — these are incompatible with a 3% MDD envelope.
+
+    Leaderboard qualifies/pass_ratio gates are NOT applied here — they are calibrated
+    for live-capital promotion. Paper has no capital risk and needs to accumulate
+    trade history across ALL strategies to populate ready_for_live scores.
     """
+    from config.loader import get_settings
     from monitoring.leaderboard import build_leaderboard
     from strategies.base import BasePairsStrategy
     from strategies.registry import StrategyRegistry
+
+    cfg = get_settings()
+
+    # Eval mode: run ONLY the single best ready_for_live strategy (auto-selected)
+    if cfg.eval_mode:
+        from monitoring.leaderboard import select_eval_strategy
+        result = select_eval_strategy(db)
+        if result is None:
+            logger.warning(
+                "paper_trader: eval_mode=True but no ready_for_live strategy — "
+                "continue paper trading to accumulate history"
+            )
+            return []
+        return [result]
 
     lb = build_leaderboard(db)
     if lb.empty:
         return []
 
-    lb = lb[lb["avg_sharpe"] > 0]
-    if lb.empty:
-        return []
-
+    # DCA and HODL accumulate slowly and don't pass prop-firm constraints;
+    # exclude them in eval mode (handled above) and let them paper-trade freely otherwise.
     candidates: List[Tuple[str, str, dict]] = []
-    for symbol, group in lb.groupby("symbol"):
-        best = group.sort_values("avg_sharpe", ascending=False).iloc[0]
-        strategy_name = str(best["strategy_name"])
+    seen: set = set()
+    for _, row in lb.iterrows():
+        strategy_name = str(row["strategy_name"])
+        symbol = str(row["symbol"])
+        key = (strategy_name, symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+
         try:
             strategy = StrategyRegistry.instantiate(strategy_name)
         except KeyError:
             continue
         if isinstance(strategy, BasePairsStrategy):
             continue
-        params = best["params"] if isinstance(best["params"], dict) else {}
-        candidates.append((strategy_name, str(symbol), params))
+
+        params = row["params"] if isinstance(row["params"], dict) else {}
+        candidates.append((strategy_name, symbol, params))
+
     return candidates
 
 
@@ -146,16 +170,18 @@ def _capital_weighted_equity(
     }
 
 
-def _latest_bars(db, symbol: str, n: int, exchange: str = "binance") -> Optional[pd.DataFrame]:
+def _latest_bars(
+    db, symbol: str, n: int, exchange: str = "binance", timeframe: str = "1d"
+) -> Optional[pd.DataFrame]:
     df = db.read_sql(
         """
         SELECT timestamp, open, high, low, close, volume
         FROM prices
-        WHERE symbol = %s AND exchange = %s
+        WHERE symbol = %s AND exchange = %s AND timeframe = %s
         ORDER BY timestamp DESC
         LIMIT %s
         """,
-        [symbol, exchange, n],
+        [symbol, exchange, timeframe, n],
     )
     if df.empty:
         return None
@@ -220,32 +246,108 @@ def _stop_breached(pos: PositionState, price: float) -> bool:
     return price >= pos.stop_price
 
 
-def _target_notional(pos: PositionState, cfg, extra_cap: Optional[float] = None) -> float:
-    """leg_allocation_pct sizing, clipped by the gap-risk safety cap and any
-    caller-supplied cap (e.g. live trading's LIVE_MAX_NOTIONAL_USDT)."""
+def _target_notional(
+    pos: PositionState,
+    cfg,
+    extra_cap: Optional[float] = None,
+    current_price: Optional[float] = None,
+    stop_price: Optional[float] = None,
+) -> float:
+    """leg_allocation_pct sizing, clipped by the dual safety cap (gap-risk headroom
+    AND per-trade risk budget) plus any caller-supplied hard cap.
+
+    Soft-floor halving: when cumulative drawdown from initial capital is between
+    soft_floor_amount and hard_floor_amount, position size is halved as a
+    first-response measure before the hard floor fires.
+    """
+    stop_dist = None
+    if stop_price is not None and current_price is not None and current_price > 0:
+        stop_dist = abs(stop_price - current_price) / current_price
+
     notional = pos.equity * cfg.leg_allocation_pct
-    notional = min(notional, max_safe_notional(pos, cfg))
+    notional = min(notional, max_safe_notional(pos, cfg, stop_distance_pct=stop_dist))
+
+    # Soft-floor halving: DD from initial capital ≥ soft_floor_amount → 50% sizing.
+    # Sizing returns to normal only when DD recovers below soft_floor_recovery_amount.
+    dd_from_initial = cfg.account_size - pos.equity
+    soft_recovery = getattr(cfg, 'soft_floor_recovery_amount', getattr(cfg, 'soft_floor_amount', 130.0))
+    soft_active = (
+        hasattr(cfg, 'soft_floor_amount')
+        and dd_from_initial >= cfg.soft_floor_amount
+        and dd_from_initial >= soft_recovery
+    )
+    if soft_active:
+        notional *= 0.5
+
     if extra_cap is not None:
         notional = min(notional, extra_cap)
     return max(notional, 0.0)
 
 
-def _update_propfirm(pos: PositionState, current_equity: float, cfg) -> None:
-    """Update peak, daily-halt, and account_failed in-place."""
+def _update_propfirm(pos: PositionState, current_equity: float, cfg) -> str:
+    """Update peak, daily-halt, account_failed in-place.
+
+    Returns a string event tag:
+      ""            — nothing changed
+      "soft_floor"  — soft floor newly crossed (size halved next trade, no halt)
+      "hard_floor"  — hard floor newly crossed (halt + close needed by caller)
+      "daily_halt"  — daily loss limit hit
+      "account_failed" — already failed (no-op, reported for logging)
+
+    Two-tier floor system (paper/live):
+      Soft floor (cfg.soft_floor_amount below initial capital, e.g. $130 DD):
+        → halves position sizing via _target_notional; no halt; logs WARNING.
+        → sizing restores once DD drops below soft_floor_recovery_amount.
+      Hard floor (cfg.hard_floor_amount below initial capital, e.g. $145 DD):
+        → sets account_failed = True and daily_halt = True.
+        → caller must force-close open positions and log the event to paper_orders.
+        → $5 buffer before the prop firm's actual $150 floor absorbs close slippage.
+
+    Manual kill-switch (force_close_now) is an emergency-only operator escape hatch.
+    The two-tier floor system is the primary automated protection — no manual
+    intervention is needed for normal drawdown scenarios.
+    """
+    if pos.account_failed:
+        return "account_failed"
+
     if current_equity > pos.peak_equity:
         pos.peak_equity = current_equity
+
+    event = ""
+
+    # ── Soft floor (warning tier, no halt) ───────────────────────────────────
+    dd_from_initial = cfg.account_size - current_equity
+    soft_floor_amount = getattr(cfg, 'soft_floor_amount', 130.0)
+    if dd_from_initial >= soft_floor_amount:
+        event = "soft_floor"
+        logger.warning(
+            "SOFT FLOOR TRIGGERED — equity=%.2f dd=%.2f — position size halved",
+            current_equity, dd_from_initial,
+        )
+
+    # ── Daily loss limit ──────────────────────────────────────────────────────
     daily_pnl = current_equity - pos.daily_start_equity
     if daily_pnl <= -cfg.account_size * cfg.max_daily_loss_pct:
         if not pos.daily_halt:
             pos.daily_halt = True
-            logger.warning("paper_trader: daily halt — daily_pnl=%.2f", daily_pnl)
-    if current_equity <= cfg.account_size * (1.0 - cfg.max_drawdown_pct):
-        if not pos.account_failed:
-            pos.account_failed = True
-            logger.error(
-                "paper_trader: ACCOUNT FAILED equity=%.2f floor=%.2f",
-                current_equity, cfg.account_size * (1.0 - cfg.max_drawdown_pct),
+            event = "daily_halt"
+            logger.warning(
+                "paper_trader: daily halt — daily_pnl=%.2f limit=%.2f",
+                daily_pnl, -cfg.account_size * cfg.max_daily_loss_pct,
             )
+
+    # ── Hard floor (internal buffer, $5 before prop firm's actual floor) ──────
+    hard_floor_equity = getattr(cfg, 'hard_floor_equity', cfg.account_size * (1.0 - cfg.max_drawdown_pct) + 5.0)
+    if current_equity <= hard_floor_equity:
+        pos.account_failed = True
+        pos.daily_halt = True
+        event = "hard_floor"
+        logger.error(
+            "HARD FLOOR TRIGGERED — equity=%.2f hard_floor=%.2f — all trading halted",
+            current_equity, hard_floor_equity,
+        )
+
+    return event
 
 
 # ── main cycle ────────────────────────────────────────────────────────────────
@@ -283,6 +385,7 @@ def _apply_paper_step(
     db, cfg, pos: PositionState, strategy_name: str, symbol: str, signal: str,
     price: float, bar_time, *, send_alerts: bool = True,
     regime_direction: Optional[str] = None, stop_price: Optional[float] = None,
+    source_timeframe: Optional[str] = None,
 ) -> int:
     """Apply one signal/price/time observation to `pos` in-place: rotation
     close, day rollover, prop-firm checks, stop check, open/close/hold.
@@ -314,28 +417,44 @@ def _apply_paper_step(
     # Close stale position if the strategy/symbol this run_id tracks rotated
     if not pos.is_flat and (pos.strategy_name != strategy_name or pos.symbol != symbol):
         pnl = _close(pos, price)
-        log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="rotation", created_at=bar_time)
+        log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="rotation",
+                  source_timeframe=source_timeframe, created_at=bar_time)
         n_orders += 1
         pos.strategy_name = strategy_name
         pos.symbol = symbol
 
-    # Day rollover: reset daily state
+    # Day rollover: reset daily state and trade count
     if pos.day_rolled(as_of=bar_time):
         pos.daily_start_equity = pos.mark_to_market(price)
         pos.daily_halt = False
+        pos.daily_trade_count = 0
 
     current_equity = pos.mark_to_market(price)
     was_account_failed, was_daily_halt = pos.account_failed, pos.daily_halt
-    _update_propfirm(pos, current_equity, cfg)
+    floor_event = _update_propfirm(pos, current_equity, cfg)
 
-    if pos.account_failed and not was_account_failed:
+    if floor_event == "hard_floor" and not was_account_failed:
+        hard_floor_eq = getattr(cfg, 'hard_floor_equity', cfg.account_size * 0.97 + 5.0)
         if send_alerts:
             send_alert(
-                f"ACCOUNT FAILED — paper/{exchange}/{symbol}",
-                f"Equity {current_equity:.2f} breached the drawdown floor "
-                f"({cfg.max_drawdown_pct:.0%} of {cfg.account_size:.2f}). Trading halted.",
+                f"HARD FLOOR — paper/{exchange}/{symbol}",
+                f"Equity {current_equity:.2f} hit internal hard floor ({hard_floor_eq:.2f}). "
+                f"All trading halted. Review journal before resuming.",
             )
-    elif pos.daily_halt and not was_daily_halt:
+        # Persist the hard-floor halt event to paper_orders for auditability.
+        log_order(db, pos, "HARD_FLOOR", price, close_reason="hard_floor",
+                  source_timeframe=source_timeframe, created_at=bar_time)
+        n_orders += 1
+    elif floor_event == "soft_floor":
+        soft_floor_eq = getattr(cfg, 'soft_floor_equity', cfg.account_size - 130.0)
+        if send_alerts:
+            send_alert(
+                f"SOFT FLOOR — paper/{exchange}/{symbol}",
+                f"Equity {current_equity:.2f} crossed soft floor ({soft_floor_eq:.2f}). "
+                f"Position size halved until DD recovers below "
+                f"${getattr(cfg, 'soft_floor_recovery_amount', 100):.0f}.",
+            )
+    elif floor_event == "daily_halt" and not was_daily_halt:
         if send_alerts:
             send_alert(
                 f"DAILY LOSS HALT — paper/{exchange}/{symbol}",
@@ -343,22 +462,25 @@ def _apply_paper_step(
                 f"({cfg.max_daily_loss_pct:.0%} of {cfg.account_size:.2f}). Halted until tomorrow.",
             )
 
-    # Force-close and stop if account is blown
+    # Force-close and stop if account is blown (hard floor or other failure)
     if pos.account_failed:
         if not pos.is_flat:
             pnl = _close(pos, price)
-            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="account_failed", created_at=bar_time)
+            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="account_failed",
+                      source_timeframe=source_timeframe, created_at=bar_time)
             n_orders += 1
         return n_orders
 
-    # Manual kill switch — no new opens until explicitly resumed via the dashboard
+    # Emergency manual halt (operator escape hatch — auto two-tier floor is primary).
+    # This only fires if an operator explicitly called force_close_now() externally.
     if pos.manual_halt:
         return n_orders
 
     # Structural stop: force-close before evaluating any new signal this step.
     if _stop_breached(pos, price):
         pnl = _close(pos, price)
-        log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="stop", created_at=bar_time)
+        log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="stop",
+                  source_timeframe=source_timeframe, created_at=bar_time)
         n_orders += 1
         logger.info("paper_trader: STOP %s @ %.4f  pnl=%.2f", symbol, price, pnl)
         pos.equity = pos.mark_to_market(price)
@@ -374,6 +496,16 @@ def _apply_paper_step(
 
     setup_tag = f"{strategy_name}_{signal.lower()}" if signal in ("BUY", "SELL") else None
 
+    # Max trades per day cap: in eval_mode default=3, else default=10
+    max_daily = getattr(cfg, 'max_trades_per_day', 10)
+    daily_cap_hit = pos.daily_trade_count >= max_daily
+    if daily_cap_hit and target is not None and pos.is_flat:
+        logger.info(
+            "paper_trader: daily trade cap (%d) hit for %s %s — skipping %s",
+            max_daily, strategy_name, symbol, target,
+        )
+        target = None  # treat remaining signal as HOLD
+
     regime_blocks_open = (
         (target == "LONG" and regime_direction == "bear")
         or (target == "SHORT" and regime_direction == "bull")
@@ -387,28 +519,34 @@ def _apply_paper_step(
     if target is not None:
         if pos.is_flat:
             if not pos.daily_halt and not regime_blocks_open:
-                notional = _target_notional(pos, cfg)
+                notional = _target_notional(pos, cfg, current_price=price, stop_price=stop_price)
                 _open(pos, target, price, notional, as_of=bar_time, stop_price=stop_price)
-                log_order(db, pos, "OPEN", price, setup_tag=setup_tag, created_at=bar_time)
+                log_order(db, pos, "OPEN", price, setup_tag=setup_tag,
+                          source_timeframe=source_timeframe, created_at=bar_time)
+                pos.daily_trade_count += 1
                 n_orders += 1
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
                             target, symbol, price, pos.equity)
         elif pos.side != target:
             pnl = _close(pos, price)
-            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="position_flip", created_at=bar_time)
+            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="position_flip",
+                      source_timeframe=source_timeframe, created_at=bar_time)
             n_orders += 1
             logger.info("paper_trader: CLOSE (flip) @ %.4f  pnl=%.2f", price, pnl)
             if not pos.daily_halt and not regime_blocks_open:
-                notional = _target_notional(pos, cfg)
+                notional = _target_notional(pos, cfg, current_price=price, stop_price=stop_price)
                 _open(pos, target, price, notional, as_of=bar_time, stop_price=stop_price)
-                log_order(db, pos, "OPEN", price, setup_tag=setup_tag, created_at=bar_time)
+                log_order(db, pos, "OPEN", price, setup_tag=setup_tag,
+                          source_timeframe=source_timeframe, created_at=bar_time)
+                pos.daily_trade_count += 1
                 n_orders += 1
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
                             target, symbol, price, pos.equity)
     else:
         if not pos.is_flat:
             pnl = _close(pos, price)
-            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="signal_exit", created_at=bar_time)
+            log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="signal_exit",
+                      source_timeframe=source_timeframe, created_at=bar_time)
             n_orders += 1
             logger.info("paper_trader: CLOSE %s @ %.4f  pnl=%.2f", symbol, price, pnl)
 
@@ -426,6 +564,10 @@ def _run_paper_slot(
     trading.position.load_position) — defaults to cfg.account_size (the
     pre-risk-parity flat allocation) when not given, e.g. for direct callers
     that don't go through run_paper_cycle's weighting step.
+
+    Uses TopDownSignalResolver when cfg.paper_regime_filter_enabled is True:
+    1w/1d bias + 4h confirmation + 1h entry → (signal, source_timeframe).
+    Falls back to a plain 1d signal when the resolver is disabled.
     """
     from strategies.registry import StrategyRegistry
     try:
@@ -434,34 +576,56 @@ def _run_paper_slot(
         logger.error("paper_trader[%s]: unknown strategy %s", exchange, strategy_name)
         return False
 
-    n_bars = strategy.get_min_bars(params) * 2 + 10
-    df = _latest_bars(db, symbol, n_bars, exchange=exchange)
+    source_timeframe: Optional[str] = None
+    regime_direction: Optional[str] = None
+
+    if cfg.paper_regime_filter_enabled:
+        from strategies.timeframe_resolver import TopDownSignalResolver
+        resolver = TopDownSignalResolver()
+        signal, source_timeframe = resolver.resolve(db, strategy, params, symbol, exchange)
+        # Derive regime_direction from the resolver's own bias for the regime filter
+        from backtesting.window_engine import compute_regime
+        # Use 1d bars for regime_direction (matches existing filter semantics)
+        df_1d = _latest_bars(db, symbol, strategy.get_min_bars(params) * 2 + 10,
+                             exchange=exchange, timeframe="1d")
+        if df_1d is not None and len(df_1d) >= 5:
+            _, _, regime_direction = compute_regime(df_1d)
+        # Use the 1d bars as the price/bar_time reference for close execution
+        df = df_1d
+    else:
+        df = _latest_bars(db, symbol, strategy.get_min_bars(params) * 2 + 10,
+                          exchange=exchange, timeframe="1d")
+        if df is None or len(df) < strategy.get_min_bars(params):
+            logger.warning("paper_trader[%s]: not enough bars for %s (%d)",
+                           exchange, symbol, 0 if df is None else len(df))
+            return True
+        signal = _last_signal(df, strategy_name, params)
+        source_timeframe = "1d"
+
     if df is None or len(df) < strategy.get_min_bars(params):
         logger.warning("paper_trader[%s]: not enough bars for %s (%d)",
-                        exchange, symbol, 0 if df is None else len(df))
+                       exchange, symbol, 0 if df is None else len(df))
         return True
 
-    signal = _last_signal(df, strategy_name, params)
     price = float(df["close"].iloc[-1])
     bar_time = df["timestamp"].iloc[-1]
     stop_level = strategy.get_stop_level(df, params)
 
-    regime_direction = None
-    if cfg.paper_regime_filter_enabled:
-        from backtesting.window_engine import compute_regime
-        _, _, regime_direction = compute_regime(df)
-
     pos = load_position(db, run_id, initial_capital=initial_capital or cfg.account_size,
                         strategy_name=strategy_name, symbol=symbol, exchange=exchange)
 
-    _apply_paper_step(db, cfg, pos, strategy_name, symbol, signal, price, bar_time,
-                       send_alerts=True, regime_direction=regime_direction, stop_price=stop_level)
+    _apply_paper_step(
+        db, cfg, pos, strategy_name, symbol, signal, price, bar_time,
+        send_alerts=True, regime_direction=regime_direction,
+        stop_price=stop_level, source_timeframe=source_timeframe,
+    )
     save_position(db, pos)
 
     dd_pct = (pos.peak_equity - pos.equity) / pos.peak_equity * 100 if pos.peak_equity > 0 else 0
     logger.info(
-        "paper_trader[%s]: %s | %s | signal=%-4s | equity=%.2f | dd=%.2f%% | halt=%s",
-        exchange, strategy_name, symbol, signal, pos.equity, dd_pct, pos.daily_halt,
+        "paper_trader[%s]: %s | %s | signal=%-4s | tf=%-3s | equity=%.2f | dd=%.2f%% | halt=%s",
+        exchange, strategy_name, symbol, signal, source_timeframe or "?",
+        pos.equity, dd_pct, pos.daily_halt,
     )
     return True
 

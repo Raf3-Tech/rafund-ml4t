@@ -25,6 +25,7 @@ class PositionState:
     manual_halt: bool = False
     stop_price: Optional[float] = None  # structural stop (e.g. SMCBreakout's order block edge); None = no stop
     last_update: Optional[datetime] = None
+    daily_trade_count: int = 0          # resets on day_rolled(); enforces max_trades_per_day
 
     @property
     def is_flat(self) -> bool:
@@ -51,29 +52,49 @@ class PositionState:
         return last.date() < now.date()
 
 
-def max_safe_notional(pos: PositionState, cfg) -> float:
-    """Cap a new position so a `cfg.max_adverse_move_pct` move right after
-    entry burns at most `cfg.risk_buffer_pct` of the remaining headroom to
-    either the daily-loss or drawdown floor — whichever is tighter.
+def max_safe_notional(
+    pos: PositionState,
+    cfg,
+    stop_distance_pct: Optional[float] = None,
+) -> float:
+    """Cap a new position under two independent constraints, returning the tighter:
 
-    Without this, position sizing (`leg_allocation_pct`) is blind to how
-    close equity already is to a hard limit and to single-bar gap risk, so a
-    flash-crash-sized move can blow straight through a prop-firm floor in
-    one bar (observed in stress testing: -7.1% in one bar vs. a 6% floor).
+    1. Gap-risk headroom cap: a max_adverse_move_pct adverse move right after
+       entry burns at most risk_buffer_pct of the remaining headroom to the
+       daily-loss or drawdown floor — whichever is closer. This prevents a
+       flash-crash-sized move from blowing through a prop-firm floor in one bar.
+
+    2. Per-trade risk cap (risk_per_trade_pct): notional is sized so that even a
+       worst-case adverse move (stop_distance_pct if a stop is known, else
+       max_adverse_move_pct) loses no more than account_size × risk_per_trade_pct.
+       On $5K with 0.5% risk and a 40% worst-case: cap = $62.50 notional.
+       With a 2% stop defined: cap = $25 / 0.02 = $1,250.
+
+    stop_distance_pct: if the strategy supplies a stop level, pass
+        abs(entry_price - stop_price) / entry_price here. When None, the
+        system falls back to max_adverse_move_pct (conservative/worst-case).
     """
-    dd_floor = cfg.account_size * (1.0 - cfg.max_drawdown_pct)
+    # ── Headroom cap ─────────────────────────────────────────────────────────
+    dd_floor = getattr(cfg, 'hard_floor_equity', cfg.account_size * (1.0 - cfg.max_drawdown_pct))
     dd_headroom = max(0.0, pos.equity - dd_floor)
 
     daily_floor = pos.daily_start_equity - cfg.account_size * cfg.max_daily_loss_pct
     daily_headroom = max(0.0, pos.equity - daily_floor)
 
     headroom = min(dd_headroom, daily_headroom)
-    return headroom * cfg.risk_buffer_pct / cfg.max_adverse_move_pct
+    headroom_cap = headroom * cfg.risk_buffer_pct / cfg.max_adverse_move_pct
+
+    # ── Per-trade risk cap ────────────────────────────────────────────────────
+    adverse = stop_distance_pct if (stop_distance_pct and stop_distance_pct > 0) else cfg.max_adverse_move_pct
+    risk_dollars = cfg.account_size * cfg.risk_per_trade_pct
+    risk_cap = risk_dollars / adverse
+
+    return min(headroom_cap, risk_cap)
 
 
 _POSITION_COLUMNS = """run_id, strategy_name, symbol, exchange, side, qty, entry_price, entry_time,
                    equity, peak_equity, daily_start_equity, daily_halt, account_failed,
-                   manual_halt, stop_price, last_update"""
+                   manual_halt, stop_price, last_update, daily_trade_count"""
 
 
 def _row_to_position(row) -> PositionState:
@@ -84,6 +105,7 @@ def _row_to_position(row) -> PositionState:
         daily_start_equity=float(row[10]), daily_halt=bool(row[11]),
         account_failed=bool(row[12]), manual_halt=bool(row[13]),
         stop_price=float(row[14]) if row[14] is not None else None, last_update=row[15],
+        daily_trade_count=int(row[16]) if row[16] is not None else 0,
     )
 
 
@@ -153,8 +175,8 @@ def save_position(db, pos: PositionState, last_update: Optional[datetime] = None
             INSERT INTO paper_positions
                 (run_id, strategy_name, symbol, exchange, side, qty, entry_price, entry_time,
                  equity, peak_equity, daily_start_equity, daily_halt, account_failed,
-                 manual_halt, stop_price, last_update)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
+                 manual_halt, stop_price, last_update, daily_trade_count)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()), %s)
             ON CONFLICT (run_id) DO UPDATE SET
                 strategy_name      = EXCLUDED.strategy_name,
                 symbol             = EXCLUDED.symbol,
@@ -170,13 +192,14 @@ def save_position(db, pos: PositionState, last_update: Optional[datetime] = None
                 account_failed     = EXCLUDED.account_failed,
                 manual_halt        = EXCLUDED.manual_halt,
                 stop_price         = EXCLUDED.stop_price,
-                last_update        = EXCLUDED.last_update
+                last_update        = EXCLUDED.last_update,
+                daily_trade_count  = EXCLUDED.daily_trade_count
             """,
             (
                 pos.run_id, pos.strategy_name, pos.symbol, pos.exchange, pos.side, pos.qty,
                 pos.entry_price, pos.entry_time, pos.equity, pos.peak_equity,
                 pos.daily_start_equity, pos.daily_halt, pos.account_failed, pos.manual_halt,
-                pos.stop_price, last_update,
+                pos.stop_price, last_update, pos.daily_trade_count,
             ),
         )
         conn.commit()
@@ -197,14 +220,16 @@ def log_order(
     exchange_order_id: Optional[str] = None,
     setup_tag: Optional[str] = None,
     close_reason: Optional[str] = None,
+    source_timeframe: Optional[str] = None,
     created_at: Optional[datetime] = None,
 ) -> None:
     """Append one order event to paper_orders.
 
     setup_tag identifies why an OPEN was taken (e.g. "ema_crossover_buy");
     close_reason identifies why a CLOSE happened (e.g. "signal_exit",
-    "rotation", "account_failed", "position_flip") — together these make up
-    the trade journal so wins/losses can be traced back to a cause.
+    "rotation", "account_failed", "hard_floor", "position_flip");
+    source_timeframe records which timeframe resolution produced the entry signal
+    (e.g. "1h", "4h") — part of the multi-timeframe chain audit trail.
 
     `created_at` defaults to NOW() server-side; pass the historical bar's
     timestamp during backfill replay so journal entries land on the date
@@ -217,13 +242,14 @@ def log_order(
             """
             INSERT INTO paper_orders
                 (run_id, strategy_name, symbol, exchange, event, side, qty, price, pnl,
-                 commission, order_type, exchange_order_id, setup_tag, close_reason, created_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
+                 commission, order_type, exchange_order_id, setup_tag, close_reason,
+                 source_timeframe, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
             """,
             (
                 pos.run_id, pos.strategy_name, pos.symbol, pos.exchange, event, pos.side,
                 pos.qty, price, pnl, commission, order_type, exchange_order_id,
-                setup_tag, close_reason, created_at,
+                setup_tag, close_reason, source_timeframe, created_at,
             ),
         )
         conn.commit()
