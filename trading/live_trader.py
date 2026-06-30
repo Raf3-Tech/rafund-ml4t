@@ -14,6 +14,22 @@ the signal bar's close price and given LIVE_LIMIT_FILL_TIMEOUT_S (default
 at a worse price. This system trades on daily-bar structure, not speed —
 there's no reason to cross the spread and pay for urgency that isn't needed.
 
+Leverage / account type (env vars):
+  LIVE_ACCOUNT_TYPE  — 'spot' (default), 'future' (USDT-M perps), 'margin'
+  LIVE_LEVERAGE      — integer multiplier, default 1 (no leverage).
+                       Set to 5 for 5× on a futures/margin account.
+  LIVE_MARGIN_MODE   — 'isolated' (default) or 'cross'.
+                       Isolated is strongly preferred for prop accounts:
+                       a hard-floor breach only wipes that position's margin,
+                       not the whole account balance.
+
+  When LIVE_ACCOUNT_TYPE=future, Binance uses USDT-M perpetual contracts.
+  Kraken and HTX use their native margin/futures APIs respectively.
+  Leverage is configured on the exchange once per cycle via set_leverage()
+  before any order is placed. Most prop-firm accounts accept this call;
+  if yours pre-configures leverage and rejects the API call it is logged
+  as a warning and trading continues (best-effort, not a hard gate).
+
 Run via:  python main.py live
 Or add to train_loop.sh after paper trading step.
 """
@@ -54,6 +70,20 @@ def _max_notional() -> float:
     return float(os.environ.get("LIVE_MAX_NOTIONAL_USDT", "200"))
 
 
+def _live_leverage() -> int:
+    return max(1, int(os.environ.get("LIVE_LEVERAGE", "1")))
+
+
+def _live_margin_mode() -> str:
+    mode = os.environ.get("LIVE_MARGIN_MODE", "isolated").strip().lower()
+    return mode if mode in ("isolated", "cross") else "isolated"
+
+
+def _live_account_type() -> str:
+    t = os.environ.get("LIVE_ACCOUNT_TYPE", "spot").strip().lower()
+    return t if t in ("spot", "future", "margin") else "spot"
+
+
 def _check_api_keys(exchange_name: str) -> bool:
     prefix = exchange_name.upper()
     key = os.environ.get(f"{prefix}_API_KEY", "")
@@ -70,17 +100,60 @@ def _check_api_keys(exchange_name: str) -> bool:
 def _build_exchange(exchange_name: str):
     import ccxt
     prefix = exchange_name.upper()
+    account_type = _live_account_type()
     creds = {
         "apiKey": os.environ.get(f"{prefix}_API_KEY", ""),
         "secret": os.environ.get(f"{prefix}_API_SECRET", ""),
         "enableRateLimit": True,
     }
     if exchange_name == "kraken":
+        # Kraken uses 'margin' type for leveraged trading
+        if account_type in ("future", "margin"):
+            creds["options"] = {"defaultType": "margin"}
         return ccxt.kraken(creds)
     if exchange_name == "htx":
+        # HTX (Huobi): swap for USDT-M perps, spot otherwise
+        if account_type == "future":
+            creds["options"] = {"defaultType": "swap"}
         return ccxt.htx(creds)
-    creds["options"] = {"defaultType": "spot"}
+    # Binance: future → USDT-M perps, margin → cross/isolated margin, spot → default
+    creds["options"] = {"defaultType": account_type if account_type in ("future", "margin") else "spot"}
     return ccxt.binance(creds)
+
+
+def _configure_leverage(exchange, symbol: str) -> bool:
+    """Set margin mode and leverage on the exchange for `symbol` before any order.
+
+    Best-effort: some prop-firm accounts pre-configure leverage and reject API
+    calls to change it — those failures are logged as warnings, not errors, and
+    trading continues. Returns True only if both calls succeeded.
+
+    Call once per cycle, before the first order. Exchanges ignore no-op calls
+    (e.g. set_leverage(5) when leverage is already 5) so repeated calls are safe.
+    """
+    leverage = _live_leverage()
+    margin_mode = _live_margin_mode()
+
+    if leverage == 1 and _live_account_type() == "spot":
+        return True  # spot with no leverage — nothing to configure
+
+    ok = True
+    try:
+        exchange.set_margin_mode(margin_mode, symbol)
+        logger.info("live_trader: margin mode set to %s for %s", margin_mode, symbol)
+    except Exception as exc:
+        # Many exchanges raise if mode is already set — treat as non-fatal.
+        logger.warning("live_trader: set_margin_mode(%s, %s) — %s (continuing)", margin_mode, symbol, exc)
+        ok = False
+
+    try:
+        exchange.set_leverage(leverage, symbol)
+        logger.info("live_trader: leverage set to %dx for %s", leverage, symbol)
+    except Exception as exc:
+        logger.warning("live_trader: set_leverage(%d, %s) — %s (continuing)", leverage, symbol, exc)
+        ok = False
+
+    return ok
 
 
 _LIMIT_FILL_TIMEOUT_S = float(os.environ.get("LIVE_LIMIT_FILL_TIMEOUT_S", "30"))
@@ -160,6 +233,7 @@ def force_close_live(db, pos) -> dict:
         log_order(db, pos, "CLOSE", price, pnl=pnl, order_type="shadow", close_reason="kill_switch")
     else:
         exchange = _build_exchange(exchange_name)
+        _configure_leverage(exchange, pos.symbol)
         ccxt_side = "sell" if pos.side == "LONG" else "buy"
         order = _place_limit_order(exchange, pos.symbol, ccxt_side, abs(pos.qty), price)
         fill = _fill_price(order, price) if order else price
@@ -193,6 +267,14 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
     exchange_name = (exchange or os.environ.get("LIVE_EXCHANGE", "binance")).lower()
     run_id = f"live_{exchange_name}"
 
+    leverage = _live_leverage()
+    account_type = _live_account_type()
+    margin_mode = _live_margin_mode()
+    logger.info(
+        "live_trader[%s]: account_type=%s  leverage=%dx  margin_mode=%s  shadow=%s",
+        exchange_name, account_type, leverage, margin_mode, shadow,
+    )
+
     if not shadow and not _check_api_keys(exchange_name):
         return False
 
@@ -225,6 +307,8 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                         strategy_name=strategy_name, symbol=symbol, exchange=exchange_name)
 
     exchange = _build_exchange(exchange_name) if not shadow else None
+    if exchange is not None:
+        _configure_leverage(exchange, symbol)
 
     # Close stale position when top strategy rotated
     if not pos.is_flat and (pos.strategy_name != strategy_name or pos.symbol != symbol):
