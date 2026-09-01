@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -118,6 +119,28 @@ def api_model_confidence():
         "confidence": round(confidence, 4),
         "feature_importance": top_features,
     })
+
+
+@bp.route("/api/execution-status", methods=["GET"])
+def api_execution_status():
+    from trading.execution import build_execution_adapter
+
+    live_enabled = os.environ.get("LIVE_TRADING_ENABLED", "0").strip() == "1"
+    adapters = {}
+    for exchange in ("binance", "kraken", "htx"):
+        shadow = not live_enabled
+        adapter = build_execution_adapter(exchange, shadow=shadow)
+        adapters[exchange] = adapter.describe()
+    return jsonify({"live_trading_enabled": live_enabled, "adapters": adapters})
+
+
+@bp.route("/api/kraken-api-info", methods=["GET"])
+def api_kraken_api_info():
+    from kraken_api_research import KrakenAPIInspector
+
+    inspector = KrakenAPIInspector()
+    info = inspector.inspect()
+    return jsonify(info)
 
 
 @bp.route("/api/drift-check", methods=["POST"])

@@ -227,6 +227,30 @@ def test_api_drift_check_empty_body_returns_400(client):
     assert resp.status_code == 400
 
 
+def test_api_execution_status_returns_adapter_info(client, monkeypatch):
+    adapter_info = {"exchange": "binance", "name": "paper", "supported_order_types": ["limit"]}
+    fake_adapter = MagicMock(describe=MagicMock(return_value=adapter_info))
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "0")
+    with patch("trading.execution.build_execution_adapter", return_value=fake_adapter):
+        resp = client.get("/api/execution-status")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["live_trading_enabled"] is False
+    assert "binance" in data["adapters"]
+    assert data["adapters"]["binance"] == adapter_info
+
+
+def test_api_kraken_api_info_returns_inspector_data(client, monkeypatch):
+    inspector_data = {"exchange": "kraken", "pairs": ["BTC/USD"]}
+    fake_inspector = MagicMock(inspect=MagicMock(return_value=inspector_data))
+    with patch("kraken_api_research.KrakenAPIInspector", return_value=fake_inspector):
+        resp = client.get("/api/kraken-api-info")
+
+    assert resp.status_code == 200
+    assert resp.get_json() == inspector_data
+
+
 def _drift_report() -> DriftReport:
     return DriftReport(
         symbol="BTC/USDT",

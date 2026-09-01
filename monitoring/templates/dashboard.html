@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>ML4T Trader Dashboard</title>
 <link rel="icon" href="data:,"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css"/>
@@ -97,12 +97,12 @@
         <option value="">(no open slots)</option>
       </select>
     </div>
-    <div id="trading-chart" style="height:360px"></div>
+    <div id="trading-chart" class="chart-tall"></div>
   </div>
 
   <div class="card">
     <div class="card-title"><i class="ti ti-trending-up" style="font-size:13px"></i> Equity Curve vs Buy &amp; Hold</div>
-    <div id="equity-curve-chart" style="height:240px"></div>
+    <div id="equity-curve-chart" class="chart-mid"></div>
   </div>
 
   <div class="card">
@@ -113,6 +113,11 @@
         <tbody id="orders-body"><tr class="empty-row"><td colspan="7">Loading…</td></tr></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card" id="live-signal-card">
+    <div class="card-title"><i class="ti ti-bolt" style="font-size:13px"></i> Live Signal</div>
+    <div id="live-signal-body"><div class="section-sub" style="margin:0">Loading…</div></div>
   </div>
 
   <div class="card">
@@ -374,12 +379,12 @@
 <!-- MOBILE BOTTOM NAV -->
 <div id="mobile-nav">
   <div class="mob-nav-inner">
-    <button class="mob-nav-item active" id="mob-trading" onclick="mobTab('trading',this)"><i class="ti ti-activity"></i>Trading</button>
-    <button class="mob-nav-item" id="mob-results" onclick="mobTab('results',this)"><i class="ti ti-chart-bar"></i>Results</button>
-    <button class="mob-nav-item" id="mob-ops" onclick="mobTab('ops',this)"><i class="ti ti-cpu"></i>Ops</button>
-    <button class="mob-nav-item" id="mob-research" onclick="mobTab('research',this)"><i class="ti ti-flask"></i>Research</button>
-    <button class="mob-nav-item" id="mob-simulate" onclick="mobTab('simulate',this)"><i class="ti ti-player-play"></i>Simulate</button>
-    <button class="mob-nav-item" id="mob-data" onclick="mobTab('data',this)"><i class="ti ti-database"></i>Data</button>
+    <button class="mob-nav-item active" id="mob-trading" onclick="mobTab('trading')"><i class="ti ti-activity"></i><span>Trading</span></button>
+    <button class="mob-nav-item" id="mob-results" onclick="mobTab('results')"><i class="ti ti-chart-bar"></i><span>Results</span></button>
+    <button class="mob-nav-item" id="mob-ops" onclick="mobTab('ops')"><i class="ti ti-cpu"></i><span>Ops</span></button>
+    <button class="mob-nav-item" id="mob-research" onclick="mobTab('research')"><i class="ti ti-flask"></i><span>Research</span></button>
+    <button class="mob-nav-item" id="mob-simulate" onclick="mobTab('simulate')"><i class="ti ti-player-play"></i><span>Sim</span></button>
+    <button class="mob-nav-item" id="mob-data" onclick="mobTab('data')"><i class="ti ti-database"></i><span>Data</span></button>
   </div>
 </div>
 <button class="mob-kill-fab" onclick="openKillModal()" title="Kill all positions"><i class="ti ti-bolt"></i></button>

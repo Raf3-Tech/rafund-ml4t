@@ -123,7 +123,7 @@ rafund-ml4t/
 │   ├── oracle-bootstrap.sh    # One-shot bootstrap for a fresh Oracle Cloud "Always Free" ARM instance (git clone + Docker Compose)
 │   └── update.sh              # Manual update: git pull + rebuild + restart services on the running instance
 │
-├── tests/                     # 415 passed
+├── tests/                     # 423 passed
 ├── docs/
 │   ├── CANDLESTICK_PATTERNS.md          # Objective candlestick patterns (engulfing bar) feeding SMC Breakout
 │   ├── STRATEGY_ENGINE_DESIGN.md
@@ -160,7 +160,7 @@ rafund-ml4t/
 | — | Manual halt switch (dashboard kill switch per paper position) | ✅ complete — `paper_positions.manual_halt` (Alembic 0010) |
 | — | CLI (collect, features, engine, leaderboard, train-classifier, research, paper, live, backfill) | ✅ complete |
 
-**Test suite: 415 passed.**
+**Test suite: 423 passed.**
 
 ---
 
@@ -239,6 +239,7 @@ python main.py collect --exchange kraken       # OHLCV from Kraken
 python main.py collect --exchange htx          # OHLCV from HTX
 python main.py collect --exchange all          # All three exchanges
 python main.py collect --funding               # 8h funding rates (Binance)
+python main.py dashboard                        # Launch the ops dashboard
 python main.py features                        # compute features
 ```
 
@@ -259,6 +260,7 @@ python main.py retrain                                       # Model retraining 
 python main.py drift                                         # Feature drift check
 python main.py engine [--strategy NAME] [--symbol SYM]      # Walk-forward engine: all strategies × all symbols
 python main.py leaderboard [--tier TIER]                     # Print ranked strategy leaderboard
+python main.py dashboard [--host HOST] [--port PORT]         # Launch the ops dashboard
 python main.py train-classifier                              # Train regime classifier
 python main.py research [--strategy NAME] [--symbol SYM]    # Closed-loop research pipeline (propose→backtest→gate)
 python main.py research --dry-run                            # Gate only, skip engine run (re-use existing results)
@@ -274,7 +276,7 @@ python main.py live --exchange binance|kraken|htx             # Live limit-order
 ## Running the Test Suite
 
 ```bash
-pytest                     # 415 passed
+pytest                     # 423 passed
 pytest --cov=. -q          # with coverage
 ```
 

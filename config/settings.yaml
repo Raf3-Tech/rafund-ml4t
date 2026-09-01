@@ -10,6 +10,13 @@ database:
 collect:
   start_date: "2017-08-17"
   timeframe: "1d"
+  # Multi-timeframe hierarchy: 1w/1d = bias, 4h = confirmation, 1h = entry timing.
+  # Collector fetches OHLCV for every listed timeframe per asset per exchange.
+  timeframes:
+    - 1h
+    - 4h
+    - 1d
+    - 1w
   symbols:
     - BTC/USDT
     - ETH/USDT
@@ -24,12 +31,34 @@ evaluation:
   pair_a: BTC/USDT
   pair_b: ETH/USDT
   account_size: 5000
-  # 1-phase challenge: 9% profit target, 3% daily loss limit, 3% static max drawdown
+  # 1-phase turbo: 9% profit target, 3% daily loss limit, 3% static max drawdown
   step1_profit: 450
   step2_profit: 450
   max_daily_loss_pct: 0.03
   max_drawdown_pct: 0.03
   max_leverage: 5.0
+
+live_account:
+  account_size: 5000
+  daily_loss_limit_pct: 0.03
+  drawdown_limit_pct: 0.03
+  max_leverage: 2.0
+  # Per-trade risk: max loss = account_size × risk_per_trade_pct if price moves
+  # max_adverse_move_pct against us. On $5K/0.5%/40% worst-case: $62.50 notional cap.
+  risk_per_trade_pct: 0.005
+  max_adverse_move_pct: 0.40
+  risk_buffer_pct: 0.70
+  # Two-tier protective floor (paper/live only; backtest uses prop firm's actual $150 floor).
+  # Soft floor ($130 DD): halves position sizing — no halt, just caution.
+  # Hard floor ($145 DD): force-close all positions, halt rest of day, log to journal.
+  # The $5 gap between $145 and the prop firm's $150 absorbs slippage on the close.
+  soft_floor_amount: 130.0
+  hard_floor_amount: 145.0
+  soft_floor_recovery_amount: 100.0   # DD must drop below $100 to restore full sizing
+  # Eval mode: DCA disabled, max 3 trades/day, only ready_for_live strategies selected.
+  # Set to true ONLY when running an actual prop firm evaluation.
+  eval_mode: false
+  max_trades_per_day: 3   # applies when eval_mode: true (paper mode uses 10)
 
 strategy:
   name: pairs_stat_arb
@@ -47,6 +76,15 @@ strategy:
   entropy_threshold: 0.95   # calibrated to daily-spread PE (median ~0.93)
   entropy_window: 30
   entropy_embedding: 3
+  # Top-down multi-timeframe bias filter for paper/live trading (Section 3).
+  # When enabled, a BUY/SELL signal is only executed when the 1d/1w trend bias
+  # agrees. Disable to run paper without the higher-timeframe filter.
+  paper_regime_filter_enabled: true
+  # Ready-for-live qualification bar (Section 4B).
+  # A strategy must clear all of these to be marked ready_for_live=True.
+  ready_for_live_min_dd_pct: 2.0        # avg MaxDD < 2%
+  ready_for_live_min_pass_ratio: 1.0    # 100% of walk-forward windows must pass
+  ready_for_live_min_paper_trades: 10   # minimum paper closed trades
 
 backtesting:
   commission: 0.001

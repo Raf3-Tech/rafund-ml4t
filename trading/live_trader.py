@@ -43,6 +43,7 @@ from typing import Optional
 
 from config.logging_config import get_logger
 from trading.alerts import send_alert
+from trading.execution import build_execution_engine
 from trading.paper_trader import (
     _close,
     _last_signal,
@@ -160,47 +161,16 @@ _LIMIT_FILL_TIMEOUT_S = float(os.environ.get("LIVE_LIMIT_FILL_TIMEOUT_S", "30"))
 _LIMIT_POLL_INTERVAL_S = 3.0
 
 
-def _place_limit_order(exchange, symbol: str, side: str, qty: float, price: float) -> Optional[dict]:
-    """Place a limit order at `price` and wait briefly for a fill.
+def _build_execution_engine(exchange_name: str, shadow: bool):
+    return build_execution_engine(exchange_name, shadow=shadow, max_notional=_max_notional())
 
-    No market orders — ever. If the order hasn't filled within
-    _LIMIT_FILL_TIMEOUT_S it's cancelled rather than chased at a worse
-    price; the caller treats a None return as "no trade happened."
-    """
-    try:
-        order = exchange.create_limit_order(symbol, side, qty, price)
-    except Exception as exc:
-        logger.error("live_trader: limit order failed — %s", exc)
+
+def _place_limit_order(engine, symbol: str, side: str, qty: float, price: float) -> Optional[dict]:
+    """Place a limit order through an execution engine and return the raw order."""
+    order = engine.place_limit_order(symbol, side, qty, price)
+    if order is None:
         return None
-
-    oid = order.get("id")
-    waited = 0.0
-    while waited < _LIMIT_FILL_TIMEOUT_S:
-        try:
-            status = exchange.fetch_order(oid, symbol)
-        except Exception as exc:
-            logger.warning("live_trader: fetch_order failed — %s", exc)
-            break
-        if status.get("status") == "closed":
-            logger.info("live_trader: LIMIT %s %s qty=%.6f @ %.4f filled  id=%s",
-                        side.upper(), symbol, qty, price, oid)
-            return status
-        time.sleep(_LIMIT_POLL_INTERVAL_S)
-        waited += _LIMIT_POLL_INTERVAL_S
-
-    try:
-        exchange.cancel_order(oid, symbol)
-        logger.warning("live_trader: limit order unfilled after %.0fs — cancelled  id=%s",
-                        _LIMIT_FILL_TIMEOUT_S, oid)
-    except Exception as exc:
-        logger.warning("live_trader: cancel failed (order may have just filled) — %s", exc)
-        try:
-            status = exchange.fetch_order(oid, symbol)
-            if status.get("status") == "closed":
-                return status
-        except Exception:
-            pass
-    return None
+    return order.raw
 
 
 def _fill_price(order: dict, fallback: float) -> float:
@@ -232,10 +202,11 @@ def force_close_live(db, pos) -> dict:
         pnl = _close(pos, price)
         log_order(db, pos, "CLOSE", price, pnl=pnl, order_type="shadow", close_reason="kill_switch")
     else:
+        engine = _build_execution_engine(exchange_name, shadow)
         exchange = _build_exchange(exchange_name)
         _configure_leverage(exchange, pos.symbol)
         ccxt_side = "sell" if pos.side == "LONG" else "buy"
-        order = _place_limit_order(exchange, pos.symbol, ccxt_side, abs(pos.qty), price)
+        order = _place_limit_order(engine, pos.symbol, ccxt_side, abs(pos.qty), price)
         fill = _fill_price(order, price) if order else price
         oid = order["id"] if order else None
         pnl = _close(pos, fill)
@@ -306,6 +277,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
     pos = load_position(db, run_id, initial_capital=cfg.account_size,
                         strategy_name=strategy_name, symbol=symbol, exchange=exchange_name)
 
+    engine = _build_execution_engine(exchange_name, shadow)
     exchange = _build_exchange(exchange_name) if not shadow else None
     if exchange is not None:
         _configure_leverage(exchange, symbol)
@@ -315,7 +287,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
         logger.info("live_trader: top strategy changed — closing stale %s %s", pos.side, pos.symbol)
         if not shadow:
             ccxt_side = "sell" if pos.side == "LONG" else "buy"
-            order = _place_limit_order(exchange, pos.symbol, ccxt_side, abs(pos.qty), price)
+            order = _place_limit_order(engine, pos.symbol, ccxt_side, abs(pos.qty), price)
             fill = _fill_price(order, price) if order else price
             oid = order["id"] if order else None
             pnl = _close(pos, fill)
@@ -360,7 +332,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
         logger.warning("live_trader: %s — force-closing position", reason)
         if not shadow:
             ccxt_side = "sell" if pos.side == "LONG" else "buy"
-            order = _place_limit_order(exchange, pos.symbol, ccxt_side, abs(pos.qty), price)
+            order = _place_limit_order(engine, pos.symbol, ccxt_side, abs(pos.qty), price)
             fill = _fill_price(order, price) if order else price
             oid = order["id"] if order else None
             pnl = _close(pos, fill)
@@ -399,7 +371,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                     log_order(db, pos, "OPEN", price, order_type="shadow", setup_tag=setup_tag)
                 else:
                     ccxt_side = "buy" if target == "LONG" else "sell"
-                    order = _place_limit_order(exchange, symbol, ccxt_side, qty, price)
+                    order = _place_limit_order(engine, symbol, ccxt_side, qty, price)
                     if order:
                         fill = _fill_price(order, price)
                         _open(pos, target, fill, notional)
@@ -418,7 +390,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                     log_order(db, pos, "OPEN", price, order_type="shadow", setup_tag=setup_tag)
             else:
                 ccxt_side = "sell" if pos.side == "LONG" else "buy"
-                order = _place_limit_order(exchange, symbol, ccxt_side, abs(pos.qty), price)
+                order = _place_limit_order(engine, symbol, ccxt_side, abs(pos.qty), price)
                 fill = _fill_price(order, price) if order else price
                 oid = order["id"] if order else None
                 pnl = _close(pos, fill)
@@ -429,7 +401,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                     notional = _target_notional(pos, cfg, extra_cap=_max_notional())
                     qty = notional / fill
                     ccxt_side2 = "buy" if target == "LONG" else "sell"
-                    order2 = _place_limit_order(exchange, symbol, ccxt_side2, qty, fill)
+                    order2 = _place_limit_order(engine, symbol, ccxt_side2, qty, fill)
                     if order2:
                         fill2 = _fill_price(order2, fill)
                         _open(pos, target, fill2, notional)
@@ -443,7 +415,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                 log_order(db, pos, "CLOSE", price, pnl=pnl, order_type="shadow", close_reason="signal_exit")
             else:
                 ccxt_side = "sell" if pos.side == "LONG" else "buy"
-                order = _place_limit_order(exchange, symbol, ccxt_side, abs(pos.qty), price)
+                order = _place_limit_order(engine, symbol, ccxt_side, abs(pos.qty), price)
                 fill = _fill_price(order, price) if order else price
                 oid = order["id"] if order else None
                 pnl = _close(pos, fill)

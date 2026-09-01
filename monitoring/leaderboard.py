@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,23 @@ MIN_CONSISTENCY = 0.50
 
 def _score(sharpe: float, win_rate: float, consistency: float) -> float:
     return sharpe * win_rate * consistency
+
+
+def _paper_closed_counts(db) -> dict:
+    """Return {(strategy_name, symbol): closed_trade_count} from paper_orders."""
+    try:
+        df = db.read_sql("""
+            SELECT strategy_name, symbol, COUNT(*) AS n
+            FROM paper_orders
+            WHERE event = 'CLOSE'
+            GROUP BY strategy_name, symbol
+        """)
+    except Exception as e:
+        logger.warning("Could not query paper_orders for closed trade counts: %s", e)
+        return {}
+    if df.empty or "n" not in df.columns:
+        return {}
+    return {(row["strategy_name"], row["symbol"]): int(row["n"]) for _, row in df.iterrows()}
 
 
 def _failure_reason(strategy_name: str, results: Dict) -> str:
@@ -99,7 +116,14 @@ def _add_risk_parity_allocations(result: pd.DataFrame, returns_pivot: pd.DataFra
 
 
 def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
-    """Query engine_results and return a ranked leaderboard DataFrame."""
+    """Query engine_results and return a ranked leaderboard DataFrame.
+
+    Includes a ready_for_live boolean column: True only when:
+      - score > 0 (qualifies and has positive Sharpe × win_rate × pass_ratio)
+      - avg MaxDD across walk-forward windows < ready_for_live_min_dd_pct (2%)
+      - pass_ratio == 1.0 (every window passed)
+      - closed paper trades >= ready_for_live_min_paper_trades (10)
+    """
     try:
         df = db.read_sql("""
             SELECT
@@ -128,6 +152,17 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
     if df.empty:
         logger.warning("engine_results is empty — run: python main.py engine first.")
         return pd.DataFrame()
+
+    try:
+        from config.loader import get_settings
+        cfg = get_settings()
+        rfl_min_dd = float(getattr(cfg, 'ready_for_live_min_dd_pct', 2.0))
+        rfl_min_pass = float(getattr(cfg, 'ready_for_live_min_pass_ratio', 1.0))
+        rfl_min_trades = int(getattr(cfg, 'ready_for_live_min_paper_trades', 10))
+    except Exception:
+        rfl_min_dd, rfl_min_pass, rfl_min_trades = 2.0, 1.0, 10
+
+    paper_counts = _paper_closed_counts(db)
 
     records: List[Dict] = []
 
@@ -176,6 +211,14 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
             "pass_ratio": pass_ratio,
         })
 
+        paper_closed = paper_counts.get((strategy_name, symbol), 0)
+        ready_for_live = (
+            score > 0
+            and avg_dd < rfl_min_dd
+            and pass_ratio >= rfl_min_pass
+            and paper_closed >= rfl_min_trades
+        )
+
         records.append({
             "strategy_name": strategy_name,
             "symbol": symbol,
@@ -186,9 +229,11 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
             "n_windows": n_total,
             "total_num_trades": total_num_trades,
             "pass_ratio": round(pass_ratio, 3),
+            "paper_trades_closed": paper_closed,
             "regime": regime_label,
             "score": round(score, 4),
             "qualifies": qualifies,
+            "ready_for_live": ready_for_live,
             "reason": reason,
         })
 
@@ -233,12 +278,15 @@ def print_leaderboard(lb: pd.DataFrame, tier: Optional[str] = None) -> None:
     for rank, row in lb.iterrows():
         params_str = ", ".join(f"{k}={v}" for k, v in row["params"].items()) if row["params"] else ""
         status = "OK" if row["qualifies"] else "FAIL"
+        rfl = "LIVE-READY" if row.get("ready_for_live") else ""
         alloc = row.get("risk_parity_alloc_pct", 0.0)
+        paper_n = row.get("paper_trades_closed", 0)
         print(
             f"{rank:>4} | {row['strategy_name']:25} | {row['symbol']:10} | "
             f"{row['avg_sharpe']:7.2f} | {row['avg_max_dd_pct']:6.1f} | "
             f"{row['avg_win_rate_pct']:7.1f} | {row['n_windows']:7} | "
-            f"{row['pass_ratio']*100:5.1f}% | [{status}] alloc={alloc:.1f}% {row['regime']}"
+            f"{row['pass_ratio']*100:5.1f}% | paper={paper_n:3d} | "
+            f"[{status}] {rfl} alloc={alloc:.1f}% {row['regime']}"
         )
         if params_str:
             print(f"{'':4}   params: {params_str}")
@@ -274,6 +322,36 @@ def write_leaderboard_md(lb: pd.DataFrame, tier: Optional[str] = None) -> None:
 
     out_path.write_text("\n".join(lines) + "\n")
     logger.info("Leaderboard written to %s", out_path)
+
+
+def select_eval_strategy(db) -> Optional[Tuple[str, str, dict]]:
+    """Return (strategy_name, symbol, params) for eval mode.
+
+    Picks the single best ready_for_live strategy: lowest avg_max_dd_pct
+    as primary sort, highest pass_ratio as tiebreaker. Returns None when
+    no strategy has cleared the ready_for_live bar yet.
+    """
+    lb = build_leaderboard(db)
+    if lb.empty:
+        return None
+    candidates = lb[lb["ready_for_live"] == True]  # noqa: E712
+    if candidates.empty:
+        logger.warning(
+            "eval_mode: no ready_for_live strategy found — "
+            "need score>0, avg MaxDD<2%%, pass_ratio=100%%, 10+ paper trades"
+        )
+        return None
+    best = candidates.sort_values(
+        ["avg_max_dd_pct", "pass_ratio"], ascending=[True, False]
+    ).iloc[0]
+    params = best["params"] if isinstance(best["params"], dict) else {}
+    logger.info(
+        "eval_mode: selected %s / %s (MaxDD=%.2f%% pass=%.0f%% paper=%d)",
+        best["strategy_name"], best["symbol"],
+        best["avg_max_dd_pct"], best["pass_ratio"] * 100,
+        best.get("paper_trades_closed", 0),
+    )
+    return str(best["strategy_name"]), str(best["symbol"]), params
 
 
 def run_leaderboard_cmd(db, tier: Optional[str] = None) -> bool:

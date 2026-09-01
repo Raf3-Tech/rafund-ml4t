@@ -4,16 +4,27 @@ Load settings from config/settings.yaml with environment variable overrides.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import yaml
 from sqlalchemy.engine import URL
 
 from config.constants import STAT_ARB_ENTRY_Z, STAT_ARB_EXIT_Z
+
+_log = logging.getLogger(__name__)
+
+# Hard maximums for the 1-step Turbo prop eval constraint.
+# These are the UPPER BOUNDS — configured values must never exceed them
+# when eval_mode is active, and Python-level fallback defaults must
+# never be set above them regardless of mode.
+_EVAL_MAX_DAILY_LOSS_PCT: float = 0.03
+_EVAL_MAX_DRAWDOWN_PCT: float = 0.03
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SETTINGS_PATH = _ROOT / "config" / "settings.yaml"
@@ -143,6 +154,7 @@ class Settings:
         strat = raw.get("strategy", {})
         bt = raw.get("backtesting", {})
         eval_cfg = raw.get("evaluation", {})
+        live_cfg = raw.get("live_account", {})
         collect = raw.get("collect", {})
         retrain = raw.get("retraining", {})
 
@@ -218,25 +230,80 @@ class Settings:
         )
         self.timeframe = collect.get("timeframe", data.get("timeframe", "1d"))
 
+        # Multi-timeframe hierarchy: higher frames define bias, lower frames time the entry.
+        # Collector fetches OHLCV for every listed timeframe on startup and each cycle.
+        self.timeframes: List[str] = list(
+            collect.get("timeframes", ["1h", "4h", "1d", "1w"])
+        )
+
+        # Warn immediately if settings.yaml is missing or has no [evaluation] section —
+        # silently falling back to hardcoded values for risk parameters is never safe.
+        if not _SETTINGS_PATH.exists():
+            _log.warning(
+                "settings.yaml NOT FOUND at %s — using hardcoded risk defaults. "
+                "This is UNSAFE for live/eval trading. "
+                "max_daily_loss_pct=%.2f max_drawdown_pct=%.2f",
+                _SETTINGS_PATH, _EVAL_MAX_DAILY_LOSS_PCT, _EVAL_MAX_DRAWDOWN_PCT,
+            )
+        elif not eval_cfg:
+            _log.warning(
+                "settings.yaml has no [evaluation] section — using hardcoded risk defaults. "
+                "max_daily_loss_pct=%.2f max_drawdown_pct=%.2f",
+                _EVAL_MAX_DAILY_LOSS_PCT, _EVAL_MAX_DRAWDOWN_PCT,
+            )
+
         self.eval_pair_a = _env("EVAL_PAIR_A", eval_cfg.get("pair_a", "BTC/USDT"))
         self.eval_pair_b = _env("EVAL_PAIR_B", eval_cfg.get("pair_b", "ETH/USDT"))
         self.account_size = _env_float(
             "ACCOUNT_SIZE", float(eval_cfg.get("account_size", 5000))
         )
         self.step1_profit = _env_float(
-            "STEP1_PROFIT", float(eval_cfg.get("step1_profit", 250))
+            "STEP1_PROFIT", float(eval_cfg.get("step1_profit", 450))
         )
         self.step2_profit = _env_float(
-            "STEP2_PROFIT", float(eval_cfg.get("step2_profit", 500))
+            "STEP2_PROFIT", float(eval_cfg.get("step2_profit", 450))
         )
+        # Fallback defaults are set to the eval constraint maximums (3% / 3%).
+        # If settings.yaml is absent these kick in — they are conservative by design
+        # so a missing config file degrades safely rather than permissively.
         self.max_daily_loss_pct = _env_float(
-            "MAX_DAILY_LOSS_PCT", float(eval_cfg.get("max_daily_loss_pct", 0.04))
+            "MAX_DAILY_LOSS_PCT", float(eval_cfg.get("max_daily_loss_pct", _EVAL_MAX_DAILY_LOSS_PCT))
         )
         self.max_drawdown_pct = _env_float(
-            "MAX_DRAWDOWN_PCT", float(eval_cfg.get("max_drawdown_pct", 0.06))
+            "MAX_DRAWDOWN_PCT", float(eval_cfg.get("max_drawdown_pct", _EVAL_MAX_DRAWDOWN_PCT))
         )
         self.max_leverage = _env_float(
             "MAX_LEVERAGE", float(eval_cfg.get("max_leverage", 5.0))
+        )
+        self.live_account = SimpleNamespace(
+            account_size=_env_float(
+                "LIVE_ACCOUNT_ACCOUNT_SIZE", float(live_cfg.get("account_size", 5000))
+            ),
+            daily_loss_limit_pct=_env_float(
+                "LIVE_ACCOUNT_DAILY_LOSS_LIMIT_PCT",
+                float(live_cfg.get("daily_loss_limit_pct", 0.03)),
+            ),
+            drawdown_limit_pct=_env_float(
+                "LIVE_ACCOUNT_DRAWDOWN_LIMIT_PCT",
+                float(live_cfg.get("drawdown_limit_pct", 0.03)),
+            ),
+            max_leverage=_env_float(
+                "LIVE_ACCOUNT_MAX_LEVERAGE", float(live_cfg.get("max_leverage", 2.0))
+            ),
+        )
+
+        # Two-tier protective floor (paper/live only — backtest uses prop firm's actual floor).
+        # Soft floor: reduce position size 50% when cumulative DD from initial capital ≥ this.
+        # Hard floor: halt + force-close at this amount — $5 buffer before the prop firm's $150 limit.
+        # Recovery: soft-floor sizing returns to normal only when DD drops back below this amount.
+        self.soft_floor_amount = _env_float(
+            "SOFT_FLOOR_AMOUNT", float(eval_cfg.get("soft_floor_amount", 130.0))
+        )
+        self.hard_floor_amount = _env_float(
+            "HARD_FLOOR_AMOUNT", float(eval_cfg.get("hard_floor_amount", 145.0))
+        )
+        self.soft_floor_recovery_amount = _env_float(
+            "SOFT_FLOOR_RECOVERY_AMOUNT", float(eval_cfg.get("soft_floor_recovery_amount", 100.0))
         )
 
         # Gap-risk safety clip for live/paper position sizing (see
@@ -253,6 +320,24 @@ class Settings:
         )
         self.risk_buffer_pct = _env_float(
             "RISK_BUFFER_PCT", float(eval_cfg.get("risk_buffer_pct", 0.7))
+        )
+
+        # Per-trade risk cap: maximum fraction of account_size that a single trade
+        # may lose if price moves max_adverse_move_pct against the position.
+        # notional_cap = account_size * risk_per_trade_pct / max_adverse_move_pct
+        # On $5K with 0.5% risk and 40% worst-case: cap = $62.50 notional.
+        self.risk_per_trade_pct = _env_float(
+            "RISK_PER_TRADE_PCT", float(eval_cfg.get("risk_per_trade_pct", 0.005))
+        )
+
+        # Eval mode: tighter constraints (DCA disabled, max 3 trades/day, only
+        # ready_for_live strategies run in eval slot).
+        self.eval_mode = _env_bool(
+            "EVAL_MODE", bool(eval_cfg.get("eval_mode", False))
+        )
+        self.max_trades_per_day = _env_int(
+            "MAX_TRADES_PER_DAY",
+            int(eval_cfg.get("max_trades_per_day", 3 if eval_cfg.get("eval_mode") else 10)),
         )
 
         # Email alerts on risk events (halts, kill switch, account failure).
@@ -334,6 +419,22 @@ class Settings:
             self.max_leverage > 0, f"max_leverage must be > 0, got {self.max_leverage}"
         )
         _check(
+            self.live_account.max_leverage > 0,
+            f"live_account.max_leverage must be > 0, got {self.live_account.max_leverage}",
+        )
+        _check(
+            0.0 < self.live_account.daily_loss_limit_pct < 1.0,
+            f"live_account.daily_loss_limit_pct must be in (0, 1), got {self.live_account.daily_loss_limit_pct}",
+        )
+        _check(
+            0.0 < self.live_account.drawdown_limit_pct < 1.0,
+            f"live_account.drawdown_limit_pct must be in (0, 1), got {self.live_account.drawdown_limit_pct}",
+        )
+        _check(
+            self.live_account.account_size > 0,
+            f"live_account.account_size must be > 0, got {self.live_account.account_size}",
+        )
+        _check(
             0.0 <= self.commission < 1.0,
             f"commission must be in [0, 1), got {self.commission}",
         )
@@ -357,6 +458,43 @@ class Settings:
             0.0 < self.risk_buffer_pct <= 1.0,
             f"risk_buffer_pct must be in (0, 1], got {self.risk_buffer_pct}",
         )
+        _check(
+            0.0 < self.risk_per_trade_pct <= 0.05,
+            f"risk_per_trade_pct must be in (0, 0.05], got {self.risk_per_trade_pct}",
+        )
+        _check(
+            0.0 < self.soft_floor_amount < self.hard_floor_amount,
+            f"soft_floor_amount ({self.soft_floor_amount}) must be < hard_floor_amount ({self.hard_floor_amount})",
+        )
+        _check(
+            self.hard_floor_amount < self.account_size * self.max_drawdown_pct,
+            f"hard_floor_amount ({self.hard_floor_amount}) must be < prop-firm floor "
+            f"({self.account_size * self.max_drawdown_pct:.2f})",
+        )
+        _check(
+            self.max_trades_per_day > 0,
+            f"max_trades_per_day must be > 0, got {self.max_trades_per_day}",
+        )
+
+        # Assertion: when eval_mode is active, risk limits MUST be at or within
+        # the prop-firm maximums. This is a hard gate — misconfigured limits in
+        # eval mode would silently allow a rule breach, which is never acceptable.
+        if self.eval_mode:
+            _check(
+                self.max_daily_loss_pct <= _EVAL_MAX_DAILY_LOSS_PCT,
+                f"eval_mode=true but max_daily_loss_pct={self.max_daily_loss_pct} "
+                f"> eval maximum {_EVAL_MAX_DAILY_LOSS_PCT}",
+            )
+            _check(
+                self.max_drawdown_pct <= _EVAL_MAX_DRAWDOWN_PCT,
+                f"eval_mode=true but max_drawdown_pct={self.max_drawdown_pct} "
+                f"> eval maximum {_EVAL_MAX_DRAWDOWN_PCT}",
+            )
+            _check(
+                self.max_trades_per_day <= 3,
+                f"eval_mode=true but max_trades_per_day={self.max_trades_per_day} > 3",
+            )
+
         _check(self.lookback > 0, f"lookback must be > 0, got {self.lookback}")
         _check(
             self.max_holding_days > 0,
@@ -388,6 +526,21 @@ class Settings:
 
         if errors:
             raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
+
+    @property
+    def hard_floor_equity(self) -> float:
+        """Absolute equity level at which the internal hard floor fires."""
+        return self.account_size - self.hard_floor_amount
+
+    @property
+    def soft_floor_equity(self) -> float:
+        """Absolute equity level at which the soft floor (50% sizing) activates."""
+        return self.account_size - self.soft_floor_amount
+
+    @property
+    def risk_notional_cap(self) -> float:
+        """Max notional so that a max_adverse_move_pct loss ≤ risk_per_trade_pct × account_size."""
+        return (self.account_size * self.risk_per_trade_pct) / self.max_adverse_move_pct
 
     def research_pairs_enabled(self) -> bool:
         return _env_bool("RESEARCH_ALL_PAIRS", False)

@@ -9,24 +9,25 @@ Usage:
     python main.py collect --exchange htx           # Collect from HTX instead
     python main.py collect --exchange all           # Collect from all exchanges
     python main.py collect --funding                # Also collect 8h funding rates (Binance)
-    python main.py features             # Calculate spread features
-    python main.py signals              # Generate signals
-    python main.py backtest             # Run evaluation backtest
-    python main.py engine               # Walk-forward engine: all strategies × symbols
+    python main.py features                         # Calculate spread features
+    python main.py signals                          # Generate signals
+    python main.py backtest                         # Run evaluation backtest
+    python main.py engine                           # Walk-forward engine: all strategies × symbols
     python main.py engine --strategy "EMA Crossover" --symbol BTC/USDT
-    python main.py leaderboard          # Print all strategies x symbols, qualifying or not, with reasons
-    python main.py leaderboard --tier qualifying   # Only show ones that pass
-    python main.py train-classifier     # Train regime ML classifier
-    python main.py validate             # Walk-forward OOS validation
-    python main.py retrain              # Retrain + validate models
-    python main.py drift                # Feature-drift check for production models
-    python main.py research             # Closed-loop research pipeline
-    python main.py research --dry-run   # Gate only, skip engine run
+    python main.py leaderboard                      # Print all strategies x symbols, qualifying or not, with reasons
+    python main.py leaderboard --tier qualifying    # Only show ones that pass
+    python main.py train-classifier                 # Train regime ML classifier
+    python main.py validate                         # Walk-forward OOS validation
+    python main.py retrain                          # Retrain + validate models
+    python main.py drift                            # Feature-drift check for production models
+    python main.py research                         # Closed-loop research pipeline
+    python main.py research --dry-run               # Gate only, skip engine run
     python main.py research --top-n 5
-    python main.py pipeline             # Collect → backtest → persist
-    python main.py bootstrap            # Alias for pipeline
-    python main.py paper                # Paper trading
-    python main.py live                 # Live trading (DANGER — not implemented)
+    python main.py pipeline                         # Collect → backtest → persist
+    python main.py bootstrap                        # Alias for pipeline
+    python main.py dashboard                        # Launch the ops dashboard
+    python main.py paper                            # Paper trading
+    python main.py live                             # Live trading (DANGER — not implemented)
 """
 
 import argparse
@@ -74,9 +75,9 @@ def main() -> int:
         default="collect",
         choices=[
             "collect", "features", "signals", "backtest", "validate", "retrain",
-            "drift", "backfill", "pipeline", "bootstrap", "paper", "live",
-            "benchmark", "models", "engine", "leaderboard", "train-classifier",
-            "research",
+            "drift", "backfill", "pipeline", "bootstrap", "dashboard", "paper",
+            "live", "benchmark", "models", "engine", "leaderboard",
+            "train-classifier", "research",
         ],
     )
     parser.add_argument("submode", nargs="?")
@@ -96,6 +97,8 @@ def main() -> int:
     parser.add_argument("--top-n", type=int, default=5, dest="top_n")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--host", help="Dashboard host (used for dashboard mode)")
+    parser.add_argument("--port", type=int, help="Dashboard port (used for dashboard mode)")
     parser.add_argument("--from", dest="date_from")
     parser.add_argument("--to", dest="date_to")
     parser.add_argument("--timeframe")
@@ -209,6 +212,11 @@ def main() -> int:
         elif args.mode in ("pipeline", "bootstrap"):
             from cli.backtest import run_full_pipeline
             success = run_full_pipeline()
+
+        elif args.mode == "dashboard":
+            from monitoring.run_dashboard import main as run_dashboard
+            run_dashboard(host=args.host, port=args.port)
+            success = True
 
         elif args.mode == "paper":
             exchange = None if args.exchange in (None, "all") else args.exchange

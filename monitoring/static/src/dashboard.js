@@ -970,6 +970,7 @@ function onChartExchangeChange() {
   renderOrders();
   loadTradingChart();
   loadEquityCurve();
+  loadLiveSignal();
 }
 
 // ── Global risk strip + alerts ───────────────────────────────────────────────
@@ -1083,6 +1084,7 @@ async function loadTradingStatus() {
     loadTradingChart();
     loadJournalSummary();
     loadEquityCurve();
+    loadLiveSignal();
   } catch (e) { showToast('Could not load trading status', 'error'); }
 }
 
@@ -1161,4 +1163,42 @@ async function loadEquityCurve() {
       legend: {orientation: 'h'},
     }, {responsive: true, displayModeBar: false});
   } catch(e) { /* non-fatal */ }
+}
+
+// ── Live signal panel ──────────────────────────────────────────────────────
+async function fetchLiveSignalData() {
+  const exchange = document.getElementById('chart-exchange').value;
+  const runId = currentChartRunId();
+  const positions = positionsForExchange(exchange);
+  const pos = runId ? positions.find(p => p.run_id === runId) : positions[0];
+  if (!pos || !pos.symbol || pos.symbol.indexOf('|') === -1) return null;
+  const url = '/api/live-signal?exchange=' + encodeURIComponent(exchange) + '&symbol=' + encodeURIComponent(pos.symbol);
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+function renderLiveSignal(data) {
+  const wrap = document.getElementById('live-signal-body');
+  if (!wrap) return;
+  if (!data) { wrap.innerHTML = '<div class="section-sub">No pair configured or data unavailable.</div>'; return; }
+  const acct = data.account_state || {};
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div><strong>${esc(data.symbol_a)} | ${esc(data.symbol_b)}</strong><div style="color:var(--text3);font-size:12px">${esc(data.timestamp || '')}</div></div>
+      <div style="text-align:right"><span class="tag tag-${data.signal === 'HOLD' ? 'cyan' : (data.signal === 'BUY' ? 'green' : 'red')}">${esc(data.signal)}</span></div>
+    </div>
+    <div style="margin-top:8px">Z-score: <strong>${data.z_score != null ? data.z_score.toFixed(3) : '-'}</strong> · Confidence: <strong>${data.confidence != null ? (data.confidence*100).toFixed(0)+'%' : '-'}</strong></div>
+    <div style="margin-top:6px">Suggested notional: <strong>${data.suggested_notional != null ? '$' + Number(data.suggested_notional).toFixed(2) : '-'}</strong></div>
+    <div style="margin-top:6px;color:var(--text3);font-size:12px">Account halted: ${acct.halted ? 'YES' : 'no'} · Equity: ${acct.equity != null ? '$'+Number(acct.equity).toFixed(2) : '-'}</div>
+  `;
+}
+
+async function loadLiveSignal() {
+  try {
+    const data = await fetchLiveSignalData();
+    renderLiveSignal(data);
+  } catch (e) { /* ignore */ }
 }

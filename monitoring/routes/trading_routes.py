@@ -417,6 +417,84 @@ def api_trading_config():
     return jsonify({"live_trading_enabled": os.environ.get("LIVE_TRADING_ENABLED", "0").strip() == "1"})
 
 
+@bp.route("/api/live-signal", methods=["GET"])
+def api_live_signal():
+    """Return a read-only LiveSignal for a pairs strategy.
+
+    Query params accepted (preferred):
+      - exchange (binance|kraken|htx)
+      - symbol (pair as "SYM_A|SYM_B") OR symbol_a & symbol_b
+      - run_id (optional) — used to pick a position to derive account state
+
+    The endpoint is GET-only and does not mutate state.
+    """
+    db = current_app.config["DB"]
+    exchange = request.args.get("exchange", "binance")
+    if exchange not in SUPPORTED_EXCHANGES:
+        return jsonify({"error": f"exchange must be one of {SUPPORTED_EXCHANGES}"}), 400
+
+    symbol_a = request.args.get("symbol_a")
+    symbol_b = request.args.get("symbol_b")
+    pair = request.args.get("symbol") or request.args.get("pair")
+    run_id = request.args.get("run_id") or _default_run_id(db, exchange, "paper")
+
+    # derive pair if not explicitly provided
+    if not (symbol_a and symbol_b):
+        if pair and "|" in pair:
+            symbol_a, symbol_b = pair.split("|", 1)
+        else:
+            try:
+                pos = load_position(db, run_id, symbol="", strategy_name="", exchange=exchange)
+                sym = getattr(pos, "symbol", None)
+                if sym and "|" in sym:
+                    symbol_a, symbol_b = sym.split("|", 1)
+                else:
+                    return jsonify({"error": "symbol_a and symbol_b (or pair) required for pair live signal"}), 400
+            except Exception as exc:
+                return jsonify({"error": str(exc)}), 500
+
+    # instantiate strategy core and account guard
+    try:
+        from strategies.stat_arb import StatArbPairsStrategy
+        from portfolio.risk import AccountRules, PropFirmRiskGuard
+        from config.loader import get_settings
+        from signals.live_signal import LiveSignalGenerator
+
+        cfg = get_settings()
+        rules = AccountRules(
+            account_size=cfg.live_account.account_size,
+            daily_loss_limit_pct=cfg.live_account.daily_loss_limit_pct,
+            drawdown_limit_pct=cfg.live_account.drawdown_limit_pct,
+            max_leverage=cfg.live_account.max_leverage,
+        )
+        current_app.logger.info(
+            "live_signal_account_rules_resolved max_leverage=%s account_size=%s",
+            rules.max_leverage,
+            rules.account_size,
+        )
+
+        # load position (best-effort) to seed account state
+        pos = None
+        try:
+            pos = load_position(db, run_id, symbol="", strategy_name="", exchange=exchange)
+        except Exception:
+            pos = None
+
+        equity = getattr(pos, "equity", cfg.live_account.account_size)
+        daily_start = getattr(pos, "daily_start_equity", cfg.live_account.account_size)
+        peak = getattr(pos, "peak_equity", cfg.live_account.account_size)
+
+        guard = PropFirmRiskGuard(rules, equity, daily_start, peak)
+        strategy = StatArbPairsStrategy()
+        gen = LiveSignalGenerator(db, strategy, guard)
+
+        params = {}  # optionally accept JSON params in future
+        signal = gen.latest(symbol_a.strip(), symbol_b.strip(), params=params)
+        return jsonify(signal.to_json())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @bp.route("/api/paper-cycle", methods=["POST"])
 @require_token
 def api_paper_cycle():

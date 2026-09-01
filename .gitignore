@@ -29,6 +29,9 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Signal research notebooks (scratch/exploratory, not part of the app)
+signal research/
+
 # Misc
 *.tmp
 

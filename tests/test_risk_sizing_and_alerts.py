@@ -24,6 +24,10 @@ def _cfg(**overrides):
     base = dict(
         account_size=5000.0, max_drawdown_pct=0.06, max_daily_loss_pct=0.04,
         max_adverse_move_pct=0.40, risk_buffer_pct=0.7, leg_allocation_pct=0.18,
+        # risk_per_trade_pct set high so the per-trade risk cap never binds in these
+        # headroom-focused tests (risk_cap = 5000*0.99/0.40 ≈ 12,375 >> any headroom).
+        # Tests that specifically verify the per-trade cap pass a lower value.
+        risk_per_trade_pct=0.99,
     )
     base.update(overrides)
     return SimpleNamespace(**base)

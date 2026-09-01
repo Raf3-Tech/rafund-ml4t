@@ -519,3 +519,74 @@ Full audit + Phase-1 unification + Phase-3 correctness fixes + first tests for n
   call site is now correct (delegates to the unified core), so no change was needed.
 - **Handoff — next priorities:** engine gaps #3 (pairs in engine), #4 (funding cadence),
   #5 (reuse `BacktestEngine`), #6 (leaderboard/funding/classifier tests). See TODO list.
+
+---
+
+## Eval Mode Operating Procedure
+
+> **Purpose:** Steps to follow when `eval_mode: true` in `config/settings.yaml` and a
+> real prop-firm evaluation account is active. Do NOT set `eval_mode: true` on a paper-only
+> run — it restricts candidates to `ready_for_live` strategies only.
+
+### Pre-Session Checklist (before enabling eval_mode)
+1. **Leaderboard check:** `python main.py leaderboard` — confirm at least one strategy
+   shows `LIVE-READY`. If none, do not enable eval_mode; accumulate more paper history.
+2. **Floor status:** `python main.py paper --status` — confirm no `hard_floor` or
+   `account_failed` flag is set on any slot. If hard_floor is set, complete the reset
+   procedure below before proceeding.
+3. **Daily loss headroom:** confirm today's drawdown from open is below $100 (soft floor).
+   If already above $100 DD, wait for a new trading day (UTC midnight) before entering.
+4. **Config review:** `grep eval_mode config/settings.yaml` → must read `eval_mode: false`
+   before you flip it. Change to `true` only after steps 1–3 are clear.
+5. **Startup log:** run `python main.py paper` once and review the startup block — confirm
+   exchange connections, selected strategy, and floor status all look correct.
+
+### No-Trade Conditions
+Do not enter a new position when **any** of the following are true:
+- `daily_halt = True` on the slot (daily loss limit hit — wait for UTC midnight rollover)
+- Current drawdown from account start > $100 (soft floor active — sizing halved, extra caution)
+- Drawdown > $130 (soft floor triggered — only scale-reduced entries permitted)
+- Less than 1 hour before a major economic event (FOMC, CPI, etc.)
+- Spread on the instrument is more than 2× the typical spread
+- The top-down resolver returns `HOLD` (1w/1d bias and 4h/1h signals disagree)
+
+### EOD Journal Entry (after each trading day)
+Run at UTC midnight or at end of your session:
+```
+python main.py leaderboard          # capture score + DD
+python main.py paper --status       # capture equity, daily_halt, account_failed
+```
+Record in your trade journal (paper or digital):
+- Date, strategy selected, symbol
+- Trades opened/closed (from `paper_orders` `setup_tag` + `close_reason`)
+- Session PnL, cumulative DD from start, daily high-water mark
+- Source timeframe of each entry (`source_timeframe` column in `paper_orders`)
+- Whether any floor event triggered (`hard_floor`, `soft_floor`, `daily_halt`)
+- Notes on regime (1w/1d bias direction, 4h confirmation) for each entry
+
+### Hard Floor Reset Procedure
+The hard floor fires at $145 cumulative DD ($4,855 equity) — $5 before the prop firm's
+$150 floor. When triggered:
+1. `account_failed = True` and `daily_halt = True` are set automatically. All paper orders
+   are blocked.
+2. **Do not manually edit the DB** to clear these flags until you have reviewed the journal
+   and confirmed the cause.
+3. **Review:** query `SELECT * FROM paper_orders ORDER BY created_at DESC LIMIT 20` and
+   identify the `close_reason="hard_floor"` row. Trace back through the preceding OPENs
+   using `setup_tag` and `source_timeframe`.
+4. **Root cause:** was the loss due to regime mismatch, oversized entry, or a news event?
+   Document in the journal.
+5. **Reset (only after review):**
+   ```python
+   from trading.paper_trader import resume_trading
+   resume_trading(db, exchange="binance", run_id="paper_binance_<strategy>_<symbol>")
+   ```
+   This clears `manual_halt`. To also clear `account_failed`, update the row directly:
+   ```sql
+   UPDATE paper_positions SET account_failed = FALSE, daily_halt = FALSE
+   WHERE run_id = 'paper_binance_<strategy>_<symbol>';
+   ```
+6. **Reduce risk:** after a hard-floor event, set `risk_per_trade_pct: 0.003` in
+   `config/settings.yaml` for the remainder of the evaluation to widen the buffer.
+7. If the prop firm's actual $150 floor has been breached, the evaluation has failed.
+   Stop all trading and contact the prop firm per their reset/refund policy.
