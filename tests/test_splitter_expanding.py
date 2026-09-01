@@ -65,6 +65,8 @@ def test_anchored_respects_min_train_months():
     ).split(df)
     for f in folds:
         span_months = (
-            f["train_end"].to_period("M") - f["train_start"].to_period("M")
-        ).n + 1
+            (f["train_end"].year - f["train_start"].year) * 12
+            + (f["train_end"].month - f["train_start"].month)
+            + 1
+        )
         assert span_months >= 6

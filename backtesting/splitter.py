@@ -86,8 +86,9 @@ class TimeSeriesSplitter:
 
         # Rolling: the train window slides (fold_start advances).
         # Anchored: train_start is pinned to first_date and train_end expands.
+        _day = pd.DateOffset(days=1)
         fold_start = first_date
-        train_end = first_date + train_offset - pd.Timedelta(days=1)
+        train_end = first_date + train_offset - _day
 
         while True:
             if anchored:
@@ -95,10 +96,10 @@ class TimeSeriesSplitter:
                 cur_train_end = train_end
             else:
                 cur_train_start = fold_start
-                cur_train_end = fold_start + train_offset - pd.Timedelta(days=1)
+                cur_train_end = fold_start + train_offset - _day
 
-            test_start = cur_train_end + pd.Timedelta(days=1)
-            test_end = test_start + test_offset - pd.Timedelta(days=1)
+            test_start = cur_train_end + _day
+            test_end = test_start + test_offset - _day
 
             if test_end > last_date:
                 break
@@ -112,7 +113,11 @@ class TimeSeriesSplitter:
             if len(train_df) == 0 or len(test_df) == 0:
                 break
 
-            actual_train_months = (cur_train_end.to_period("M") - cur_train_start.to_period("M")).n + 1
+            actual_train_months = (
+                (cur_train_end.year - cur_train_start.year) * 12
+                + (cur_train_end.month - cur_train_start.month)
+                + 1
+            )
             if actual_train_months < self.min_train_months:
                 if anchored:
                     train_end += step_offset
@@ -155,7 +160,7 @@ class TimeSeriesSplitter:
             else:
                 next_start = fold_start + step_offset
                 if next_start <= test_end:
-                    fold_start = test_end + pd.Timedelta(days=1)
+                    fold_start = test_end + _day
                 else:
                     fold_start = next_start
 
