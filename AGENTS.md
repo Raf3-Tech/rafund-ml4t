@@ -317,13 +317,33 @@ per session, ≥90% before advancing).
   serialize Decimal as a *string*, silently breaking the dashboard's
   `.toFixed()`/`.toLocaleString()` calls on those fields) — verified live
   against a running dashboard instance.
+- Phase 4's gate does **not** implement a leverage-cap check, even though
+  the brief's top-level constraints table lists per-asset caps (verified
+  current: BTC 10x/$1M, NDX 10x/$1M, S&P 10x/$2M, SOL 5x/$500K, HYPE
+  3x/$200K — blog.kraken.com, 2026-08) — the brief's Phase 4 section lists
+  exactly six numbered reject rules and leverage isn't one of them. Recorded
+  in `risk/pretrade_gate.py::KRAKEN_LEVERAGE_CAPS` for a future rule/UI use,
+  not enforced by `evaluate()`. Don't add a 7th rule here without the user
+  asking — that would be scope the brief didn't request.
+- Two of the six reject rules reference numbers the brief never supplies:
+  the correlation cap (`DEFAULT_CORRELATION_CAP_PCT = 1.0`, i.e. 100% of
+  equity) and the consecutive-loss limit (`DEFAULT_CONSECUTIVE_LOSS_LIMIT =
+  3`). Both are config-overridable placeholders, loudly flagged in
+  `risk/pretrade_gate.py`'s docstring as uncalibrated — a risk owner must
+  set real values before this gate protects a live account.
+- `account_state` fed into `evaluate()` from `scan_kraken_signals` uses
+  `kraken_prop_mdd_pct` defaulting to 3% (the conservative end of Kraken's
+  3-6% tier range — assuming less room than you have is fail-safe, assuming
+  more isn't) and a same-cycle `last_rollover` placeholder, since nothing
+  yet persists real rollover-clock state (Phase 2 built the type, not a live
+  feed). Fix both before this gate runs unattended against a live account.
 
 | # | Phase | Files | Status |
 |---|---|---|---|
 | 1 | Cost model — commission + funding, Decimal-exact | `risk/cost_model.py` | ✅ DONE 2026-09-06 |
 | 2 | Account state + daily clock (00:30 UTC rollover, two-tier floors) | `risk/prop_account.py`, `risk/daily_clock.py` | ✅ DONE 2026-09-06 |
 | 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ✅ DONE 2026-09-06 (as pure formulas + PendingSignal extension — see below; `BaseStrategy` left unchanged as agreed) |
-| 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ⏳ |
+| 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ✅ DONE 2026-09-06 |
 | 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/*` | ⏳ |
 | 6 | Leaderboard overfitting correction (deflated Sharpe / White's Reality Check) | `monitoring/leaderboard.py` | ⏳ |
 
@@ -415,6 +435,62 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "kraken-prop-phase4-pretrade-gate" (Claude) — COMPLETE
+**Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 4 (pre-trade gate)
+**DB health check:** PASSED — connectivity OK; applied `0018 -> 0019`
+  cleanly; live-verified `evaluate()` + `persist_decision()` against the real
+  DB (inserted one real `gate_decisions` row, confirmed JSONB round-trips
+  Decimal-as-string correctly, then deleted it). Also ran the real
+  `python main.py signal-scan --exchange kraken` CLI end-to-end — no
+  qualifying leaderboard candidates right now (unchanged from Phase 1/3
+  verification), so the gate path itself needed the direct DB check above.
+**engine_results row count at session start:** 134,776 (unchanged)
+**Files changed:**
+  - `risk/pretrade_gate.py` (new) — `evaluate(setup, account_state, context)
+    -> GateDecision` implementing all 6 reject rules from the brief in
+    priority order (benched -> consecutive-loss -> daily hard -> lifetime
+    hard -> daily room -> lifetime room -> fee filter -> correlation cap),
+    falling through to REDUCE when the daily soft floor is active and
+    everything else passes, else APPROVE. `persist_decision()` writes every
+    call (approved or not) to `gate_decisions` for the audit trail the
+    brief requires. `KRAKEN_LEVERAGE_CAPS` records verified current values
+    (blog.kraken.com, 2026-08 — matches the brief's table exactly) but is
+    NOT enforced here — leverage isn't one of the brief's 6 Phase-4 rules.
+  - `alembic/versions/0019_add_gate_decisions.py` (new) — JSONB `inputs`
+    column, indexed on (strategy_name, symbol) and action.
+  - `tests/test_pretrade_gate.py` (new, 14 tests) — one per rule plus the
+    haircut/correlation-netting semantics and the persistence write.
+  - `signals/pending_signal_detector.py` — `scan_kraken_signals` now builds
+    a `PropAccountState` (via `from_position_state`, not a second account
+    model) and routes every candidate through `evaluate()` +
+    `persist_decision()` before any `_upsert_active_signal()` call — REJECT
+    decisions are logged and skipped, never written as active.
+  - `tests/test_pending_signal_detector.py` — the brief's required "gate is
+    the only path" test: mocks `evaluate()` to REJECT and asserts
+    `_upsert_active_signal` is never called (and to APPROVE, asserting it is).
+**Tests added:** 16 net (14 in `test_pretrade_gate.py`; `test_pending_signal_detector.py` net +2)
+**Suite result:** 493 passed, 0 failed (477 before this phase + 16)
+**Phase checklist progress:** Phase 4 ✅ DONE
+**Phase completion %:** 100% of the 6 specified rules. Explicitly NOT
+  100% of a live-ready gate — see "Known conflicts" above for the two
+  uncalibrated placeholders (correlation cap, consecutive-loss limit) and
+  the two account-state gaps (mdd_pct tier, rollover-clock persistence)
+  that must be fixed before this runs unattended against a real account.
+**Blocking issues found:** none blocking. Verified via WebSearch that
+  Kraken's current leverage caps match the brief's table exactly (BTC 10x,
+  NDX 10x, S&P 10x, SOL 5x, HYPE 3x) rather than trusting the brief blindly,
+  per its own "verify current values, do not hardcode" instruction — also
+  found each cap's dollar notional limit, recorded for later use.
+**Bugs discovered and logged:** none
+**Resume point for next session:** Phase 5 (publish endpoint: authenticated
+  read-only Tailscale endpoint + OpenAPI schema for the tablet app) or
+  Phase 6 (leaderboard overfitting correction — deflated Sharpe / White's
+  Reality Check, walk-forward confidence bands; note Phase 4's rule 6
+  `strategy_benched` is currently a plain caller-supplied bool with no real
+  computation behind it — Phase 6 is what should eventually feed it).
+**Session limit hit:** yes — stopping after Phase 4 per PHASE GATE RULE,
+  pending user review before Phase 5/6.
 
 ### 2026-09-06 — session "kraken-prop-phase3-trade-setup" (Claude) — COMPLETE
 **Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 3 (TradeSetup sizing/cost/risk math)

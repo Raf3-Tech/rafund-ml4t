@@ -14,6 +14,11 @@ Reuses (does not reimplement):
   - strategies.setup for risk-based sizing / cost / R-multiple math (Kraken
     Prop's "survival, not returns" formula: size is DERIVED from
     equity*risk_pct/stop_distance, never chosen or allocation-derived)
+  - risk.pretrade_gate.evaluate as the ONLY gate to 'active' status — every
+    candidate is evaluated and persisted via risk.pretrade_gate.
+    persist_decision, whether approved or not (scan_kraken_signals is the
+    single call site; see tests/test_pending_signal_detector.py's
+    test_scan_kraken_signals_rejected_setup_is_never_persisted_as_active)
 
 Deliberately does NOT reuse trading.paper_trader._target_notional for sizing
 (as an earlier version of this module did) — that function's leg-allocation
@@ -47,6 +52,8 @@ from typing import List, Optional
 
 import structlog
 
+from risk.pretrade_gate import APPROVE, REDUCE, GateContext, evaluate, persist_decision
+from risk.prop_account import from_position_state
 from strategies.base import BasePairsStrategy
 from strategies.registry import StrategyRegistry
 from strategies.setup import (
@@ -73,6 +80,13 @@ _DEFAULT_EXPIRY_MINUTES = 30
 _DEFAULT_STALE_MOVE_PCT = 0.01
 _DEFAULT_EXPECTED_HOLD_HOURS = Decimal("24")  # documented default, not measured — see module docstring
 _MIN_BARS_PADDING = 10
+
+# Kraken Prop's actual lifetime MDD room is 3-6% depending on plan tier —
+# this is a documented placeholder (the 3% end, conservative: assuming less
+# room than you actually have is fail-safe; assuming more is not). Must be
+# set to the real account's tier via cfg.kraken_prop_mdd_pct before this
+# gate protects a live account.
+_DEFAULT_KRAKEN_MDD_PCT = Decimal("0.03")
 
 _PRICE_Q = Decimal("0.00000001")  # 8 dp — prices and qty
 _USD_Q = Decimal("0.01")          # 2 dp — dollar amounts
@@ -236,6 +250,17 @@ def scan_kraken_signals(db, exchange: str = "kraken") -> List[PendingSignal]:
         logger.info("pending_signal_scan_no_qualifying_candidates", exchange=exchange)
         return []
 
+    # Account state for the gate — built from the same PositionState already
+    # loaded above (from_position_state), not a second account model. Real
+    # rollover-clock persistence (risk/daily_clock.py) doesn't feed anything
+    # live yet, so last_rollover is a same-cycle placeholder: nothing in the
+    # gate's evaluate() path reads it (only risk/daily_clock.py's own
+    # rollover functions do, and those aren't called here).
+    kraken_mdd_pct = Decimal(str(getattr(cfg, "kraken_prop_mdd_pct", _DEFAULT_KRAKEN_MDD_PCT)))
+    account_state = from_position_state(
+        pos, kraken_mdd_pct=kraken_mdd_pct, last_rollover=datetime.now(timezone.utc),
+    )
+
     written: List[PendingSignal] = []
     for rank, strategy_name, symbol, params, score in candidates:
         strategy = StrategyRegistry.instantiate(strategy_name)
@@ -257,6 +282,20 @@ def scan_kraken_signals(db, exchange: str = "kraken") -> List[PendingSignal]:
             score=score, signal=signal, price=price, stop_price=stop_price,
             source_timeframe="1d", pos=pos, cfg=cfg,
         )
+
+        # The gate is the only path to a live setup — every candidate is
+        # evaluated and every decision persisted, whether or not it's ever
+        # written as an active signal.
+        context = GateContext()
+        decision = evaluate(payload, account_state, context)
+        persist_decision(db, payload, account_state, context, decision)
+        if decision.action not in (APPROVE, REDUCE):
+            logger.info(
+                "pending_signal_rejected_by_gate", strategy_name=strategy_name,
+                symbol=symbol, reason=decision.reason_code,
+            )
+            continue
+
         _upsert_active_signal(db, payload)
         written.append(payload)
 

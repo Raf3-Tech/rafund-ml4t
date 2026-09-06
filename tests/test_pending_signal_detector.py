@@ -22,6 +22,7 @@ from signals.pending_signal_detector import (
     _qualifying_single_symbol_candidates,
     scan_kraken_signals,
 )
+from risk.pretrade_gate import APPROVE, REJECT, GateDecision
 from strategies.setup import derive_expected_cost, derive_leverage_required, derive_notional, derive_size, derive_worst_case_loss
 from trading.position import PositionState
 
@@ -171,3 +172,57 @@ def test_scan_kraken_signals_suppressed_when_account_failed():
 
     assert result == []
     mock_candidates.assert_not_called()  # suppressed before even querying the leaderboard
+
+
+def _mock_scan_dependencies():
+    """Common patch targets for a full scan_kraken_signals pass with one
+    qualifying candidate that has an active BUY signal."""
+    pos = PositionState(
+        run_id="live_kraken", strategy_name="", symbol="", exchange="kraken",
+        equity=5000.0, peak_equity=5000.0, daily_start_equity=5000.0,
+    )
+    df = pd.DataFrame({"close": [100.0] * 50})
+    fake_strategy = MagicMock()
+    fake_strategy.get_min_bars.return_value = 10
+    fake_strategy.get_stop_level.return_value = 98.0
+    return pos, df, fake_strategy
+
+
+def test_scan_kraken_signals_rejected_setup_is_never_persisted_as_active():
+    """The gate is the only path to a live setup: a REJECT decision must
+    never reach _upsert_active_signal, and must still be persisted."""
+    pos, df, fake_strategy = _mock_scan_dependencies()
+    with patch("signals.pending_signal_detector.load_position", return_value=pos), \
+         patch("signals.pending_signal_detector._qualifying_single_symbol_candidates",
+               return_value=[(1, "EMA Crossover", "BTC/USD", {}, 0.5)]), \
+         patch("signals.pending_signal_detector.StrategyRegistry.instantiate", return_value=fake_strategy), \
+         patch("signals.pending_signal_detector._latest_bars", return_value=df), \
+         patch("signals.pending_signal_detector._last_signal", return_value="BUY"), \
+         patch("signals.pending_signal_detector.evaluate") as mock_evaluate, \
+         patch("signals.pending_signal_detector.persist_decision") as mock_persist, \
+         patch("signals.pending_signal_detector._upsert_active_signal") as mock_upsert:
+        mock_evaluate.return_value = GateDecision(REJECT, "fee_filter", {})
+        written = scan_kraken_signals(db=MagicMock(), exchange="kraken")
+
+    mock_upsert.assert_not_called()
+    mock_persist.assert_called_once()
+    assert written == []
+
+
+def test_scan_kraken_signals_approved_setup_is_persisted_as_active():
+    pos, df, fake_strategy = _mock_scan_dependencies()
+    with patch("signals.pending_signal_detector.load_position", return_value=pos), \
+         patch("signals.pending_signal_detector._qualifying_single_symbol_candidates",
+               return_value=[(1, "EMA Crossover", "BTC/USD", {}, 0.5)]), \
+         patch("signals.pending_signal_detector.StrategyRegistry.instantiate", return_value=fake_strategy), \
+         patch("signals.pending_signal_detector._latest_bars", return_value=df), \
+         patch("signals.pending_signal_detector._last_signal", return_value="BUY"), \
+         patch("signals.pending_signal_detector.evaluate") as mock_evaluate, \
+         patch("signals.pending_signal_detector.persist_decision") as mock_persist, \
+         patch("signals.pending_signal_detector._upsert_active_signal") as mock_upsert:
+        mock_evaluate.return_value = GateDecision(APPROVE, "all_checks_passed", {})
+        written = scan_kraken_signals(db=MagicMock(), exchange="kraken")
+
+    mock_upsert.assert_called_once()
+    mock_persist.assert_called_once()
+    assert len(written) == 1
