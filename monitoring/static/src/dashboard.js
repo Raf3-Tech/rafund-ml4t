@@ -32,8 +32,10 @@ document.addEventListener('DOMContentLoaded', () => {
   loadTradingStatus();
   initNavPin();
   clockTick();
+  refreshPendingSignals();
   setInterval(clockTick, 1000);
   setInterval(refreshGlobalRiskStrip, 20000);
+  setInterval(refreshPendingSignals, 20000);
   document.addEventListener('keydown', (e) => {
     if (e.altKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openKillModal(); }
     if (e.key === 'Escape') closeKillModal();
@@ -80,8 +82,14 @@ function activateTab(name) {
   const main = document.getElementById('main');
   if (main) main.scrollTop = 0;
 
+  // The Signals tab already shows every active card in its own grid — the
+  // floating popup would just be a redundant duplicate stacked on top of it.
+  const popups = document.getElementById('pending-signal-popups');
+  if (popups) popups.style.display = (name === 'signals') ? 'none' : 'flex';
+
   if (name === 'results') loadLeaderboard(currentFilter);
   if (name === 'trading') loadTradingStatus();
+  if (name === 'signals') loadSignalsTab(currentSignalFilter);
   if (name === 'ops') loadModelConfidenceOptions();
   if (name === 'simulate') loadSimLeaderSummary();
 }
@@ -1018,6 +1026,210 @@ function updateRiskStrip(data) {
     statusEl.style.color = anyHalt ? 'var(--danger)' : 'var(--success)';
   }
   applyModeBadge();
+}
+
+// ── Pending manual-execution signals (popup cards; no order placement) ─────
+let knownSignalIds = new Set();
+
+function _formatExpiry(isoLike) {
+  const d = new Date(isoLike.replace(' ', 'T') + (isoLike.includes('+') || isoLike.endsWith('Z') ? '' : 'Z'));
+  if (isNaN(d.getTime())) return isoLike;
+  return d.toUTCString().slice(17, 22) + ' UTC';
+}
+
+async function refreshPendingSignals() {
+  try {
+    const r = await fetch('/api/pending-signals?status=active');
+    if (!r.ok) return;
+    const signals = await r.json();
+    renderPendingSignalPopups(signals);
+    // Only overwrite the Signals-tab grid from this poll when it's already
+    // showing the 'active' filter — otherwise this would clobber whatever
+    // filter (Taken/Skipped/Expired/All) the user has open with active-only data.
+    if (currentSignalFilter === 'active') renderSignalCardsGrid('signals-cards', signals);
+  } catch(e) { /* non-fatal — cards just stay at last known state */ }
+}
+
+// Same detailed card for any grid of signals (active-only from the poll, or
+// any status filter from the Signals tab) — full re-render each call since
+// this isn't an overlay animating in/out, just a static grid.
+function renderSignalCardsGrid(containerId, signals) {
+  const grid = document.getElementById(containerId);
+  if (!grid) return;
+  if (!signals.length) {
+    grid.innerHTML = '<div class="section-sub">No signals for this filter.</div>';
+    return;
+  }
+  grid.innerHTML = signals.map(sig =>
+    `<div class="signal-card signal-card-${sig.direction === 'LONG' ? 'long' : 'short'}">${_buildSignalCardHtml(sig)}</div>`
+  ).join('');
+}
+
+function renderPendingSignalPopups(signals) {
+  const container = document.getElementById('pending-signal-popups');
+  if (!container) return;
+
+  const currentIds = new Set(signals.map(s => s.id));
+  for (const id of knownSignalIds) {
+    if (!currentIds.has(id)) {
+      const el = document.getElementById('signal-card-' + id);
+      if (el) el.remove();
+    }
+  }
+  knownSignalIds = currentIds;
+
+  for (const sig of signals) {
+    if (document.getElementById('signal-card-' + sig.id)) continue; // already rendered
+    const card = document.createElement('div');
+    card.id = 'signal-card-' + sig.id;
+    card.className = 'signal-card signal-card-' + (sig.direction === 'LONG' ? 'long' : 'short');
+    card.innerHTML = _buildSignalCardHtml(sig);
+    container.appendChild(card);
+  }
+}
+
+// Kraken order-form-styled card. Read-only proposal — only "Mark as taken" /
+// "Dismiss" are live actions; every other field is display-only, matching
+// the reference order form's information hierarchy but with no order entry.
+function _buildSignalCardHtml(sig) {
+  const isLong = sig.direction === 'LONG';
+  const isActive = sig.status === 'active';
+  const dirClass = isLong ? 'long' : 'short';
+  const base = (sig.symbol || '').split('/')[0] || sig.symbol;
+  const limit = Number(sig.limit_price);
+
+  const hasTp = sig.take_profit_price != null;
+  const hasSl = sig.stop_price != null;
+  const hasQty = sig.qty != null;
+  const hasSize = sig.position_size_usd != null;
+
+  // Entry-distance %: magnitude of the move from limit to each level, shown
+  // as "+" for take-profit and "-" for stop-loss regardless of long/short —
+  // both are always computed from the real levels, never hardcoded.
+  const tpDistPct = hasTp && limit ? Math.abs((sig.take_profit_price - limit) / limit * 100) : null;
+  const slDistPct = hasSl && limit ? Math.abs((sig.stop_price - limit) / limit * 100) : null;
+
+  // Estimated P&L at each level — positive at TP, negative at SL by
+  // construction of how the detector derives them (never fabricated: same
+  // qty/prices already on the signal, just the P&L arithmetic for the side).
+  let pnlTp = null, pnlSl = null;
+  if (hasQty && hasTp) pnlTp = isLong ? (sig.take_profit_price - limit) * sig.qty : (limit - sig.take_profit_price) * sig.qty;
+  if (hasQty && hasSl) pnlSl = isLong ? (sig.stop_price - limit) * sig.qty : (limit - sig.stop_price) * sig.qty;
+
+  const money = (v) => v == null ? '—' : (v < 0 ? '-$' + Math.abs(v).toFixed(2) : '$' + v.toFixed(2));
+
+  return `
+    <div class="sc-head">
+      <span class="sc-dirpill sc-dirpill-${dirClass}">${esc(sig.direction)}</span>
+      <span class="sc-pair">${esc(sig.symbol)} <span class="sc-ordertype">· Limit</span></span>
+      ${!isActive ? `<span class="tag ${_signalTagClass(sig.status)}" style="margin-left:auto">${esc(sig.status)}</span>` : ''}
+    </div>
+
+    <div class="sc-block sc-limit">
+      <div class="sc-row-label">Limit price</div>
+      <div class="sc-row-main"><span class="sc-num-big">${limit.toLocaleString(undefined, {maximumFractionDigits: 4})}</span><span class="sc-unit">USD</span></div>
+    </div>
+
+    <div class="sc-cols">
+      <div class="sc-block">
+        <div class="sc-row-label">Quantity</div>
+        <div class="sc-row-main"><span class="sc-num">${hasQty ? sig.qty : '—'}</span><span class="sc-unit">${esc(base)}</span></div>
+      </div>
+      <div class="sc-block">
+        <div class="sc-row-label">Total</div>
+        <div class="sc-row-main"><span class="sc-num">${hasSize ? '≈ ' + sig.position_size_usd.toFixed(2) : '—'}</span><span class="sc-unit">USD</span></div>
+      </div>
+    </div>
+
+    <div class="sc-cols">
+      <div class="sc-block">
+        <div class="sc-row-label-line"><span>Take profit</span><span class="sc-unit-mini">USD</span></div>
+        <div class="sc-num">${hasTp ? sig.take_profit_price.toLocaleString(undefined, {maximumFractionDigits: 4}) : '—'}</div>
+      </div>
+      <div class="sc-block sc-block-sub">
+        <div class="sc-row-label-line"><span>Entry distance</span><span class="sc-unit-mini">%</span></div>
+        <div class="sc-num sc-num-pos">${tpDistPct != null ? '+' + tpDistPct.toFixed(2) : '—'}</div>
+      </div>
+    </div>
+    <div class="sc-cols">
+      <div class="sc-block">
+        <div class="sc-row-label-line"><span>Stop loss</span><span class="sc-unit-mini">USD</span></div>
+        <div class="sc-num">${hasSl ? sig.stop_price.toLocaleString(undefined, {maximumFractionDigits: 4}) : '—'}</div>
+      </div>
+      <div class="sc-block sc-block-sub">
+        <div class="sc-row-label-line"><span>Entry distance</span><span class="sc-unit-mini">%</span></div>
+        <div class="sc-num sc-num-neg">${slDistPct != null ? '-' + slDistPct.toFixed(2) : '—'}</div>
+      </div>
+    </div>
+
+    <div class="sc-pnl-row">
+      <span>Estimated P&amp;L</span>
+      <span><span class="sc-num-pos">${money(pnlTp)}</span> / <span class="sc-num-neg">${money(pnlSl)}</span></span>
+    </div>
+
+    <div class="sc-thesis">${esc(sig.thesis)}</div>
+
+    ${isActive ? `
+    <div class="sc-actions">
+      <button class="sc-cta sc-cta-${dirClass}" onclick="resolvePendingSignal(${sig.id}, 'acted_on', this)">Mark as taken</button>
+      <button class="sc-dismiss" onclick="resolvePendingSignal(${sig.id}, 'skipped', this)">Dismiss</button>
+    </div>` : ''}
+
+    <div class="sc-footer">
+      <div><span>Strategy</span><span>${esc(sig.strategy_name)} · rank #${esc(sig.leaderboard_rank)}</span></div>
+      <div><span>${isActive ? 'Expires' : 'Resolved'}</span><span>${isActive ? esc(_formatExpiry(sig.expires_at)) : (sig.resolved_at ? esc(String(sig.resolved_at).slice(0, 19)) : '—')}</span></div>
+    </div>`;
+}
+
+async function _resolveSignalRequest(id, status) {
+  try {
+    const r = await fetch(`/api/pending-signals/${id}/resolve`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({status}),
+    });
+    if (!r.ok) { showToast('Could not update signal', 'error'); return false; }
+    showToast(status === 'acted_on' ? 'Signal marked as taken' : 'Signal dismissed', 'info');
+    return true;
+  } catch(e) {
+    showToast('Could not update signal', 'error');
+    return false;
+  }
+}
+
+async function resolvePendingSignal(id, status, btn) {
+  // From a popup card or a Signals-tab card — identical markup, same button.
+  if (btn) btn.closest('.sc-actions').querySelectorAll('button').forEach(b => b.disabled = true);
+  if (!(await _resolveSignalRequest(id, status))) return;
+  refreshPendingSignals(); // updates the floating popup (and the tab grid too, if its filter is 'active')
+  if (document.getElementById('signals-cards')) loadSignalsTab(currentSignalFilter); // reflects the new status under any filter
+}
+
+// ── Signals tab (same card design as the popup, filterable by status) ──────
+let currentSignalFilter = 'active';
+
+function _signalTagClass(status) {
+  if (status === 'active') return 'tag-cyan';
+  if (status === 'acted_on') return 'tag-green';
+  if (status === 'skipped') return 'tag-gray';
+  return 'tag-red'; // expired
+}
+
+async function loadSignalsTab(filter) {
+  currentSignalFilter = filter;
+  document.querySelectorAll('[data-sig-filter]').forEach(b => b.classList.remove('pipe-btn-active'));
+  const activeBtn = document.querySelector('[data-sig-filter="' + filter + '"]');
+  if (activeBtn) activeBtn.classList.add('pipe-btn-active');
+
+  const grid = document.getElementById('signals-cards');
+  if (!grid) return;
+  grid.innerHTML = '<div class="section-sub">Loading…</div>';
+  try {
+    const r = await fetch('/api/pending-signals?status=' + filter);
+    const signals = await r.json();
+    if (signals.error) { grid.innerHTML = `<div class="section-sub">Error: ${esc(signals.error)}</div>`; return; }
+    renderSignalCardsGrid('signals-cards', signals);
+  } catch(e) {
+    grid.innerHTML = '<div class="section-sub">Error loading signals.</div>';
+  }
 }
 
 function checkRiskAlerts(data) {

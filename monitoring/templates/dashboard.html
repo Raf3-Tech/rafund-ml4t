@@ -11,6 +11,7 @@
 <body>
 
 <div id="toasts"></div>
+<div id="pending-signal-popups"></div>
 
 <!-- STATUS STRIP -->
 <div id="status-strip">
@@ -31,6 +32,7 @@
 <nav id="nav">
   <button class="nav-pin" id="pin-btn" onclick="toggleNavPin()" title="Pin nav open">⊞</button>
   <button class="nav-item active" data-tab="trading" onclick="switchTab('trading',this)"><i class="ti ti-activity nav-icon"></i><span class="nav-label">Trading</span></button>
+  <button class="nav-item" data-tab="signals" onclick="switchTab('signals',this)"><i class="ti ti-bell-ringing nav-icon"></i><span class="nav-label">Signals</span></button>
   <button class="nav-item" data-tab="results" onclick="switchTab('results',this)"><i class="ti ti-chart-bar nav-icon"></i><span class="nav-label">Results</span></button>
   <button class="nav-item" data-tab="ops" onclick="switchTab('ops',this)"><i class="ti ti-cpu nav-icon"></i><span class="nav-label">Ops</span></button>
   <button class="nav-item" data-tab="research" onclick="switchTab('research',this)"><i class="ti ti-flask nav-icon"></i><span class="nav-label">Research</span></button>
@@ -146,6 +148,23 @@
       </table>
     </div>
   </div>
+</div>
+
+<!-- SIGNALS -->
+<div id="tab-signals" class="tab-content">
+  <div class="section-header">
+    <span class="section-title">Manual-Execution Signals</span>
+    <span class="section-sub">Every setup ever proposed for manual placement — active, taken, skipped, or expired. No order is ever placed automatically.</span>
+  </div>
+  <div class="pipe-row" style="margin:0 0 12px">
+    <button class="pipe-btn pipe-btn-active" data-sig-filter="active" onclick="loadSignalsTab('active')">Active</button>
+    <button class="pipe-btn" data-sig-filter="all" onclick="loadSignalsTab('all')">All</button>
+    <button class="pipe-btn" data-sig-filter="acted_on" onclick="loadSignalsTab('acted_on')">Taken</button>
+    <button class="pipe-btn" data-sig-filter="skipped" onclick="loadSignalsTab('skipped')">Skipped</button>
+    <button class="pipe-btn" data-sig-filter="expired" onclick="loadSignalsTab('expired')">Expired</button>
+    <button class="pipe-btn" onclick="loadSignalsTab(currentSignalFilter)"><i class="ti ti-refresh"></i> Refresh</button>
+  </div>
+  <div id="signals-cards" class="sc-grid"><div class="section-sub">Loading…</div></div>
 </div>
 
 <!-- RESULTS -->
@@ -380,6 +399,7 @@
 <div id="mobile-nav">
   <div class="mob-nav-inner">
     <button class="mob-nav-item active" id="mob-trading" onclick="mobTab('trading')"><i class="ti ti-activity"></i><span>Trading</span></button>
+    <button class="mob-nav-item" id="mob-signals" onclick="mobTab('signals')"><i class="ti ti-bell-ringing"></i><span>Signals</span></button>
     <button class="mob-nav-item" id="mob-results" onclick="mobTab('results')"><i class="ti ti-chart-bar"></i><span>Results</span></button>
     <button class="mob-nav-item" id="mob-ops" onclick="mobTab('ops')"><i class="ti ti-cpu"></i><span>Ops</span></button>
     <button class="mob-nav-item" id="mob-research" onclick="mobTab('research')"><i class="ti ti-flask"></i><span>Research</span></button>

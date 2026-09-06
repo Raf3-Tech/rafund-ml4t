@@ -527,6 +527,70 @@ def api_paper_backfill():
     return jsonify({"job_id": job_id}), 202
 
 
+@bp.route("/api/pending-signals", methods=["GET"])
+def api_pending_signals():
+    """Active (or all, via ?status=) pending_signals rows for the dashboard
+    popup — read-only, no order placement here or anywhere downstream of it."""
+    import pandas as pd
+
+    db = current_app.config["DB"]
+    status = request.args.get("status", "active")
+    if status not in ("active", "expired", "acted_on", "skipped", "all"):
+        return jsonify({"error": "invalid status filter"}), 400
+
+    where = "" if status == "all" else "WHERE status = %s"
+    params = [] if status == "all" else [status]
+    df = db.read_sql(
+        f"""
+        SELECT id, strategy_name, symbol, exchange, direction, limit_price, stop_price,
+               take_profit_price, position_size_usd, qty, leaderboard_score,
+               leaderboard_rank, thesis, source_timeframe, status, created_at, expires_at,
+               resolved_at
+        FROM pending_signals
+        {where}
+        ORDER BY created_at DESC
+        """,
+        params,
+    )
+    if df.empty:
+        return jsonify([])
+    df["created_at"] = df["created_at"].astype(str)
+    df["expires_at"] = df["expires_at"].astype(str)
+    # resolved_at is nullable (NULL while active) — stringify only non-null
+    # values so _records()'s NaN->None pass still turns the rest into JSON null.
+    df["resolved_at"] = df["resolved_at"].apply(lambda x: str(x) if pd.notnull(x) else None)
+    return jsonify(_records(df))
+
+
+@bp.route("/api/pending-signals/<int:signal_id>/resolve", methods=["POST"])
+@require_token
+def api_resolve_pending_signal(signal_id: int):
+    """Mark a signal taken or skipped. Status-only — never touches Kraken."""
+    db = current_app.config["DB"]
+    body = request.get_json(silent=True) or {}
+    new_status = body.get("status")
+    if new_status not in ("acted_on", "skipped"):
+        return jsonify({"error": "status must be 'acted_on' or 'skipped'"}), 400
+
+    conn = db.get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE pending_signals SET status = %s, resolved_at = NOW() "
+            "WHERE id = %s AND status = 'active'",
+            (new_status, signal_id),
+        )
+        updated = cur.rowcount
+        conn.commit()
+        cur.close()
+    finally:
+        db.return_connection(conn)
+
+    if not updated:
+        return jsonify({"error": "signal not found or no longer active"}), 404
+    return jsonify({"id": signal_id, "status": new_status}), 200
+
+
 @bp.route("/api/live-cycle", methods=["POST"])
 @require_token
 def api_live_cycle():

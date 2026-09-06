@@ -28,6 +28,7 @@ Usage:
     python main.py dashboard                        # Launch the ops dashboard
     python main.py paper                            # Paper trading
     python main.py live                             # Live trading (DANGER — not implemented)
+    python main.py signal-scan --exchange kraken    # Manual-execution signal detector (no orders placed)
 """
 
 import argparse
@@ -77,7 +78,7 @@ def main() -> int:
             "collect", "features", "signals", "backtest", "validate", "retrain",
             "drift", "backfill", "pipeline", "bootstrap", "dashboard", "paper",
             "live", "benchmark", "models", "engine", "leaderboard",
-            "train-classifier", "research",
+            "train-classifier", "research", "signal-scan",
         ],
     )
     parser.add_argument("submode", nargs="?")
@@ -231,6 +232,14 @@ def main() -> int:
                 _db.close_pool()
                 from cli.backtest import run_paper_trading
                 success = run_paper_trading(exchange=exchange)
+
+        elif args.mode == "signal-scan":
+            if args.exchange not in (None, "kraken"):
+                logger.error("signal-scan currently supports only --exchange kraken")
+                success = False
+            else:
+                from cli.signal_scan import run_signal_scan_cmd
+                success = run_signal_scan_cmd(exchange="kraken")
 
         elif args.mode == "live":
             from cli.backtest import run_live_trading

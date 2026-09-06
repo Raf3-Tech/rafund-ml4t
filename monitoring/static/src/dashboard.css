@@ -119,6 +119,7 @@ body{display:flex;flex-direction:column}
 .tag-cyan{background:rgba(0,212,255,.1);color:var(--accent)}
 .tag-green{background:rgba(34,197,94,.12);color:#22c55e}
 .tag-red{background:rgba(239,68,68,.12);color:#ef4444}
+.tag-gray{background:rgba(148,163,184,.12);color:var(--text2)}
 
 /* LEADERBOARD */
 .lb-row{padding:10px 12px;border-radius:5px;margin-bottom:5px;background:var(--surface2);cursor:pointer;border:1px solid transparent;transition:border-color .15s}
@@ -225,6 +226,60 @@ body{display:flex;flex-direction:column}
 .toast.toast-error{border-left-color:var(--danger)}
 .toast-title{font-weight:700;margin-bottom:2px}
 .toast-msg{color:var(--text2)}
+
+/* PENDING SIGNAL POPUPS — styled after Kraken's own order-form UI (read-only
+   proposal card, not a live order-entry form). --sc-* colors are scoped to
+   this component only, matched to the reference rather than the app's
+   general --success/--danger (which read as a more standard green/red). */
+/* left:60px (not 12px) clears the 48px nav sidebar — at 12px the popup stack
+   sat on top of it and silently ate clicks on every nav item underneath. */
+#pending-signal-popups{position:fixed;top:44px;left:60px;z-index:499;display:flex;flex-direction:column;gap:10px;width:320px;max-width:calc(100vw - 72px);max-height:calc(100vh - 60px);overflow-y:auto}
+.signal-card{--sc-green:#2ed6a1;--sc-red:#f6465d;background:#0e0f11;border:1px solid var(--border);border-radius:12px;padding:12px;box-shadow:0 8px 24px rgba(0,0,0,.55);font-size:11px}
+
+.sc-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.sc-dirpill{font-weight:700;font-size:10px;letter-spacing:.4px;padding:4px 10px;border-radius:20px}
+.sc-dirpill-long{background:var(--sc-green);color:#04231a}
+.sc-dirpill-short{background:var(--sc-red);color:#fff}
+.sc-pair{font-weight:600;color:var(--text);font-size:12px}
+.sc-ordertype{font-weight:400;color:var(--text3)}
+
+.sc-block{background:#1a1c22;border-radius:8px;padding:8px 10px;margin-bottom:6px}
+.sc-cols{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:0}
+.sc-cols .sc-block{margin-bottom:6px}
+.sc-block-sub{background:rgba(255,255,255,.02)}
+.sc-row-label{font-size:9px;color:var(--text3);margin-bottom:3px}
+.sc-row-label-line{display:flex;justify-content:space-between;font-size:9px;color:var(--text3);margin-bottom:3px}
+.sc-row-main{display:flex;align-items:baseline;justify-content:space-between}
+.sc-num-big{font-size:19px;font-weight:700;color:var(--text)}
+.sc-num{font-size:13px;font-weight:600;color:var(--text)}
+.sc-unit{font-size:10px;color:var(--text3)}
+.sc-unit-mini{font-size:9px;color:var(--text3)}
+.sc-num-pos{color:var(--sc-green)}
+.sc-num-neg{color:var(--sc-red)}
+
+.sc-pnl-row{display:flex;justify-content:space-between;font-size:10px;color:var(--text2);padding:6px 2px;margin-bottom:6px}
+
+.sc-thesis{color:var(--text2);font-size:10px;font-style:italic;line-height:1.4;margin-bottom:10px}
+
+.sc-actions{margin-bottom:10px}
+.sc-cta{display:block;width:100%;border:none;border-radius:8px;padding:11px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:6px}
+.sc-cta-long{background:var(--sc-green);color:#04231a}
+.sc-cta-short{background:var(--sc-red);color:#fff}
+.sc-cta:disabled{opacity:.5;cursor:default}
+.sc-dismiss{display:block;width:100%;border:none;background:transparent;color:var(--text3);padding:4px;font-size:10px;cursor:pointer;text-align:center}
+.sc-dismiss:hover{color:var(--text2)}
+.sc-dismiss:disabled{opacity:.5;cursor:default}
+
+.sc-footer{border-top:1px dashed var(--border);padding-top:8px;display:flex;flex-direction:column;gap:5px}
+.sc-footer>div{display:flex;justify-content:space-between;font-size:9px;color:var(--text3)}
+.sc-footer>div>span:last-child{color:var(--text2);text-align:right}
+
+@media(max-width:640px){
+  #pending-signal-popups{left:8px;right:8px;width:auto;max-width:none}
+}
+
+/* Same card, laid out as a grid inside the Signals tab instead of a floating stack */
+.sc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-bottom:16px}
 
 /* EXPORT */
 .export-btn{background:transparent;border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:3px;font-size:10px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
