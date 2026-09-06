@@ -280,11 +280,21 @@ per session, ≥90% before advancing).
   concern (exact live compliance math, Decimal) vs. different concern
   (float-approximate historical Sharpe comparison). Not a duplicate; documented
   in both files' docstrings.
+- Phase 2 (`risk/prop_account.py` + `risk/daily_clock.py`) deliberately stops
+  at *describing* account state and exposing `daily_soft_triggered`/
+  `daily_hard_triggered`/`lifetime_hard_triggered` as properties — it does
+  **not** touch `trading/paper_trader.py`'s live enforcement (the code that
+  actually opens/sizes positions). The brief names Phase 4's pre-trade gate
+  as "the only path to a live setup," so rewiring live enforcement ahead of
+  that gate existing would create exactly the kind of second code path Rule 1
+  forbids (one path gated by the new Kraken-Prop properties, one still gated
+  by the old dollar-amount soft/hard floor, until Phase 4 unifies them).
+  `from_position_state()` is the seam Phase 4 uses to bridge the two.
 
 | # | Phase | Files | Status |
 |---|---|---|---|
 | 1 | Cost model — commission + funding, Decimal-exact | `risk/cost_model.py` | ✅ DONE 2026-09-06 |
-| 2 | Account state + daily clock (00:30 UTC rollover, two-tier floors) | `risk/prop_account.py`, `risk/daily_clock.py` | ⏳ |
+| 2 | Account state + daily clock (00:30 UTC rollover, two-tier floors) | `risk/prop_account.py`, `risk/daily_clock.py` | ✅ DONE 2026-09-06 |
 | 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ⏳ |
 | 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ⏳ |
 | 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/*` | ⏳ |
@@ -378,6 +388,52 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "kraken-prop-phase2-account-clock" (Claude) — COMPLETE
+**Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 2 (account state + daily clock)
+**DB health check:** carried over from this session's Phase 1 entry below (same
+  session, no new DB-touching changes — connectivity/row-count unchanged)
+**engine_results row count at session start:** 134,776 (unchanged from Phase 1)
+**Files changed:**
+  - `risk/prop_account.py` (new) — `PropAccountState` (balance, equity,
+    mdl_floor, mdd_floor, daily_room_remaining, lifetime_room_remaining per
+    spec, plus `daily_soft_triggered`/`daily_hard_triggered`/
+    `lifetime_hard_triggered`); `from_position_state()` builds one from the
+    existing `trading.position.PositionState` (str-converts its floats —
+    `pos.equity`/`daily_start_equity`/`peak_equity` — so no binary-float
+    artifact enters the Decimal path). Daily trip-wires (1.5%/2.0%) are
+    absolute percentages of balance, matching the existing dollar-amount
+    soft/hard floor's shape; the lifetime trip-wire (70%) is a fraction of
+    the tier-dependent `kraken_mdd_pct` since that room isn't a fixed constant.
+  - `risk/daily_clock.py` (new) — `most_recent_rollover`, `is_rollover_due`,
+    `apply_rollover`, `maybe_rollover`. 00:30 UTC boundary, inclusive at
+    exactly :30. Deliberately does not reuse
+    `PositionState.day_rolled()` (UTC-calendar-midnight) — confirmed by test
+    that the two boundaries diverge in the 00:00–00:30 UTC window.
+  - `tests/test_prop_account.py` (new, 13 tests), `tests/test_daily_clock.py`
+    (new, 13 tests) — including the boundary case the brief specifically
+    flagged: not-due between midnight and 00:30 despite the calendar date
+    having already changed.
+**Tests added:** 26
+**Suite result:** 464 passed, 0 failed (438 before this phase + 26)
+**Phase checklist progress:** Phase 2 ✅ DONE
+**Phase completion %:** 100% of the account-state/clock deliverable. Live
+  enforcement wiring (making `trading/paper_trader.py` actually obey these
+  triggers) is explicitly NOT part of this phase — deferred to Phase 4's
+  pre-trade gate by design (see "Known conflicts, resolved" above), not an
+  oversight.
+**Blocking issues found:** none
+**Bugs discovered and logged:** none
+**Resume point for next session:** Phase 3 — `strategies/setup.py`
+  (`TradeSetup`, consolidating into `signals.pending_signal_detector.
+  PendingSignal` per the resolution recorded above) plus `size`/`notional`/
+  `leverage_required`/`expected_cost` (from `risk/cost_model.py`)/
+  `worst_case_loss`/`r_multiple`/`source_timeframe` (from
+  `strategies/timeframe_resolver.py`, already exists — read it first). Test
+  requirement from the brief: doubling max leverage must leave `size`
+  unchanged for an identical setup (leverage affects margin only).
+**Session limit hit:** yes — stopping after Phase 2 per PHASE GATE RULE,
+  pending user review before Phase 3.
 
 ### 2026-09-06 — session "kraken-prop-phase1-cost-model" (Claude) — COMPLETE
 **Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 1 (cost model)
