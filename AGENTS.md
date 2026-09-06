@@ -20,6 +20,15 @@ next agent doesn't re-create forks or clobber work.
 > the current source of truth for what's actually outstanding** — treat the
 > backlog below as a historical record of the pre-pivot plan, not a live TODO
 > list, unless you're specifically resuming prop-firm-era work.
+>
+> **⚠️ SECOND PIVOT (2026-09-06): prop-firm compliance is back, deliberately,
+> scoped to Kraken Prop.** Kraken Prop has no API access on eval/funded
+> accounts — every order is placed manually. Survival (never breach MDL/MDD)
+> is now the explicit primary goal for anything touching live/paper risk,
+> superseding the 2026-06-20 pivot for that surface. This does **not** revive
+> the old CONSERVATIVE/STANDARD/PERMISSIVE tier gate or Phase A–F below (still
+> stale/historical) — it's tracked as its own phased backlog, **KRAKEN PROP GAP
+> BACKLOG**, right after Phase F. See that section for status.
 
 ---
 
@@ -239,6 +248,55 @@ GATE RULE).
 
 ---
 
+## KRAKEN PROP GAP BACKLOG — Phased Execution Plan (started 2026-09-06)
+
+**Goal:** Kraken Prop has no API access on eval/funded accounts — every order is
+placed manually in Kraken Pro. This system computes complete trade setups,
+enforces hard risk limits, and publishes them for manual entry; it never
+executes. Objective is survival (never breach MDL/MDD), not returns. Subject
+to the same SESSION LIMITS and PHASE GATE RULE as Phases A–F above (1 phase
+per session, ≥90% before advancing).
+
+**Known conflicts, resolved (2026-09-06), binding for all phases below:**
+- Phase 3's `TradeSetup` must **not** change `BaseStrategy.generate_signals`'s
+  return type (still a per-bar `pd.Series` of BUY/SELL/HOLD — the vectorized
+  core of the backtest engine, leaderboard, and all 13 strategies). `TradeSetup`
+  is a live-signal construction layer built on top of the last bar's signal,
+  same pattern as `signals/pending_signal_detector.py`.
+- `TradeSetup` (Phase 3) **consolidates into** `signals.pending_signal_detector.PendingSignal`
+  rather than existing as a second dataclass for the same concern (Rule 1) —
+  extend `PendingSignal` with the missing fields (`worst_case_loss`,
+  `r_multiple`, `leverage_required`; `source_timeframe`/`thesis`/`strategy_id`-
+  equivalents already present) instead of building a parallel object.
+- Phase 2's floor system **extends** the existing two-tier soft/hard floor in
+  `trading/paper_trader.py` (soft ~$130 DD / hard ~$145 DD on lifetime
+  drawdown, dollar-amount-based) and `trading/position.py::max_safe_notional`
+  (continuous headroom-scaled sizing) — not a parallel floor system. That
+  existing system has no daily-room-percentage tiers (spec wants 1.5%/2.0% of
+  *daily* room) and no 00:30 UTC rollover (`PositionState.day_rolled()`
+  currently uses UTC calendar-midnight) — Phase 2 must change both.
+- `risk/cost_model.py` (Phase 1) is a **deliberate**, justified exception to
+  Rule 1 relative to `backtesting/costs.py::TransactionCostModel` — different
+  concern (exact live compliance math, Decimal) vs. different concern
+  (float-approximate historical Sharpe comparison). Not a duplicate; documented
+  in both files' docstrings.
+
+| # | Phase | Files | Status |
+|---|---|---|---|
+| 1 | Cost model — commission + funding, Decimal-exact | `risk/cost_model.py` | ✅ DONE 2026-09-06 |
+| 2 | Account state + daily clock (00:30 UTC rollover, two-tier floors) | `risk/prop_account.py`, `risk/daily_clock.py` | ⏳ |
+| 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ⏳ |
+| 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ⏳ |
+| 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/*` | ⏳ |
+| 6 | Leaderboard overfitting correction (deflated Sharpe / White's Reality Check) | `monitoring/leaderboard.py` | ⏳ |
+
+**Verification per phase:** see the task brief's per-phase acceptance criteria
+(exact numeric cases for Phase 1; rollover-boundary tests for Phase 2; a
+leverage-invariance test for Phase 3; a gate-bypass-impossible test for
+Phase 4).
+
+---
+
 ## Spec completion status  (updated 2026-06-09, session "gap-closure")
 
 | Phase | Component | Status | Notes |
@@ -320,6 +378,52 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "kraken-prop-phase1-cost-model" (Claude) — COMPLETE
+**Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 1 (cost model)
+**DB health check:** PASSED — `db.test_connection()` True; `engine_results` = 134,776 rows; migration chain at `0017` (head), `0015`/`source_timeframe` confirmed applied
+**engine_results row count at session start:** 134,776
+**Files changed:**
+  - `risk/__init__.py`, `risk/cost_model.py` (new) — `round_trip_commission`,
+    `funding_cost` (whole 4-hour blocks, not prorated), `total_expected_cost`
+    (duck-typed against `.notional`/`.expected_hold_hours` so it has no
+    dependency on the not-yet-built `TradeSetup`). Decimal throughout, no floats.
+  - `tests/test_cost_model.py` (new) — the brief's exact acceptance case
+    ($50K notional round trip = $40 = 6.7% of a $600 MDD buffer; one day
+    funding = $16.50 = 2.75%), plus block-rounding, zero/negative-hours, and
+    a test that Decimal-vs-float raises `TypeError` (the actual enforcement
+    mechanism for "no floats in the risk path")
+  - `AGENTS.md` — second pivot banner (prop-firm compliance back, scoped to
+    Kraken Prop); new **KRAKEN PROP GAP BACKLOG** section (Phases 1–6) with
+    conflict resolutions recorded (TradeSetup/PendingSignal consolidation,
+    BaseStrategy left untouched, existing floor system extended not duplicated)
+  - Also committed (separately, incidental to session start, not counted
+    against this phase): `signals/pending_signal_detector.py`,
+    `cli/signal_scan.py`, `alembic/versions/0017_add_pending_signals.py`,
+    dashboard Signals tab — pre-existing uncommitted work from before this
+    brief arrived, reviewed/tested/committed first per user instruction
+**Tests added:** 7 (`test_cost_model.py`)
+**Suite result:** 438 passed, 0 failed (431 before this session's commits + 7)
+**Phase checklist progress:** Phase 1 ✅ DONE
+**Phase completion %:** 100%
+**Blocking issues found:** none for Phase 1. Flagged and resolved with the user
+  before starting: (a) this brief reverses the 2026-06-20 prop-firm pivot —
+  confirmed intentional, scoped to Kraken Prop; (b) Phase 3 as literally
+  specified would change `BaseStrategy.generate_signals`'s return type,
+  breaking the backtest engine/leaderboard — resolved as "TradeSetup is a new
+  live layer, generate_signals unchanged"; (c) `TradeSetup` duplicates
+  `PendingSignal` — resolved as "consolidate, extend PendingSignal."
+**Bugs discovered and logged:** none
+**Resume point for next session:** Phase 2 — `risk/prop_account.py` +
+  `risk/daily_clock.py`. Must extend (not parallel) the existing floor system
+  in `trading/paper_trader.py` (soft ~$130/hard ~$145 DD, dollar-based) and
+  `trading/position.py::max_safe_notional`; must add daily-room-percentage
+  tiers (soft 1.5%/hard 2.0%) and a 00:30 UTC rollover distinct from
+  `PositionState.day_rolled()`'s current UTC-calendar-midnight boundary.
+  Write rollover-boundary tests specifically (brief: "off-by-one on a
+  timezone here is an account-ending bug").
+**Session limit hit:** yes — max 1 phase per session; stopping after Phase 1
+  per PHASE GATE RULE, pending user review before Phase 2.
 
 ### 2026-06-25 — session "close-known-gaps" (Claude) — COMPLETE
 **Phase worked:** none of A–F (post-pivot work — see staleness banner at top of this file)
