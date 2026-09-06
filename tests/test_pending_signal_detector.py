@@ -137,10 +137,11 @@ def test_build_payload_populates_all_new_risk_fields_consistently():
     assert sig.generated_at is not None
 
 
-def _leaderboard_row(strategy, symbol, qualifies, score=0.5, params=None):
+def _leaderboard_row(strategy, symbol, qualifies, score=0.5, params=None, passes_overfitting_gate=True):
     return {
         "strategy_name": strategy, "symbol": symbol, "params": params or {},
         "qualifies": qualifies, "score": score,
+        "passes_overfitting_gate": passes_overfitting_gate,
     }
 
 
@@ -159,6 +160,24 @@ def test_qualifying_single_symbol_candidates_excludes_pairs_and_non_qualifying()
     assert ("EMA Crossover", "BTC/USD") in names
     assert not any(name == "Statistical Arbitrage" for name, _ in names)  # pairs excluded
     assert not any(sym == "ETH/USD" for _, sym in names)  # non-qualifying excluded
+
+
+def test_qualifying_single_symbol_candidates_excludes_strategies_failing_the_overfitting_gate():
+    """Phase 6: qualifies=True is not enough — a strategy that looks good
+    only because it's the luckiest of many trials (or whose out-of-sample
+    performance collapsed) must never reach the pending-signal pipeline."""
+    lb = pd.DataFrame([
+        _leaderboard_row("EMA Crossover", "BTC/USD", True, score=0.4, passes_overfitting_gate=True),
+        _leaderboard_row("Donchian Breakout", "ETH/USD", True, score=0.9, passes_overfitting_gate=False),
+    ])
+    lb.index = [1, 2]
+
+    with patch("monitoring.leaderboard.build_leaderboard", return_value=lb):
+        candidates = _qualifying_single_symbol_candidates(db=MagicMock())
+
+    names = [(c[1], c[2]) for c in candidates]
+    assert ("EMA Crossover", "BTC/USD") in names
+    assert ("Donchian Breakout", "ETH/USD") not in names
 
 
 def test_scan_kraken_signals_suppressed_when_account_failed():

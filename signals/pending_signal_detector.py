@@ -143,13 +143,21 @@ class PendingSignal:
 
 
 def _qualifying_single_symbol_candidates(db) -> List[tuple]:
-    """Qualifying (score > 0, pass_ratio >= MIN_CONSISTENCY) single-symbol rows,
-    best-per-(strategy, symbol) like trading.paper_trader._paper_candidates,
-    but restricted to qualifies == True (that function deliberately runs
-    everything, qualifying or not, to build paper history) and additionally
-    scoped to symbols this exchange actually has price history for — checked
-    later via _latest_bars rather than here, since the leaderboard carries no
+    """Qualifying (score > 0, pass_ratio >= MIN_CONSISTENCY, AND passes the
+    Phase 6 overfitting correction — deflated Sharpe + walk-forward
+    out-of-sample check) single-symbol rows, best-per-(strategy, symbol)
+    like trading.paper_trader._paper_candidates, but restricted to
+    qualifies == True (that function deliberately runs everything,
+    qualifying or not, to build paper history) and additionally scoped to
+    symbols this exchange actually has price history for — checked later
+    via _latest_bars rather than here, since the leaderboard carries no
     exchange column.
+
+    This function IS the "live-qualification gate" the Kraken Prop brief's
+    Phase 6 requires the overfitting correction to gate — every strategy
+    that ever reaches the pre-trade gate (risk/pretrade_gate.py) came
+    through here first, so passes_overfitting_gate is checked here, not
+    left to score/pass_ratio alone (see AGENTS.md's KRAKEN PROP GAP BACKLOG).
 
     Returns (rank, strategy_name, symbol, params, score) tuples.
     """
@@ -163,6 +171,8 @@ def _qualifying_single_symbol_candidates(db) -> List[tuple]:
     seen: set = set()
     for rank, row in lb.iterrows():
         if not bool(row["qualifies"]):
+            continue
+        if not bool(row.get("passes_overfitting_gate", False)):
             continue
         strategy_name = str(row["strategy_name"])
         symbol = str(row["symbol"])

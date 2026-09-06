@@ -5,8 +5,13 @@ All tests use a mock DB so no live database is required.
 
 from __future__ import annotations
 
+import itertools
+from unittest.mock import patch
+
 import pandas as pd
 import pytest
+
+_window_end_counter = itertools.count()
 
 from monitoring.leaderboard import (
     MIN_CONSISTENCY,
@@ -33,12 +38,19 @@ def _row(
     regime_vol=3.0,
     regime_dir="bull",
     bars=100,
+    window_end=None,
 ):
+    # A distinct, monotonically increasing default per call so groups of
+    # rows sort chronologically without every call site needing to pass one —
+    # existing tests only care about pass_ratio/score, not window ordering.
+    if window_end is None:
+        window_end = pd.Timestamp("2020-01-01") + pd.DateOffset(days=next(_window_end_counter))
     return {
         "strategy_name": strategy,
         "symbol": symbol,
         "params": params,
         "window_type": "EXPANDING",
+        "window_end": window_end,
         "sharpe_ratio": sharpe,
         "max_drawdown_pct": dd,
         "win_rate_pct": wr,
@@ -207,3 +219,57 @@ def test_multiple_qualifiers_allocations_sum_to_100():
     assert len(lb) == 2
     total = lb["risk_parity_alloc_pct"].sum()
     assert total == pytest.approx(100.0, abs=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: overfitting correction
+# ---------------------------------------------------------------------------
+
+
+def test_trial_count_matches_number_of_distinct_candidates():
+    rows_a = [_row(strategy="A", symbol="BTC/USD", sharpe=0.5, perm_pass=True) for _ in range(5)]
+    rows_b = [_row(strategy="B", symbol="ETH/USD", sharpe=0.6, perm_pass=True) for _ in range(5)]
+    lb = build_leaderboard(MockDB(rows_a + rows_b))
+    assert (lb["trial_count"] == 2).all()
+
+
+def test_overfitting_columns_present_on_every_row():
+    rows = [_row(sharpe=1.0, perm_pass=True) for _ in range(10)]
+    lb = build_leaderboard(MockDB(rows))
+    for col in ("trial_count", "deflated_sharpe", "oos_within_confidence_band", "passes_overfitting_gate"):
+        assert col in lb.columns
+
+
+# Note: "more trials searched lowers the deflated Sharpe for the same
+# observed Sharpe" is tested directly and in isolation in
+# tests/test_overfitting.py::test_deflated_sharpe_ratio_penalizes_more_trials_searched,
+# where n_trials is a parameter independent of the sample. At this
+# leaderboard level, trial_count is always exactly len(trial_sharpes) — more
+# trial rows necessarily changes the cross-sectional spread too, so the two
+# effects can't be cleanly isolated here without an artificial dataset;
+# that's what the lower-level test is for.
+
+
+def test_insufficient_windows_means_oos_is_none_and_gate_fails():
+    rows = [_row(sharpe=1.0, perm_pass=True) for _ in range(2)]  # need >=4 windows for the OOS check
+    lb = build_leaderboard(MockDB(rows))
+    row = lb.iloc[0]
+    assert row["oos_within_confidence_band"] is None
+    assert row["passes_overfitting_gate"] == False  # noqa: E712 — numpy.bool_, not Python bool
+
+
+def test_ready_for_live_requires_passing_the_overfitting_gate_even_with_perfect_basics():
+    rows = [_row(sharpe=1.0, dd=0.1, perm_pass=True) for _ in range(2)]  # too few windows -> gate fails
+    with patch("monitoring.leaderboard._paper_closed_counts", return_value={("StatArb", "BTC/USDT"): 50}):
+        lb = build_leaderboard(MockDB(rows))
+    row = lb.iloc[0]
+    assert row["passes_overfitting_gate"] == False  # noqa: E712 — numpy.bool_, not Python bool
+    assert row["ready_for_live"] == False  # noqa: E712
+
+
+def test_ready_for_live_true_when_basics_and_overfitting_gate_both_pass():
+    rows = [_row(sharpe=1.0, dd=0.1, perm_pass=True) for _ in range(20)]  # stable across windows
+    with patch("monitoring.leaderboard._paper_closed_counts", return_value={("StatArb", "BTC/USDT"): 50}):
+        lb = build_leaderboard(MockDB(rows))
+    row = lb.iloc[0]
+    assert row["ready_for_live"] == True  # noqa: E712 — numpy.bool_, not Python bool

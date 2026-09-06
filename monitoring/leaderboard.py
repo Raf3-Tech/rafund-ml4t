@@ -10,6 +10,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from monitoring.overfitting import (
+    DEFAULT_MIN_DEFLATED_SHARPE,
+    deflated_sharpe_ratio,
+    walk_forward_oos_within_band,
+)
 from portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,7 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
                 symbol,
                 params,
                 window_type,
+                window_end,
                 sharpe_ratio,
                 max_drawdown_pct,
                 win_rate_pct,
@@ -183,6 +189,12 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         n_pass = int(group["permissive_pass"].sum())
         pass_ratio = n_pass / n_total
 
+        # Chronological per-window Sharpe values for the walk-forward
+        # overfitting check (Phase 6) — sorted by window_end, not insertion order.
+        window_sharpes_sorted = (
+            group.sort_values("window_end")["sharpe_ratio"].tolist()
+        )
+
         avg_sharpe = float(group["sharpe_ratio"].mean())
         avg_dd = float(group["max_drawdown_pct"].mean())
         avg_wr = float(group["win_rate_pct"].mean())
@@ -212,7 +224,7 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         })
 
         paper_closed = paper_counts.get((strategy_name, symbol), 0)
-        ready_for_live = (
+        basic_live_checks = (
             score > 0
             and avg_dd < rfl_min_dd
             and pass_ratio >= rfl_min_pass
@@ -233,13 +245,42 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
             "regime": regime_label,
             "score": round(score, 4),
             "qualifies": qualifies,
-            "ready_for_live": ready_for_live,
             "reason": reason,
+            "_basic_live_checks": basic_live_checks,       # finalized into ready_for_live below
+            "_window_sharpes_sorted": window_sharpes_sorted,  # consumed below, not in final output
         })
 
     if not records:
         logger.warning("No engine_results rows to build a leaderboard from.")
         return pd.DataFrame()
+
+    # ── Phase 6: overfitting correction ─────────────────────────────────────
+    # "Before any strategy passes the live-qualification gate" (AGENTS.md,
+    # KRAKEN PROP GAP BACKLOG) — trial_count and deflated_sharpe need every
+    # candidate's avg_sharpe up front (the cross-sectional spread IS the
+    # correction), so this is a second pass over `records`, not folded into
+    # the loop above.
+    try:
+        min_deflated_sharpe = float(getattr(cfg, "ready_for_live_min_deflated_sharpe", DEFAULT_MIN_DEFLATED_SHARPE))
+    except Exception:
+        min_deflated_sharpe = DEFAULT_MIN_DEFLATED_SHARPE
+
+    trial_sharpes = [r["avg_sharpe"] for r in records]
+    trial_count = len(records)
+
+    for r in records:
+        window_sharpes = r.pop("_window_sharpes_sorted")
+        basic_live_checks = r.pop("_basic_live_checks")
+
+        dsr = deflated_sharpe_ratio(r["avg_sharpe"], r["n_windows"], trial_sharpes, trial_count)
+        oos_ok = walk_forward_oos_within_band(window_sharpes)
+        passes_overfitting_gate = bool(dsr is not None and dsr >= min_deflated_sharpe and oos_ok is True)
+
+        r["trial_count"] = trial_count
+        r["deflated_sharpe"] = round(dsr, 4) if dsr is not None else None
+        r["oos_within_confidence_band"] = oos_ok
+        r["passes_overfitting_gate"] = passes_overfitting_gate
+        r["ready_for_live"] = bool(basic_live_checks and passes_overfitting_gate)
 
     result = pd.DataFrame(records)
 

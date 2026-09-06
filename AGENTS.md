@@ -117,6 +117,50 @@ count toward the later phase's completion.
 
 ---
 
+## OVERFITTING GATE RULE — Mandatory, added 2026-09-06 (Kraken Prop Phase 6)
+
+The leaderboard's score (Sharpe x win_rate x consistency) selects across every
+strategy x parameter-set x symbol combination searched — the winner is partly
+the luckiest of however many trials were run. Verified on real production
+data the day this rule was added: with 305 trials searched, every currently-
+"qualifying" strategy's deflated Sharpe came out to **0.0** — their modest
+Sharpe ratios are fully explainable by luck among 305 trials, not skill. This
+is not a hypothetical risk; it is what the live leaderboard actually shows.
+
+**No strategy may be treated as `ready_for_live`, and no strategy may be
+scanned by the Kraken Prop pending-signal detector
+(`signals.pending_signal_detector._qualifying_single_symbol_candidates`),
+unless `monitoring.leaderboard.build_leaderboard()`'s `passes_overfitting_gate`
+column is `True` for it** — in addition to, not instead of, the existing
+`qualifies` (pass_ratio) bar. `passes_overfitting_gate` requires both:
+1. Deflated Sharpe Ratio (`monitoring/overfitting.py::deflated_sharpe_ratio`)
+   >= `ready_for_live_min_deflated_sharpe` (default 0.95 — the conventional
+   significance bar in the Bailey/Lopez de Prado literature, config-
+   overridable, not a hardcoded spec fact).
+2. Walk-forward out-of-sample check
+   (`monitoring/overfitting.py::walk_forward_oos_within_band`) is `True` — a
+   candidate's own windows split chronologically in half must show the
+   second half's Sharpe falling inside a confidence band built from the
+   first half. `None` (fewer than 4 windows — not enough evidence) does
+   **not** pass; insufficient evidence is treated as failing, per this
+   brief's "cannot breach" philosophy, never as passing by default.
+
+Any agent that edits `build_leaderboard()`, `_qualifying_single_symbol_candidates()`,
+or `select_eval_strategy()` and finds this check removed or bypassed must
+restore it or get explicit user sign-off to relax it — do not silently drop
+it to "fix" a test or unblock a strategy. `trial_count` (the number of
+distinct strategy x symbol x params combinations actually searched, as of
+the leaderboard build) is recorded on every leaderboard row specifically so
+this correction is reproducible after the fact, per the brief.
+
+Known simplification (documented in `monitoring/overfitting.py`'s module
+docstring, not hidden): the Sharpe standard-error term assumes Gaussian
+returns (skew=0, kurtosis=3) because `engine_results` stores per-window
+summary stats, not the raw per-trade return series the exact formula needs
+for real skew/kurtosis. This is directional, not exact.
+
+---
+
 ## GAP BACKLOG — Phased Execution Plan
 
 Work through these phases in strict order. Update the checkbox and status column
@@ -357,6 +401,21 @@ per session, ≥90% before advancing).
   this surface at all" is enforced by a structural test
   (`tests/test_publish_routes.py::test_registered_publish_routes_are_get_only`)
   that inspects the blueprint's registered Flask rules, not just a comment.
+- Phase 6 chose deflated Sharpe over White's Reality Check (the brief
+  offered either) — Reality Check needs bootstrap resampling over each
+  candidate's raw per-trade return series, which `engine_results` doesn't
+  store (only per-window summary stats); deflated Sharpe needs only the
+  cross-sectional spread of `avg_sharpe` values already computed, so it
+  needed zero new data plumbing. See `monitoring/overfitting.py`'s module
+  docstring for the resulting simplification (Gaussian skew/kurtosis
+  assumed, not measured) and the OVERFITTING GATE RULE above for the policy.
+- `passes_overfitting_gate` is wired into `_qualifying_single_symbol_candidates`
+  (the actual live-qualification gate for Kraken Prop manual signals) rather
+  than into `risk.pretrade_gate.GateContext.strategy_benched` — a benched
+  strategy now never becomes a candidate in the first place, so
+  `strategy_benched` stays an unpopulated defense-in-depth flag for any
+  future code path that constructs a `GateContext` directly. Not wired
+  redundantly without a concrete second call site that needs it.
 
 | # | Phase | Files | Status |
 |---|---|---|---|
@@ -365,7 +424,7 @@ per session, ≥90% before advancing).
 | 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ✅ DONE 2026-09-06 (as pure formulas + PendingSignal extension — see below; `BaseStrategy` left unchanged as agreed) |
 | 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ✅ DONE 2026-09-06 |
 | 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/publish.py` | ✅ DONE 2026-09-06 |
-| 6 | Leaderboard overfitting correction (deflated Sharpe / White's Reality Check) | `monitoring/leaderboard.py` | ⏳ |
+| 6 | Leaderboard overfitting correction (deflated Sharpe / White's Reality Check) | `monitoring/leaderboard.py` | ✅ DONE 2026-09-06 — this is the brief's last phase; all 6 done |
 
 **Verification per phase:** see the task brief's per-phase acceptance criteria
 (exact numeric cases for Phase 1; rollover-boundary tests for Phase 2; a
@@ -455,6 +514,86 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "kraken-prop-phase6-overfitting-correction" (Claude) — COMPLETE
+**Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 6 (leaderboard overfitting
+  correction) — the brief's last phase; all 6 now done
+**DB health check:** PASSED — connectivity OK, no schema changes. Ran the
+  real `python main.py leaderboard` command against the live DB (305
+  strategy-symbol-params trials, `engine_results` unchanged at 134,776
+  rows) — found every currently-"qualifying" strategy's deflated Sharpe is
+  exactly 0.0 (their Sharpe is fully explainable by luck among 305 trials).
+  Not a synthetic finding — this is what the correction found on real data
+  the day it shipped, now recorded in the new OVERFITTING GATE RULE.
+**engine_results row count at session start:** 134,776 (unchanged)
+**Files changed:**
+  - `monitoring/overfitting.py` (new) — `deflated_sharpe_ratio` (Bailey &
+    Lopez de Prado, 2014), `walk_forward_oos_within_band`, and their
+    building blocks (`sharpe_standard_error`, `expected_max_sharpe_under_null`,
+    a from-scratch inverse-normal-CDF via Acklam's approximation — verified
+    against scipy to ~9 significant figures, no new dependency needed).
+    Chose deflated Sharpe over the brief's alternative (White's Reality
+    Check) because the latter needs raw per-trade return series
+    `engine_results` doesn't store; documented as a deliberate scope choice.
+  - `tests/test_overfitting.py` (new, 11 tests) — including that DSR
+    penalizes more trials searched for the identical observed Sharpe (the
+    brief's central point), and the walk-forward split is chronological,
+    not sorted-by-magnitude.
+  - `monitoring/leaderboard.py` — `build_leaderboard()` now does a second
+    pass after computing every candidate's `avg_sharpe` (deflated Sharpe
+    needs the whole cross-sectional spread up front): adds `trial_count`,
+    `deflated_sharpe`, `oos_within_confidence_band`, `passes_overfitting_gate`
+    columns; `ready_for_live` now additionally requires
+    `passes_overfitting_gate`.
+  - `tests/test_leaderboard.py` — added `window_end` to the row fixture
+    (new required column), 6 new tests for the overfitting columns and the
+    `ready_for_live` interaction. One planned test (DSR strictly decreasing
+    with more trials, at the leaderboard level) was dropped after it proved
+    numerically confounded — trial_count and the trial-Sharpe distribution
+    are structurally coupled in real leaderboard data in a way the
+    lower-level `test_overfitting.py` test (where they're independent
+    parameters) already covers correctly; kept a comment explaining why
+    rather than leaving a flaky/wrong test in place.
+  - `signals/pending_signal_detector.py` — `_qualifying_single_symbol_candidates`
+    (the actual live-qualification gate for Kraken Prop manual signals) now
+    additionally requires `passes_overfitting_gate`, not just `qualifies`.
+  - `tests/test_pending_signal_detector.py` — updated the mock leaderboard
+    row helper for the new column; added a test proving a strategy that
+    qualifies on pass_ratio alone but fails the overfitting gate is excluded.
+  - `AGENTS.md` — new **OVERFITTING GATE RULE** (mandatory, peer to
+    DATABASE HEALTH RULE / PHASE GATE RULE), per the brief's explicit
+    instruction to add this as a gate condition in AGENTS.md, not just a
+    report; KRAKEN PROP GAP BACKLOG marked all 6 phases done.
+**Tests added:** 18 net (11 in `test_overfitting.py`; `test_leaderboard.py`
+  net +6; `test_pending_signal_detector.py` net +1)
+**Suite result:** 514 passed, 0 failed (497 before this phase + 18, minus 1
+  dropped test — see above)
+**Phase checklist progress:** Phase 6 ✅ DONE — brief complete, all 6 phases
+**Phase completion %:** 100%
+**Blocking issues found:** none. The dropped test (see above) was a testing
+  methodology issue caught and resolved in-session, not a blocker.
+**Bugs discovered and logged:** none new in code — but a real, live finding:
+  every currently-qualifying strategy has a 0.0 deflated Sharpe. This is not
+  a bug to fix; it's the correction correctly reporting that nothing on the
+  current leaderboard is statistically distinguishable from noise given how
+  many trials were searched. No leaderboard-shown "qualifying" strategy
+  should be treated as validated until new engine runs produce a candidate
+  that actually clears passes_overfitting_gate.
+**Resume point for next session:** The Kraken Prop brief's 6 phases are all
+  done. Known follow-ups recorded across AGENTS.md's "Known conflicts"
+  entries for this backlog (not new work, just what's left before this
+  fully protects a live account): (1) calibrate the correlation cap and
+  consecutive-loss limit placeholders in `risk/pretrade_gate.py`; (2) wire
+  real `kraken_prop_mdd_pct` (per actual account tier) and persist real
+  rollover-clock state instead of the current conservative/same-cycle
+  defaults; (3) confirm with the user whether Phase 5's Android client work
+  should begin, since the brief scoped that to "a separate session."
+**Session limit hit:** partially — no phase to defer to (this was the
+  brief's final phase), but the diff is 514 lines across 7 files, a small
+  overage past the 500-line cap (files count fine, 7/10). Not split: the
+  math module, its leaderboard wiring, and the detector wiring are one
+  interdependent unit — disclosing rather than fragmenting, same call made
+  for Phase 1's similar small overage.
 
 ### 2026-09-06 — session "kraken-prop-phase5-publish-endpoint" (Claude) — COMPLETE
 **Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 5 (publish endpoint)
