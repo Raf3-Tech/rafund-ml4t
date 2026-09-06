@@ -77,8 +77,9 @@ def create_app(
     from monitoring.routes.leaderboard import bp as leaderboard_bp
     from monitoring.routes.config_routes import bp as config_bp
     from monitoring.routes.trading_routes import bp as trading_bp
+    from monitoring.routes.publish import bp as publish_bp
 
-    for blueprint in (health_bp, pages_bp, ops_bp, pipeline_bp, leaderboard_bp, config_bp, trading_bp):
+    for blueprint in (health_bp, pages_bp, ops_bp, pipeline_bp, leaderboard_bp, config_bp, trading_bp, publish_bp):
         app.register_blueprint(blueprint)
 
     return app

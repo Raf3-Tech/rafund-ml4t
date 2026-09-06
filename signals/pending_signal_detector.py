@@ -88,6 +88,31 @@ _MIN_BARS_PADDING = 10
 # gate protects a live account.
 _DEFAULT_KRAKEN_MDD_PCT = Decimal("0.03")
 
+# Every pending_signals column backed by a Decimal PendingSignal field
+# (see migration 0018) — the single list both monitoring.routes.trading_routes
+# and monitoring.routes.publish convert to float at their JSON boundary, so
+# there's one place that knows which columns need the conversion.
+DECIMAL_COLUMNS = (
+    "limit_price", "stop_price", "take_profit_price", "position_size_usd", "qty",
+    "expected_cost", "worst_case_loss", "r_multiple", "leverage_required",
+    "expected_hold_hours",
+)
+
+
+def decimal_columns_to_float(df):
+    """In-place: NUMERIC columns come back from read_sql as Decimal (object
+    dtype) — Flask's default JSON encoder would serialize Decimal as a
+    *string*, silently breaking any consumer doing float-only arithmetic on
+    these fields (e.g. the dashboard's .toFixed()/.toLocaleString() calls).
+    Decimal precision matters internally; at the JSON boundary it's display
+    data, so convert explicitly. Returns df for chaining."""
+    import pandas as pd
+
+    for col in DECIMAL_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: float(x) if pd.notnull(x) else None)
+    return df
+
 _PRICE_Q = Decimal("0.00000001")  # 8 dp — prices and qty
 _USD_Q = Decimal("0.01")          # 2 dp — dollar amounts
 _RATIO_Q = Decimal("0.0001")      # 4 dp — leverage_required, r_multiple
@@ -228,6 +253,24 @@ def _build_payload(
     )
 
 
+def current_account_state(pos, cfg):
+    """The single authority for building a live risk.prop_account.
+    PropAccountState from an already-loaded PositionState — shared by
+    scan_kraken_signals (the gate) and monitoring.routes.publish (the
+    tablet's room-remaining figures), so both see identical numbers.
+
+    kraken_prop_mdd_pct defaults to the conservative end of Kraken's 3-6%
+    tier range; last_rollover is a same-cycle placeholder since no live feed
+    persists real rollover-clock state yet (risk/daily_clock.py exists but
+    isn't wired to anything that calls it on a schedule) — see AGENTS.md's
+    KRAKEN PROP GAP BACKLOG for what's still needed before this is
+    live-accurate."""
+    kraken_mdd_pct = Decimal(str(getattr(cfg, "kraken_prop_mdd_pct", _DEFAULT_KRAKEN_MDD_PCT)))
+    return from_position_state(
+        pos, kraken_mdd_pct=kraken_mdd_pct, last_rollover=datetime.now(timezone.utc),
+    )
+
+
 def scan_kraken_signals(db, exchange: str = "kraken") -> List[PendingSignal]:
     """One detector cycle: qualifying Kraken single-symbol strategies -> at
     most one new/refreshed pending_signals row per (strategy, symbol,
@@ -250,16 +293,7 @@ def scan_kraken_signals(db, exchange: str = "kraken") -> List[PendingSignal]:
         logger.info("pending_signal_scan_no_qualifying_candidates", exchange=exchange)
         return []
 
-    # Account state for the gate — built from the same PositionState already
-    # loaded above (from_position_state), not a second account model. Real
-    # rollover-clock persistence (risk/daily_clock.py) doesn't feed anything
-    # live yet, so last_rollover is a same-cycle placeholder: nothing in the
-    # gate's evaluate() path reads it (only risk/daily_clock.py's own
-    # rollover functions do, and those aren't called here).
-    kraken_mdd_pct = Decimal(str(getattr(cfg, "kraken_prop_mdd_pct", _DEFAULT_KRAKEN_MDD_PCT)))
-    account_state = from_position_state(
-        pos, kraken_mdd_pct=kraken_mdd_pct, last_rollover=datetime.now(timezone.utc),
-    )
+    account_state = current_account_state(pos, cfg)
 
     written: List[PendingSignal] = []
     for rank, strategy_name, symbol, params, score in candidates:

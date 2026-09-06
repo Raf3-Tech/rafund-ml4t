@@ -337,6 +337,26 @@ per session, ≥90% before advancing).
   more isn't) and a same-cycle `last_rollover` placeholder, since nothing
   yet persists real rollover-clock state (Phase 2 built the type, not a live
   feed). Fix both before this gate runs unattended against a live account.
+- Phase 5's account-state-building logic was extracted into
+  `signals.pending_signal_detector.current_account_state(pos, cfg)` — the
+  single authority both `scan_kraken_signals` (the gate) and
+  `monitoring.routes.publish` (the tablet's room-remaining figures) call, so
+  neither could silently drift from the other. Also extracted
+  `decimal_columns_to_float()` (same module) and moved `_records()` to a new
+  `monitoring/routes/_json.py` — both were duplicated verbatim between
+  `trading_routes.py`'s `/api/pending-signals` and the new publish route
+  while writing Phase 5; deduplicated rather than left as two copies.
+- "over Tailscale" is a network/deployment concern (Tailscale gives the
+  Flask app a private address; nothing in `monitoring/routes/publish.py` is
+  Tailscale-aware code) — not something this phase's code implements.
+  Authentication reuses the existing `require_token`/`DASHBOARD_API_TOKEN`
+  mechanism (Rule 1), applied to a GET route for the first time — every
+  other GET in the dashboard is intentionally unauthenticated (same-origin
+  browser trust), but this surface is reached by a device outside that
+  boundary, so it deliberately breaks that convention. "No write methods on
+  this surface at all" is enforced by a structural test
+  (`tests/test_publish_routes.py::test_registered_publish_routes_are_get_only`)
+  that inspects the blueprint's registered Flask rules, not just a comment.
 
 | # | Phase | Files | Status |
 |---|---|---|---|
@@ -344,7 +364,7 @@ per session, ≥90% before advancing).
 | 2 | Account state + daily clock (00:30 UTC rollover, two-tier floors) | `risk/prop_account.py`, `risk/daily_clock.py` | ✅ DONE 2026-09-06 |
 | 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ✅ DONE 2026-09-06 (as pure formulas + PendingSignal extension — see below; `BaseStrategy` left unchanged as agreed) |
 | 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ✅ DONE 2026-09-06 |
-| 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/*` | ⏳ |
+| 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/publish.py` | ✅ DONE 2026-09-06 |
 | 6 | Leaderboard overfitting correction (deflated Sharpe / White's Reality Check) | `monitoring/leaderboard.py` | ⏳ |
 
 **Verification per phase:** see the task brief's per-phase acceptance criteria
@@ -435,6 +455,64 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "kraken-prop-phase5-publish-endpoint" (Claude) — COMPLETE
+**Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 5 (publish endpoint)
+**DB health check:** PASSED — connectivity OK, no schema changes this
+  phase. Live-verified end-to-end against a running dashboard instance with
+  `DASHBOARD_API_TOKEN` set: no token -> 401, wrong token -> 401, correct
+  token -> 200 with real `daily_room_remaining`/`lifetime_room_remaining`
+  computed from the live DB; also re-checked `/api/pending-signals` and
+  `/api/trading-status` still 200 after the `trading_routes.py` refactor.
+**engine_results row count at session start:** 134,776 (unchanged)
+**Files changed:**
+  - `monitoring/routes/publish.py` (new) — `GET /api/publish/setups`,
+    `require_token`-protected (the first GET route in this dashboard to
+    require auth — every other GET is same-origin-browser-only by
+    convention; this surface is reached by a device outside that boundary).
+    Returns active (gate-approved) setups plus current
+    `daily_room_remaining`/`lifetime_room_remaining` from the same
+    `PropAccountState` the gate itself evaluated against.
+  - `docs/openapi/publish.yaml` (new) — OpenAPI 3.0.3 schema for the
+    endpoint, for the Android client to be generated against in a separate
+    session (per the brief).
+  - `tests/test_publish_routes.py` (new, 4 tests) — including a structural
+    test (inspects `app.url_map`, not a comment) that no route on this
+    blueprint accepts POST/PUT/PATCH/DELETE, per the brief's "no write
+    methods on this surface at all."
+  - **Deduplication surfaced while building this** (Rule 1): extracted
+    `signals.pending_signal_detector.current_account_state(pos, cfg)` as the
+    one place that builds a live `PropAccountState` (previously inlined in
+    `scan_kraken_signals`; now shared with the new publish route so neither
+    could drift from the other), extracted `decimal_columns_to_float()`
+    (same module — was duplicated verbatim into the new route while writing
+    it, caught immediately and factored out instead of shipped as two
+    copies), and moved `_records()` from `trading_routes.py` into a new
+    `monitoring/routes/_json.py` so both route files import the same
+    NaN-handling helper instead of each defining it.
+  - `monitoring/routes/trading_routes.py`, `monitoring/dashboard_app.py` —
+    updated for the above (import the shared helpers; register the new
+    blueprint).
+**Tests added:** 4 (`test_publish_routes.py`)
+**Suite result:** 497 passed, 0 failed (493 before this phase + 4)
+**Phase checklist progress:** Phase 5 ✅ DONE
+**Phase completion %:** 100%
+**Blocking issues found:** none. Confirmed no existing Tailscale-specific
+  code/config anywhere in the repo before concluding "over Tailscale" is a
+  deployment concern, not something to build.
+**Bugs discovered and logged:** none new — but see the deduplication note
+  above: while writing this phase's route I initially reproduced (not
+  fixed, reproduced) trading_routes.py's Decimal-to-float conversion
+  verbatim, caught it before committing, and factored both copies out.
+  Logging the pattern (a new route copy-pasting an existing route's
+  boundary-conversion logic) as a thing to watch for in future phases.
+**Resume point for next session:** Phase 6 — leaderboard overfitting
+  correction (deflated Sharpe / White's Reality Check, walk-forward
+  confidence bands, trial count recorded on the leaderboard record). This is
+  the last phase in the brief and also what should eventually feed Phase
+  4's currently-stubbed `strategy_benched` flag in `risk/pretrade_gate.py`.
+**Session limit hit:** yes — stopping after Phase 5 per PHASE GATE RULE,
+  pending user review before Phase 6 (the brief's final phase).
 
 ### 2026-09-06 — session "kraken-prop-phase4-pretrade-gate" (Claude) — COMPLETE
 **Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 4 (pre-trade gate)

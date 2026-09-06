@@ -1,0 +1,148 @@
+openapi: 3.0.3
+info:
+  title: RAFund Kraken Prop — Tablet Publish API
+  description: >
+    Authenticated, read-only surface for the tablet app to poll approved
+    Kraken Prop manual-execution setups. No write methods exist anywhere on
+    this surface — every order is still placed by hand in Kraken Pro. The
+    Android client is generated against this schema in a separate session.
+  version: "1.0.0"
+paths:
+  /api/publish/setups:
+    get:
+      operationId: getPublishedSetups
+      summary: Approved setups plus current daily/lifetime room remaining
+      description: >
+        Setups that passed risk.pretrade_gate.evaluate() (APPROVE or REDUCE)
+        and are still status='active' — a REJECT decision never reaches this
+        endpoint. Room-remaining figures come from the same PropAccountState
+        the gate itself evaluated against, so they always match.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedSetupsResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    PublishedSetupsResponse:
+      type: object
+      required: [setups, daily_room_remaining, lifetime_room_remaining, generated_at]
+      properties:
+        setups:
+          type: array
+          items:
+            $ref: "#/components/schemas/Setup"
+        daily_room_remaining:
+          type: number
+          format: double
+          description: USD headroom in equity before Kraken's own daily MDL breach.
+        lifetime_room_remaining:
+          type: number
+          format: double
+          description: USD headroom in equity before Kraken's own lifetime MDD breach.
+        generated_at:
+          type: string
+          format: date-time
+    Setup:
+      type: object
+      required:
+        - id
+        - strategy_name
+        - symbol
+        - exchange
+        - direction
+        - limit_price
+        - qty
+        - position_size_usd
+        - thesis
+        - source_timeframe
+        - created_at
+        - expires_at
+      properties:
+        id:
+          type: integer
+        strategy_name:
+          type: string
+        symbol:
+          type: string
+        exchange:
+          type: string
+          enum: [kraken]
+        direction:
+          type: string
+          enum: [LONG, SHORT]
+        limit_price:
+          type: number
+          format: double
+        stop_price:
+          type: number
+          format: double
+          nullable: true
+        take_profit_price:
+          type: number
+          format: double
+          nullable: true
+        position_size_usd:
+          type: number
+          format: double
+          nullable: true
+        qty:
+          type: number
+          format: double
+          nullable: true
+        leaderboard_score:
+          type: number
+          format: double
+        leaderboard_rank:
+          type: integer
+        thesis:
+          type: string
+        source_timeframe:
+          type: string
+        created_at:
+          type: string
+        expires_at:
+          type: string
+        expected_cost:
+          type: number
+          format: double
+          nullable: true
+          description: Round-trip commission + expected funding, USD.
+        worst_case_loss:
+          type: number
+          format: double
+          nullable: true
+          description: (qty * stop distance) + expected_cost, USD.
+        r_multiple:
+          type: number
+          format: double
+          nullable: true
+          description: Cost-adjusted reward-to-risk ratio.
+        leverage_required:
+          type: number
+          format: double
+          nullable: true
+          description: notional / equity — margin-efficiency readout only.
+        expected_hold_hours:
+          type: number
+          format: double
+          nullable: true
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string

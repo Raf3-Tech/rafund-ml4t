@@ -11,6 +11,8 @@ from flask import Blueprint, current_app, jsonify, request
 
 from monitoring.jobs import has_running_job, submit_job
 from monitoring.routes._auth import require_token
+from monitoring.routes._json import records as _records
+from signals.pending_signal_detector import decimal_columns_to_float
 from trading.paper_trader import (
     SUPPORTED_EXCHANGES,
     _last_signal,
@@ -85,17 +87,6 @@ def _signal_for_position(db, exchange: str, pos, params: dict) -> dict:
         return {"strategy_name": strategy_name, "symbol": symbol, "signal": None}
     signal = _last_signal(df, strategy_name, params)
     return {"strategy_name": strategy_name, "symbol": symbol, "signal": signal}
-
-
-def _records(df) -> list[dict]:
-    """df.to_dict(orient="records"), with NaN (pandas' rendering of SQL NULL
-    in numeric columns, e.g. pnl on OPEN rows) swapped for None — NaN is not
-    valid JSON, so jsonify() would emit a bare `NaN` token that browsers'
-    strict JSON parser rejects outright."""
-    import pandas as pd
-    # astype(object) first — df.where(..., None) on a still-numeric column
-    # just re-coerces None back to NaN rather than actually storing None.
-    return df.astype(object).where(pd.notnull(df), None).to_dict(orient="records")
 
 
 def _recent_orders(db, run_id: str, limit: int = 20) -> list[dict]:
@@ -560,18 +551,7 @@ def api_pending_signals():
     # resolved_at is nullable (NULL while active) — stringify only non-null
     # values so _records()'s NaN->None pass still turns the rest into JSON null.
     df["resolved_at"] = df["resolved_at"].apply(lambda x: str(x) if pd.notnull(x) else None)
-    # NUMERIC columns come back as Decimal (object dtype) — Flask's default
-    # JSON encoder serializes Decimal as a *string*, which would silently
-    # break the dashboard's Number()-free .toFixed()/.toLocaleString() calls
-    # on these fields. Decimal precision matters internally (the risk/cost
-    # path); at this JSON boundary it's display data, so convert explicitly.
-    decimal_cols = [
-        "limit_price", "stop_price", "take_profit_price", "position_size_usd", "qty",
-        "expected_cost", "worst_case_loss", "r_multiple", "leverage_required",
-        "expected_hold_hours",
-    ]
-    for col in decimal_cols:
-        df[col] = df[col].apply(lambda x: float(x) if pd.notnull(x) else None)
+    decimal_columns_to_float(df)
     return jsonify(_records(df))
 
 
