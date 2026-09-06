@@ -335,6 +335,66 @@ accounts where funding is actually collected, per the same "multi-leg
 strategies stay fully active outside the Prop pipeline" principle as
 Statistical Arbitrage.
 
+### Kraken track-record window configuration — fixed and documented (2026-09-06, Track Record Depth brief, Task 3)
+
+**The window count is now a number that affects gate outcomes, so it is
+fixed and stated here rather than incidental — do not change it to see if
+a different choice produces better-looking z-scores; that would be an
+uncounted parameter search wearing a different hat.**
+
+Every Kraken symbol's previously-reported T=32-33 windows resolved to only
+**8 distinct `(window_start, window_end)` pairs**, all `EXPANDING` and
+sharing the same start date — an artifact of ~16 repeated
+`python main.py engine` invocations between 2026-06-20 and 2026-09-03, each
+contributing a near-duplicate expanding-from-genesis snapshot as a few more
+days of Kraken data accumulated. Not independent observations; DSR and the
+walk-forward OOS check both assume independence, so this was silently
+optimistic in the same direction the brief warned about ("T cannot be
+inflated by overlapping windows"), just via a mechanism (repeated re-runs
+over calendar time) rather than a rolling-step config choice.
+
+**Fixed, 2026-09-06:** `backtesting.window_engine.generate_kraken_track_record_windows`
+partitions a symbol's full available history into non-overlapping,
+back-to-back windows, each at least `KRAKEN_TRACK_RECORD_MIN_WINDOW_DAYS =
+230` days (the longest single-leg warmup requirement — EMA Crossover's
+slow=200 combo needs 200 + `MIN_TRADEABLE_BARS` bars). Used **only** for
+the Kraken Prop track record (single-leg, Kraken-sourced candidates, via
+`WalkForwardWindowEngine.run_kraken_track_record_windows`) — the general
+research leaderboard and every non-Kraken-scoped candidate still use
+`generate_windows()`'s expanding+rolling scheme unchanged, since those have
+enough history for rolling windows to mean something and changing that
+scheme was explicitly out of scope. New rows carry `window_type =
+'INDEPENDENT'`, distinguishing them from legacy `EXPANDING`/`ROLLING` rows.
+
+**Current result, against the live 798-day Kraken history (2024-06-29 to
+2026-09-05, zero gaps, one bar/day, identical across all 7 symbols):
+exactly 3 non-overlapping ~266-day windows.** Run once via
+`scripts/rebuild_kraken_track_record.py` (computes new results in memory
+first; only deletes the legacy contaminated `EXPANDING` rows for the 7
+Kraken symbols — 4,263 of them — if the new run actually produces
+results) — re-runnable if more Kraken history is ingested later, since it
+always partitions whatever `[genesis, today]` span exists at run time.
+
+**T=3 (T=2 for a few (strategy, symbol, params) combos where a window had
+too few tradeable bars for that specific params) is too small for the
+walk-forward OOS check to ever return anything but `None`** (it needs >= 4
+windows, 2 per half) — every single-leg Kraken candidate's
+`oos_within_confidence_band` is `None` as of this rebuild, not because
+anything is broken, but because there is not yet enough independent history
+to ask the question. `passes_overfitting_gate` requires OOS `True`
+specifically (not `None`), so nothing can pass until either more Kraken
+history exists or this constant is deliberately revisited — not by
+lowering the 4-window OOS floor to manufacture a result, but by there
+actually being enough calendar time.
+
+Also noted, not fixed (pre-existing, unrelated to this session's changes):
+`data/db.py::insert_engine_results`'s log line ("Inserted %d engine_results
+rows") undercounts for a multi-page `execute_values` call — psycopg2's
+`cursor.rowcount` reflects only the last internal page (default page size
+100), not the true total. Verified the actual write was correct (305 rows
+landed for the Kraken rebuild, matching what was submitted) by querying the
+table directly, not by trusting the log line or the function's return value.
+
 ---
 
 ## GAP BACKLOG — Phased Execution Plan
@@ -691,16 +751,17 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 
 ## Session log  (newest first)
 
-### 2026-09-06 — session "track-record-depth" (Claude) — PARTIAL, paused for user decision
+### 2026-09-06 — session "track-record-depth" (Claude) — COMPLETE through Task 4; Task 5 deliberately not attempted
 **Phase worked:** none of the 6 Kraken Prop phases — follow-up to 38362e2.
   5 tasks planned: retire Funding Rate Arbitrage, fix the exchange filter,
-  maximize track record depth, re-baseline, re-propose the grid. **Tasks 1
-  and 2 complete and committed. Task 3 stopped after the report step —
-  found something more fundamental than "T is small," see below. Tasks 4-5
-  not started, per the brief's own "stop before Task 5 if history doesn't
-  support a materially larger T" — except the finding is worse than that
-  clause anticipated (see below), so this session stops before even
-  finishing Task 3's "act" half pending user sign-off on a destructive step.**
+  maximize track record depth, re-baseline, re-propose the grid. **Tasks
+  1-4 complete and committed. Task 5 (re-propose the grid) deliberately
+  NOT done — the brief's own exit clause applies: history doesn't support
+  a materially larger T (it supports a materially smaller, honest one), so
+  this session stops before proposing a search against a 2-3-window
+  foundation.** (This entry originally paused mid-Task-3 for a user
+  decision on a destructive step — continuing below in the same entry
+  rather than starting a new one, since it's the same session.)
 **DB health check:** PASSED — connectivity OK. Applied migration 0021,
   ran the real exchange backfill against the live DB (44,029 of 134,776
   rows backfilled), and ran extensive read-only queries against
@@ -805,6 +866,80 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
   design pending a user decision on a destructive action, per this
   session's own judgment that deleting historical rows warrants
   confirmation first.
+
+**Continuation, same session — user confirmed both decisions:** (1) delete
+  and regenerate; (2) a separate Kraken-only window function, not a global
+  `generate_windows()` change.
+**Files changed (Task 3):**
+  - `backtesting/window_engine.py` — `generate_kraken_track_record_windows`
+    (non-overlapping partition, `KRAKEN_TRACK_RECORD_MIN_WINDOW_DAYS =
+    230`); `_run_over_windows` gained an optional `windows` param (reuses
+    the existing default+mutation orchestration instead of duplicating it);
+    new `run_kraken_track_record_windows(strategies, symbols)` method —
+    skips multi-leg strategies and non-Kraken symbols itself, doesn't
+    persist (caller's job).
+  - `scripts/rebuild_kraken_track_record.py` (new) — computes new results
+    in memory first; only deletes the legacy `EXPANDING` rows for the 7
+    Kraken symbols if the new run actually produced results; re-runnable
+    later against more history. `--dry-run` supported and used first.
+  - `tests/test_window_engine.py` (+6): non-overlapping/back-to-back
+    windows, exact T=3 pinned against the real 798-day span (so a future
+    data change shows up as a test failure, not a silent T shift), the
+    "never shorter than the floor" property, the too-short-history
+    single-window fallback, and that `run_kraken_track_record_windows`
+    skips multi-leg strategies and non-Kraken symbols without crashing.
+  - `AGENTS.md` — new "Kraken track-record window configuration" section
+    (the brief's explicit ask: "window count is now a number that affects
+    gate outcomes, so it must be fixed and stated").
+**Executed against the live DB:** `--dry-run` first (305 new results, 77
+  strategy-symbol combos), then for real: **4,263 legacy `EXPANDING` rows
+  deleted, 305 `INDEPENDENT` rows inserted** for the 7 Kraken symbols x 11
+  single-leg strategies. Verified directly against the table (not just the
+  script's own log) that every (strategy, symbol, params) triple now has
+  <= 3 distinct windows, all `INDEPENDENT`. Also caught and verified as
+  non-data-loss: `insert_engine_results`'s log line under-reported ("Inserted
+  5" for a 305-row multi-page `execute_values` call — a pre-existing
+  `cursor.rowcount`-on-last-page-only quirk, not fixed this session, noted
+  in the window-configuration section above).
+**Task 4 — re-baseline, best candidate per strategy, old (T=32-33, N=360)
+  vs new (T=2-3, N=360):**
+  - ATR Volatility Breakout: z -0.069 -> -0.216 (Δ-0.147)
+  - Bollinger Band Reversion: z -5.204 -> -1.885 (Δ+3.319)
+  - Dollar Cost Averaging: z -1.133 -> -0.788 (Δ+0.345)
+  - Donchian Breakout: z -2.495 -> -0.703 (Δ+1.792)
+  - EMA Crossover: z +0.216 -> +0.126 (Δ-0.090) — still the best candidate,
+    still far short of the ~1.645 z needed for DSR>=0.95
+  - HODL with Rebalance: z -6.732 -> -2.109 (Δ+4.623)
+  - Keltner Squeeze: z -2.963 -> -0.719 (Δ+2.244)
+  - MACD: z -5.612 -> -1.738 (Δ+3.874)
+  - RSI Extremes: z -4.341 -> -1.815 (Δ+2.526)
+  - SMC Breakout: z -6.840 -> -1.960 (Δ+4.880)
+  - Supertrend: z -4.261 -> -0.946 (Δ+3.315)
+  Z-scores moved materially for every strategy (|Δ| from 0.09 to 4.9) —
+  per the brief's own framing, this confirms T (not the parameters) was
+  the dominant distortion: the illusory T=32 understated the true standard
+  error, making most z-scores far more extreme (mostly more negative, one
+  case less positive) than honest. `oos_within_confidence_band` is now
+  `None` for every single-leg Kraken candidate (needs >=4 windows; T is
+  2-3) — not broken, just not enough independent history to ask the
+  out-of-sample question yet. Nothing qualifies; the Prop-eligible set
+  stays empty, now for an honestly-measured reason.
+**Task 5 — deliberately not attempted.** The brief's own instruction: "If
+  the history simply doesn't support a materially larger T, say so plainly
+  and stop before Task 5." History supports a materially *smaller*, honest
+  T (2-3, down from an illusory 32) — an even stronger version of that
+  exit condition. Proposing a search grid against a 2-3-window foundation
+  would be searching against near-total noise; the next lever is more
+  Kraken calendar history, not parameters.
+**Tests added (Task 3 continuation):** 6 (`test_window_engine.py`)
+**Suite result:** 550 passed, 0 failed (544 after Tasks 1-2 + 6)
+**Resume point for next session:** Data acquisition, not parameters —
+  more Kraken price history (ideally enough for at least one full
+  non-overlapping window's worth of NEW calendar time, ~230+ days, before
+  T=4 and the OOS check becomes possible at all). `scripts/
+  rebuild_kraken_track_record.py` is safe to re-run once more history
+  exists; it always partitions whatever `[genesis, today]` span exists at
+  run time. Task 5 (re-propose the grid) waits for that.
 
 ### 2026-09-06 — session "single-leg-prop-eligibility" (Claude) — COMPLETE
 **Phase worked:** none of the 6 Kraken Prop phases — follow-up to 71de319

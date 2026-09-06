@@ -1,6 +1,6 @@
 """Tests for the walk-forward window engine internals (spec Phase 3)."""
 
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,7 @@ from backtesting.window_engine import (
     PERMISSIVE_MAX_DD,
     FUNDING_PERIODS_PER_YEAR,
     AmbiguousPriceProvenanceError,
+    KRAKEN_TRACK_RECORD_MIN_WINDOW_DAYS,
     RunResult,
     WalkForwardWindowEngine,
     check_promotion_gate,
@@ -22,6 +23,7 @@ from backtesting.window_engine import (
     compute_regime,
     expand_param_grid,
     generate_windows,
+    generate_kraken_track_record_windows,
     _compute_metrics_from_signals,
     _compute_metrics_from_funding,
     _compute_metrics_from_positions,
@@ -500,3 +502,66 @@ def test_run_result_defaults_to_unknown_exchange_provenance():
     r = _make_run_result(sharpe=1.0, perm_pass=True, num_trades=10, win_rate=50.0)
     assert r.exchange is None
     assert r.exchange_provenance == "unknown"
+
+
+# ── Kraken track-record windows (Track Record Depth brief, Task 3) ─────────
+
+def test_kraken_track_record_windows_are_non_overlapping():
+    genesis, today = date(2024, 6, 29), date(2026, 9, 5)  # the real 798-day span
+    windows = generate_kraken_track_record_windows(genesis, today)
+    for i in range(len(windows) - 1):
+        assert windows[i].end == windows[i + 1].start  # back-to-back, no gap, no overlap
+    assert windows[0].start == genesis
+    assert windows[-1].end == today
+
+
+def test_kraken_track_record_windows_matches_798_day_history_yields_3():
+    """The real, current Kraken history span — pinned so a future data
+    change is visible as a test failure, not a silent T shift."""
+    windows = generate_kraken_track_record_windows(date(2024, 6, 29), date(2026, 9, 5))
+    assert len(windows) == 3
+    for w in windows:
+        assert w.window_type == "INDEPENDENT"
+        assert (w.end - w.start).days >= KRAKEN_TRACK_RECORD_MIN_WINDOW_DAYS
+
+
+def test_kraken_track_record_windows_never_shorter_than_min_window_days():
+    # Various spans, none evenly divisible by the min — every resulting
+    # window must still clear the floor (a strategy's warmup requirement
+    # doesn't become optional just because the arithmetic doesn't divide evenly).
+    for days in (230, 231, 459, 460, 461, 1000, 1):
+        genesis = date(2020, 1, 1)
+        today = genesis + timedelta(days=days)
+        windows = generate_kraken_track_record_windows(genesis, today, min_window_days=230)
+        assert len(windows) >= 1
+        for w in windows:
+            assert (w.end - w.start).days >= 230 or len(windows) == 1
+
+
+def test_kraken_track_record_windows_single_window_when_history_too_short():
+    genesis, today = date(2024, 1, 1), date(2024, 6, 1)  # ~150 days, under the 230-day floor
+    windows = generate_kraken_track_record_windows(genesis, today, min_window_days=230)
+    assert len(windows) == 1
+    assert windows[0].start == genesis
+    assert windows[0].end == today
+
+
+def test_run_kraken_track_record_windows_skips_multi_leg_strategies():
+    fake_pairs_strategy = type("FakePairs", (), {"name": "Pairs", "leg_count": 2})()
+    engine = WalkForwardWindowEngine(db=_ProvenanceDB([]), strategies=[], symbols=[])
+    result = engine.run_kraken_track_record_windows([fake_pairs_strategy], ["BTC/USD"])
+    assert result == []
+
+
+def test_run_kraken_track_record_windows_skips_non_kraken_symbol():
+    db = _ProvenanceDB(
+        [{"symbol": "ADA/USDT", "exchange": "binance", "n_rows": 100}],
+        prices_df=pd.DataFrame({
+            "timestamp": pd.date_range("2024-01-01", periods=800, freq="D", tz="UTC"),
+            "close": np.linspace(100, 200, 800),
+        }),
+    )
+    fake_strategy = type("FakeSingleLeg", (), {"name": "S", "leg_count": 1, "param_grid": {}, "get_min_bars": lambda self, p: 5})()
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=[])
+    result = engine.run_kraken_track_record_windows([fake_strategy], ["ADA/USDT"])
+    assert result == []

@@ -134,6 +134,50 @@ def generate_windows(genesis: date, today: date) -> List[WindowSpec]:
     return sorted(unique, key=lambda w: (w.start, w.end))
 
 
+# Longest single-leg Kraken-eligible strategy warmup requirement (EMA
+# Crossover's slow=200 combo needs 200 + MIN_TRADEABLE_BARS bars) — the
+# floor every window in generate_kraken_track_record_windows must clear so
+# no strategy in that set is silently excluded from a window it could
+# otherwise use. Declared once, from data/strategy facts, not tuned to
+# produce a particular result (see AGENTS.md's Track Record Depth section).
+KRAKEN_TRACK_RECORD_MIN_WINDOW_DAYS = 230
+
+
+def generate_kraken_track_record_windows(
+    genesis: date, today: date, min_window_days: int = KRAKEN_TRACK_RECORD_MIN_WINDOW_DAYS,
+) -> List[WindowSpec]:
+    """Fixed, non-overlapping partition of [genesis, today] into as many
+    windows of at least min_window_days as the available history supports.
+
+    Used ONLY for the Kraken Prop track-record depth calculation (single-leg,
+    Kraken-sourced candidates) — NOT a replacement for generate_windows(),
+    which stays the walk-forward scheme for the general research leaderboard
+    and every non-Kraken-scoped candidate. DSR/OOS assume independent
+    observations; generate_windows()'s expanding windows all share one start
+    date (by design, for a different purpose: tracking a strategy's
+    performance as more history accumulates) and its rolling windows overlap
+    by design too — neither should feed a statistic that assumes
+    independence. This scheme trades count for genuine non-overlap.
+
+    Declared once and fixed by data availability (the given genesis/today
+    and min_window_days), never re-run with different bounds to see which
+    produces better-looking results — that would be an undeclared parameter
+    search (see AGENTS.md's Track Record Depth section)."""
+    total_days = (today - genesis).days
+    n_windows = max(total_days // min_window_days, 1)
+    window_days = total_days // n_windows
+    windows: List[WindowSpec] = []
+    start = genesis
+    for i in range(n_windows):
+        end = today if i == n_windows - 1 else start + timedelta(days=window_days)
+        windows.append(WindowSpec(
+            window_type="INDEPENDENT", start=start, end=end,
+            years=round((end - start).days / 365.25, 2),
+        ))
+        start = end
+    return windows
+
+
 def _add_rolling(
     windows: List[WindowSpec],
     genesis: date,
@@ -568,6 +612,44 @@ class WalkForwardWindowEngine:
 
         return all_results
 
+    def run_kraken_track_record_windows(self, strategies: List, symbols: List[str]) -> List[RunResult]:
+        """Kraken Prop track-record depth run — single-leg strategies against
+        Kraken-sourced symbols only, using generate_kraken_track_record_windows
+        instead of the default expanding+rolling scheme. Does not call
+        self.run() or touch symbols/strategies outside what's passed in;
+        does not persist — caller decides when/how (see
+        scripts/rebuild_kraken_track_record.py, which deletes the
+        contaminated legacy EXPANDING rows for these symbols first).
+        Skips (does not raise past this point) on ambiguous provenance,
+        exactly like _run_strategy_symbol — a symbol that shouldn't be
+        Kraken track record in the first place must not abort the whole run."""
+        all_results: List[RunResult] = []
+        for strategy in strategies:
+            if strategy.leg_count != 1:
+                logger.warning("[SKIP] %s: leg_count=%d, not single-leg — not part of the Kraken track record.",
+                                strategy.name, strategy.leg_count)
+                continue
+            for symbol in symbols:
+                try:
+                    prices = self._load_prices(symbol)
+                except AmbiguousPriceProvenanceError as e:
+                    logger.error("[AMBIGUOUS PROVENANCE] %s / %s: %s — refusing to backtest.", strategy.name, symbol, e)
+                    continue
+                if prices is None or len(prices) < 2:
+                    logger.warning("[SKIP] %s: no price data", symbol)
+                    continue
+                if self._current_exchange != "kraken":
+                    logger.warning("[SKIP] %s / %s: source exchange is %r, not kraken.",
+                                    strategy.name, symbol, self._current_exchange)
+                    continue
+                genesis = prices["timestamp"].min().date()
+                today = prices["timestamp"].max().date()
+                windows = generate_kraken_track_record_windows(genesis, today)
+                all_results.extend(
+                    self._run_over_windows(strategy, symbol, prices, PERIODS_PER_YEAR, windows=windows)
+                )
+        return all_results
+
     def _run_strategy_symbol(self, strategy, symbol: str) -> List[RunResult]:
         """Run one single-asset strategy on one symbol across all eligible windows."""
         try:
@@ -582,14 +664,18 @@ class WalkForwardWindowEngine:
 
     def _run_over_windows(
         self, strategy, symbol: str, frame: pd.DataFrame, annualization: int,
-        funding_mode: bool = False,
+        funding_mode: bool = False, windows: Optional[List[WindowSpec]] = None,
     ) -> List[RunResult]:
         """Shared expanding+rolling window loop for any single-series strategy
         (daily price OR 8h funding). ``frame`` must carry ``timestamp`` + ``close``.
-        ``funding_mode`` selects additive-income P&L instead of price-return P&L."""
+        ``funding_mode`` selects additive-income P&L instead of price-return P&L.
+        ``windows``, if given, replaces the default generate_windows() output —
+        used by run_kraken_track_record_windows to substitute a fixed,
+        non-overlapping partition without duplicating the default+mutation
+        orchestration loop below."""
         genesis = frame["timestamp"].min().date()
         today = frame["timestamp"].max().date()
-        windows = generate_windows(genesis, today)
+        windows = windows if windows is not None else generate_windows(genesis, today)
 
         default_params = {k: (v[0] if isinstance(v, list) else v) for k, v in strategy.param_grid.items()}
         min_bars = strategy.get_min_bars(default_params)
