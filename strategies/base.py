@@ -12,6 +12,16 @@ class BaseStrategy(ABC):
     name: str = "BaseStrategy"
     min_bars: int = 1
     param_grid: Dict = {}
+    # Explicit strategy metadata, not just an isinstance(BasePairsStrategy)
+    # check — a setup from this strategy needs this many simultaneous fills.
+    # Kraken Prop has no API (every order is typed by hand), so anything
+    # above 1 is structurally ineligible for that pipeline regardless of its
+    # statistics: manual execution can't fill multiple legs at once, so leg
+    # risk on a spread is unhedgeable. See AGENTS.md's OVERFITTING GATE RULE
+    # section for the full rationale. Multi-leg strategies remain fully
+    # active for research/backtesting/the general leaderboard — this is a
+    # Prop-pipeline-only restriction.
+    leg_count: int = 1
 
     def get_min_bars(self, params: Dict) -> int:
         """Return warmup bars required for the given params. Override when min_bars is param-dependent."""
@@ -44,6 +54,8 @@ class BaseStrategy(ABC):
 
 class BasePairsStrategy(BaseStrategy):
     """Extension for two-symbol strategies (e.g. stat-arb)."""
+
+    leg_count: int = 2
 
     def generate_signals(self, df: pd.DataFrame, params: Dict) -> pd.Series:
         raise NotImplementedError("Use generate_signals_pair for pairs strategies.")

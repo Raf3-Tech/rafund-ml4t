@@ -15,6 +15,7 @@ _window_end_counter = itertools.count()
 
 from monitoring.leaderboard import (
     MIN_CONSISTENCY,
+    UNPERSISTED_EXPLORATORY_TRIALS_BUFFER,
     _score,
     build_leaderboard,
 )
@@ -66,13 +67,29 @@ def _row(
 
 
 class MockDB:
-    """Returns a fixed DataFrame for the main query; empty for returns history."""
+    """Returns a fixed DataFrame for the main query; empty for returns
+    history. Defaults every symbol seen in `rows` to Kraken-sourced (Task 2
+    provenance) so tests that don't care about provenance aren't affected —
+    override per-symbol via `non_kraken_symbols` for tests that do."""
 
-    def __init__(self, rows, returns_rows=None):
+    def __init__(self, rows, returns_rows=None, non_kraken_symbols=None, prop_verified_symbols=None):
         self._df = pd.DataFrame(rows)
         self._returns_df = pd.DataFrame(returns_rows or [])
+        non_kraken_symbols = set(non_kraken_symbols or [])
+        prop_verified_symbols = set(prop_verified_symbols or [])
+        symbols = set(self._df["symbol"]) if not self._df.empty and "symbol" in self._df.columns else set()
+        self._provenance_df = pd.DataFrame([
+            {
+                "symbol": s,
+                "is_kraken_sourced": s not in non_kraken_symbols,
+                "prop_verified": s in prop_verified_symbols,
+            }
+            for s in symbols
+        ])
 
     def read_sql(self, query: str) -> pd.DataFrame:
+        if "instrument_provenance" in query:
+            return self._provenance_df
         if "window_end" in query and "total_return_pct" in query:
             return self._returns_df
         return self._df
@@ -226,11 +243,14 @@ def test_multiple_qualifiers_allocations_sum_to_100():
 # ---------------------------------------------------------------------------
 
 
-def test_trial_count_matches_number_of_distinct_candidates():
+def test_trial_count_matches_number_of_distinct_candidates_plus_documented_buffer():
+    """trial_count = persisted distinct candidates + the documented,
+    audited buffer for unpersisted hand-tuning exploration (AGENTS.md,
+    "What counts as one trial") — not the raw persisted count alone."""
     rows_a = [_row(strategy="A", symbol="BTC/USD", sharpe=0.5, perm_pass=True) for _ in range(5)]
     rows_b = [_row(strategy="B", symbol="ETH/USD", sharpe=0.6, perm_pass=True) for _ in range(5)]
     lb = build_leaderboard(MockDB(rows_a + rows_b))
-    assert (lb["trial_count"] == 2).all()
+    assert (lb["trial_count"] == 2 + UNPERSISTED_EXPLORATORY_TRIALS_BUFFER).all()
 
 
 def test_overfitting_columns_present_on_every_row():
@@ -252,7 +272,7 @@ def test_dsr_diagnostic_columns_persisted_next_to_deflated_sharpe():
                 "dsr_n_observations", "dsr_skew", "dsr_kurtosis", "dsr_underflowed"):
         assert col in lb.columns, f"missing diagnostic column: {col}"
     assert isinstance(row["dsr_z_score"], float)
-    assert row["dsr_n_trials"] == 1
+    assert row["dsr_n_trials"] == 1 + UNPERSISTED_EXPLORATORY_TRIALS_BUFFER
     assert row["dsr_n_observations"] == 10
     assert row["dsr_skew"] == 0.0
     assert row["dsr_kurtosis"] == 3.0
@@ -286,8 +306,55 @@ def test_ready_for_live_requires_passing_the_overfitting_gate_even_with_perfect_
 
 
 def test_ready_for_live_true_when_basics_and_overfitting_gate_both_pass():
+    """Also requires prop_verified — MockDB defaults every symbol to
+    Kraken-sourced but NOT prop_verified (matches the real column default),
+    so this test must explicitly mark BTC/USDT as prop_verified."""
     rows = [_row(sharpe=1.0, dd=0.1, perm_pass=True) for _ in range(20)]  # stable across windows
     with patch("monitoring.leaderboard._paper_closed_counts", return_value={("StatArb", "BTC/USDT"): 50}):
-        lb = build_leaderboard(MockDB(rows))
+        lb = build_leaderboard(MockDB(rows, prop_verified_symbols=["BTC/USDT"]))
     row = lb.iloc[0]
     assert row["ready_for_live"] == True  # noqa: E712 — numpy.bool_, not Python bool
+
+
+def test_ready_for_live_false_without_prop_verified_even_when_everything_else_passes():
+    rows = [_row(sharpe=1.0, dd=0.1, perm_pass=True) for _ in range(20)]
+    with patch("monitoring.leaderboard._paper_closed_counts", return_value={("StatArb", "BTC/USDT"): 50}):
+        lb = build_leaderboard(MockDB(rows))  # prop_verified defaults False
+    row = lb.iloc[0]
+    assert row["passes_overfitting_gate"] == True  # noqa: E712
+    assert row["prop_eligible"] == True  # noqa: E712 — single-leg, Kraken-sourced by MockDB default
+    assert row["ready_for_live"] == False  # noqa: E712
+
+
+def test_multi_leg_strategy_gets_distinct_reason_code_and_never_ready_for_live():
+    """Statistical Arbitrage stays a real BasePairsStrategy in this test
+    (leg_count=2 via the real registry) — must be flagged MULTI_LEG_INELIGIBLE,
+    not merely fail on statistics, and must never be ready_for_live."""
+    rows = [_row(strategy="Statistical Arbitrage", symbol="BTC/USD|BTC/USDT", sharpe=2.0, dd=0.1, perm_pass=True) for _ in range(20)]
+    with patch("monitoring.leaderboard._paper_closed_counts", return_value={("Statistical Arbitrage", "BTC/USD|BTC/USDT"): 50}):
+        lb = build_leaderboard(MockDB(rows, prop_verified_symbols=["BTC/USD|BTC/USDT"]))
+    row = lb.iloc[0]
+    assert row["leg_count"] == 2
+    assert row["prop_ineligibility_reason"] == "MULTI_LEG_INELIGIBLE"
+    assert row["prop_eligible"] == False  # noqa: E712
+    assert row["ready_for_live"] == False  # noqa: E712
+
+
+def test_non_kraken_sourced_symbol_gets_distinct_reason_code():
+    rows = [_row(strategy="EMA Crossover", symbol="BTC/USDT", sharpe=1.0, dd=0.1, perm_pass=True) for _ in range(20)]
+    lb = build_leaderboard(MockDB(rows, non_kraken_symbols=["BTC/USDT"]))
+    row = lb.iloc[0]
+    assert row["leg_count"] == 1
+    assert row["is_kraken_sourced"] == False  # noqa: E712
+    assert row["prop_ineligibility_reason"] == "NON_KRAKEN_SOURCE"
+    assert row["prop_eligible"] == False  # noqa: E712
+
+
+def test_kraken_sourced_single_leg_strategy_is_prop_eligible():
+    rows = [_row(strategy="EMA Crossover", symbol="BTC/USD", sharpe=1.0, dd=0.1, perm_pass=True) for _ in range(20)]
+    lb = build_leaderboard(MockDB(rows))  # MockDB default: Kraken-sourced
+    row = lb.iloc[0]
+    assert row["leg_count"] == 1
+    assert row["is_kraken_sourced"] == True  # noqa: E712
+    assert row["prop_ineligibility_reason"] is None
+    assert row["prop_eligible"] == True  # noqa: E712

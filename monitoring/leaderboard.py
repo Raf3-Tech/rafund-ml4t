@@ -10,14 +10,33 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from data.provenance import load_provenance_map
 from monitoring.overfitting import (
     DEFAULT_MIN_DEFLATED_SHARPE,
     deflated_sharpe_ratio,
     walk_forward_oos_within_band,
 )
 from portfolio.optimizer import PortfolioOptimizer
+from strategies.registry import StrategyRegistry
 
 logger = logging.getLogger(__name__)
+
+# Trial-count audit (AGENTS.md, "What counts as one trial", 2026-09-06):
+# 305 persisted (strategy, symbol, params) combinations in engine_results,
+# plus a documented, deliberately conservative buffer for exploration that
+# never got persisted — 11 of 12 registered strategies have a mutation grid
+# of size 1 (no automated search), so their params were hand-tuned in
+# earlier sessions, and whatever was tried before freezing them left no
+# row. 5 assumed unpersisted trials x 11 hand-tuned strategies = 55. This
+# constant is a corrected-N snapshot from that specific audit, not a
+# formula recomputed from the live registry — updating it means re-auditing
+# and updating AGENTS.md's section first, not just editing this number.
+UNPERSISTED_EXPLORATORY_TRIALS_BUFFER = 55
+
+# Reason codes for Prop-pipeline ineligibility (AGENTS.md, OVERFITTING GATE
+# RULE section) — distinct from failing on statistics (passes_overfitting_gate).
+MULTI_LEG_INELIGIBLE = "MULTI_LEG_INELIGIBLE"
+NON_KRAKEN_SOURCE = "NON_KRAKEN_SOURCE"
 
 # Minimum fraction of windows that must pass (positive Sharpe, sane drawdown)
 # for a strategy-symbol combo to be considered "working." Strategies below
@@ -169,6 +188,7 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         rfl_min_dd, rfl_min_pass, rfl_min_trades = 2.0, 1.0, 10
 
     paper_counts = _paper_closed_counts(db)
+    provenance = load_provenance_map(db)
 
     records: List[Dict] = []
 
@@ -231,6 +251,29 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
             and paper_closed >= rfl_min_trades
         )
 
+        try:
+            leg_count = StrategyRegistry.get(strategy_name).leg_count
+        except AttributeError:
+            leg_count = 1  # strategy not in the registry — shouldn't happen, don't silently exclude
+
+        # Kraken Prop pipeline eligibility (AGENTS.md, OVERFITTING GATE RULE
+        # section) — distinct reason codes, checked in priority order.
+        # Pairs symbols ("A|B") are never in `provenance` (its keys are
+        # single instruments), so they always fall through to
+        # NON_KRAKEN_SOURCE if leg_count somehow didn't already catch them
+        # first — MULTI_LEG_INELIGIBLE is checked first specifically so a
+        # 2-leg strategy always reports the leg reason, not a provenance one.
+        symbol_provenance = provenance.get(symbol)
+        is_kraken_sourced = bool(symbol_provenance and symbol_provenance["is_kraken_sourced"])
+        prop_verified = bool(symbol_provenance and symbol_provenance["prop_verified"])
+        if leg_count > 1:
+            prop_ineligibility_reason = MULTI_LEG_INELIGIBLE
+        elif not is_kraken_sourced:
+            prop_ineligibility_reason = NON_KRAKEN_SOURCE
+        else:
+            prop_ineligibility_reason = None
+        prop_eligible = prop_ineligibility_reason is None
+
         records.append({
             "strategy_name": strategy_name,
             "symbol": symbol,
@@ -246,6 +289,11 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
             "score": round(score, 4),
             "qualifies": qualifies,
             "reason": reason,
+            "leg_count": leg_count,
+            "is_kraken_sourced": is_kraken_sourced,
+            "prop_verified": prop_verified,
+            "prop_eligible": prop_eligible,
+            "prop_ineligibility_reason": prop_ineligibility_reason,
             "_basic_live_checks": basic_live_checks,       # finalized into ready_for_live below
             "_window_sharpes_sorted": window_sharpes_sorted,  # consumed below, not in final output
         })
@@ -266,7 +314,9 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         min_deflated_sharpe = DEFAULT_MIN_DEFLATED_SHARPE
 
     trial_sharpes = [r["avg_sharpe"] for r in records]
-    trial_count = len(records)
+    # 305 persisted + 55 documented buffer for unpersisted hand-tuning —
+    # see AGENTS.md's "What counts as one trial" section for the audit.
+    trial_count = len(records) + UNPERSISTED_EXPLORATORY_TRIALS_BUFFER
 
     for r in records:
         window_sharpes = r.pop("_window_sharpes_sorted")
@@ -291,7 +341,15 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
         r["dsr_underflowed"] = dsr.underflowed if dsr is not None else None
         r["oos_within_confidence_band"] = oos_ok
         r["passes_overfitting_gate"] = passes_overfitting_gate
-        r["ready_for_live"] = bool(basic_live_checks and passes_overfitting_gate)
+        # prop_verified gates live-ready status only (not general
+        # qualification — see _qualifying_single_symbol_candidates, which
+        # gates on prop_eligible alone). ready_for_live is the strictest
+        # tier, so it requires everything: basic checks, the overfitting
+        # gate, Prop-pipeline eligibility (leg count + Kraken provenance),
+        # AND manual Prop-market verification.
+        r["ready_for_live"] = bool(
+            basic_live_checks and passes_overfitting_gate and r["prop_eligible"] and r["prop_verified"]
+        )
 
     result = pd.DataFrame(records)
 

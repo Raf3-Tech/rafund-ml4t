@@ -54,7 +54,6 @@ import structlog
 
 from risk.pretrade_gate import APPROVE, REDUCE, GateContext, evaluate, persist_decision
 from risk.prop_account import from_position_state
-from strategies.base import BasePairsStrategy
 from strategies.registry import StrategyRegistry
 from strategies.setup import (
     DEFAULT_RISK_PCT,
@@ -159,6 +158,14 @@ def _qualifying_single_symbol_candidates(db) -> List[tuple]:
     through here first, so passes_overfitting_gate is checked here, not
     left to score/pass_ratio alone (see AGENTS.md's KRAKEN PROP GAP BACKLOG).
 
+    Also gates on prop_eligible (leg_count == 1 AND Kraken-sourced price
+    history — see AGENTS.md's OVERFITTING GATE RULE section), logging the
+    distinct reason code so a strategy excluded for being multi-leg or
+    non-Kraken-sourced is visibly different from one excluded for failing
+    the statistics. Does NOT gate on prop_verified — that flag is
+    live-ready-only (see monitoring.leaderboard.build_leaderboard), not a
+    qualification bar for proposing a manual signal.
+
     Returns (rank, strategy_name, symbol, params, score) tuples.
     """
     from monitoring.leaderboard import build_leaderboard
@@ -176,6 +183,12 @@ def _qualifying_single_symbol_candidates(db) -> List[tuple]:
             continue
         strategy_name = str(row["strategy_name"])
         symbol = str(row["symbol"])
+        if not bool(row.get("prop_eligible", False)):
+            logger.info(
+                "pending_signal_candidate_excluded", strategy_name=strategy_name,
+                symbol=symbol, reason=row.get("prop_ineligibility_reason"),
+            )
+            continue
         key = (strategy_name, symbol)
         if key in seen:
             continue
@@ -185,8 +198,10 @@ def _qualifying_single_symbol_candidates(db) -> List[tuple]:
             strategy = StrategyRegistry.instantiate(strategy_name)
         except KeyError:
             continue
-        if isinstance(strategy, BasePairsStrategy):
-            continue
+        # No isinstance(strategy, BasePairsStrategy) check here — prop_eligible
+        # above (leg_count-based) is the one authority for leg-count
+        # exclusion now; a second, isinstance-based check would be a
+        # duplicate code path for the same concern (AGENTS.md Rule 1).
 
         params = row["params"] if isinstance(row["params"], dict) else {}
         candidates.append((int(rank), strategy_name, symbol, params, float(row["score"])))

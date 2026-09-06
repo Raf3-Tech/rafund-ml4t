@@ -222,13 +222,18 @@ def _fake_db():
             return len(rows)
 
         def read_sql(self, query, params=None):
-            # Mirrors monitoring.leaderboard.build_leaderboard's two queries:
-            # the main engine_results read (returns what insert_engine_results
-            # just captured) and the returns-history pivot (empty here — the
-            # risk-parity allocator falls back to equal-weight, which is fine
-            # for this test since it's about NaN/Inf, not allocation weights).
+            # Mirrors monitoring.leaderboard.build_leaderboard's queries: the
+            # main engine_results read (returns what insert_engine_results
+            # just captured), the returns-history pivot and the instrument
+            # provenance lookup (both empty here — the risk-parity allocator
+            # falls back to equal-weight and every candidate falls back to
+            # "provenance not established" -> ineligible, which is fine for
+            # this test since it's about NaN/Inf, not allocation weights or
+            # Prop eligibility).
             if "window_end" in query and "total_return_pct" in query:
                 return pd.DataFrame()
+            if "instrument_provenance" in query:
+                return pd.DataFrame(columns=["symbol", "is_kraken_sourced", "prop_verified"])
             return pd.DataFrame(getattr(self, "rows", []))
 
     return FakeDB()

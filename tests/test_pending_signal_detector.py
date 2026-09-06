@@ -137,17 +137,21 @@ def test_build_payload_populates_all_new_risk_fields_consistently():
     assert sig.generated_at is not None
 
 
-def _leaderboard_row(strategy, symbol, qualifies, score=0.5, params=None, passes_overfitting_gate=True):
+def _leaderboard_row(strategy, symbol, qualifies, score=0.5, params=None, passes_overfitting_gate=True,
+                      prop_eligible=True, prop_ineligibility_reason=None):
     return {
         "strategy_name": strategy, "symbol": symbol, "params": params or {},
         "qualifies": qualifies, "score": score,
         "passes_overfitting_gate": passes_overfitting_gate,
+        "prop_eligible": prop_eligible,
+        "prop_ineligibility_reason": prop_ineligibility_reason,
     }
 
 
 def test_qualifying_single_symbol_candidates_excludes_pairs_and_non_qualifying():
     lb = pd.DataFrame([
-        _leaderboard_row("Statistical Arbitrage", "BTC/USD|BTC/USDT", True, score=0.9),
+        _leaderboard_row("Statistical Arbitrage", "BTC/USD|BTC/USDT", True, score=0.9,
+                          prop_eligible=False, prop_ineligibility_reason="MULTI_LEG_INELIGIBLE"),
         _leaderboard_row("EMA Crossover", "BTC/USD", True, score=0.4),
         _leaderboard_row("ATR Volatility Breakout", "ETH/USD", False, score=0.0),
     ])
@@ -158,8 +162,24 @@ def test_qualifying_single_symbol_candidates_excludes_pairs_and_non_qualifying()
 
     names = [(c[1], c[2]) for c in candidates]
     assert ("EMA Crossover", "BTC/USD") in names
-    assert not any(name == "Statistical Arbitrage" for name, _ in names)  # pairs excluded
+    assert not any(name == "Statistical Arbitrage" for name, _ in names)  # multi-leg excluded
     assert not any(sym == "ETH/USD" for _, sym in names)  # non-qualifying excluded
+
+
+def test_qualifying_single_symbol_candidates_excludes_non_kraken_sourced():
+    lb = pd.DataFrame([
+        _leaderboard_row("EMA Crossover", "BTC/USD", True, score=0.4),
+        _leaderboard_row("EMA Crossover", "BTC/USDT", True, score=0.9,
+                          prop_eligible=False, prop_ineligibility_reason="NON_KRAKEN_SOURCE"),
+    ])
+    lb.index = [1, 2]
+
+    with patch("monitoring.leaderboard.build_leaderboard", return_value=lb):
+        candidates = _qualifying_single_symbol_candidates(db=MagicMock())
+
+    names = [(c[1], c[2]) for c in candidates]
+    assert ("EMA Crossover", "BTC/USD") in names
+    assert ("EMA Crossover", "BTC/USDT") not in names
 
 
 def test_qualifying_single_symbol_candidates_excludes_strategies_failing_the_overfitting_gate():

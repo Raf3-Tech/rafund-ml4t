@@ -224,15 +224,68 @@ not a measurement) — 11 strategies x 5 = **55** — giving a **corrected
 N of 360** (305 persisted + 55 documented buffer) as the more honest
 figure, without pretending false precision about the exact count.
 
-**This corrected N is reported here, not wired into code.** `trial_count`
-and every `passes_overfitting_gate` decision in this codebase still use the
-raw persisted-305 basis as of this entry — changing that is a gate-behavior
-change, explicitly out of scope for the audit that produced this number
-(see the DSR Instrumentation brief's "do not adjust gate behaviour in the
-same session as the audit that motivated it"). A future session updating
-`trial_count`'s basis should reference this section and get explicit user
-sign-off first, since raising N makes `passes_overfitting_gate` *harder* to
-clear for every candidate.
+**Update, 2026-09-06 (Single-Leg Prop Eligibility brief, Task 3): N=360 is
+now wired into code.** `monitoring.leaderboard.UNPERSISTED_EXPLORATORY_TRIALS_BUFFER
+= 55` is added to the persisted distinct-candidate count for every
+`trial_count`/`deflated_sharpe_ratio` computation. The user explicitly
+authorized this in that brief ("The audit that produced this number is
+complete and in AGENTS.md, so it is now appropriate to use it") — the
+"report and stop" instruction from the audit session applied to that
+session, not permanently; this note replaces the earlier "not wired into
+code" one, which is now stale. Changing the buffer value itself still
+requires a fresh audit and a sign-off, per the paragraph above.
+
+### Prop-pipeline eligibility: leg count and instrument provenance (added 2026-09-06, Single-Leg Prop Eligibility brief)
+
+Two more hard gate conditions, checked in `monitoring.leaderboard.build_leaderboard()`
+and enforced in `signals.pending_signal_detector._qualifying_single_symbol_candidates`
+and `ready_for_live`, each with its own reason code so it's visibly distinct
+from failing on statistics (`passes_overfitting_gate`) — a strategy can be
+statistically fine and still correctly excluded from the Prop pipeline for
+either of these reasons:
+
+1. **`MULTI_LEG_INELIGIBLE`** — `leg_count > 1` (`strategies/base.py`;
+   `BaseStrategy.leg_count = 1`, `BasePairsStrategy.leg_count = 2`, exposed
+   via `StrategyRegistry`). Kraken Prop has no API — every order is typed
+   by hand. A two-leg trade means entering one leg, then the other, holding
+   an unhedged position at up to 10x in between; on a spread worth a few
+   basis points, inter-leg slippage exceeds the entire expected profit, and
+   costs double (four commission events at 0.04% instead of two, plus
+   funding on both legs, against a 3-6% lifetime buffer). This is
+   structural, independent of whether the statistics are sound — confirmed
+   in practice: all 4 of the leaderboard's only-ever qualifying candidates
+   are Statistical Arbitrage (2-leg) pairs. **Multi-leg strategies remain
+   fully active for research, backtesting, and the general leaderboard** —
+   this excludes them from the Prop pipeline only; do not delete or disable
+   Statistical Arbitrage.
+2. **`NON_KRAKEN_SOURCE`** — the candidate's symbol is not single-sourced
+   from Kraken in `prices` (`data/provenance.py`, `instrument_provenance`
+   table, migration 0020). We do not trade an instrument on Kraken using
+   another venue's price history — the basis between venues is exactly the
+   kind of silent error that survives backtesting and fails live. Audited
+   2026-09-06: every `/USD` symbol (ADA, BTC, DOT, ETH, LINK, SOL, XRP) is
+   100% Kraken-sourced; every `/USDT` symbol is Binance-only or a
+   Binance+HTX mix — **zero overlap, and no `/USDT` symbol is Kraken-sourced
+   at all.** A symbol whose `prices` rows come from more than one exchange
+   is treated as `NON_KRAKEN_SOURCE` too (`source_exchange` is `NULL`,
+   not just "not Kraken") — provenance that can't be established as a
+   single source is ineligible, not a special "maybe" case. This also
+   caught a latent bug: `backtesting.window_engine` calls
+   `db.get_prices(symbol, None, None)` with no exchange filter, so
+   `engine_results` itself has never recorded which exchange a
+   backtest's price data came from — `instrument_provenance` (populated by
+   `data.provenance.sync_instrument_provenance`, not hand-maintained) is
+   what makes this checkable after the fact; nothing was fixed in
+   `window_engine.py` itself (out of scope for that brief).
+   **`prop_verified`** is separate and narrower — a boolean on the same
+   table, defaulting `false`, populated by hand from the Prop market
+   selector (Kraken Prop trades a subset of Kraken's spot universe as
+   leveraged margin contracts, not everything Kraken-sourced). Kraken
+   provenance (`is_kraken_sourced`) gates research/qualification
+   (`_qualifying_single_symbol_candidates`); `prop_verified` gates
+   `ready_for_live` only, so nothing reaches live-ready on an unverified
+   pair, without blocking manual-signal proposals on pairs nobody has
+   verified yet.
 
 ---
 
@@ -589,6 +642,88 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "single-leg-prop-eligibility" (Claude) — COMPLETE
+**Phase worked:** none of the 6 Kraken Prop phases — follow-up to 71de319
+(DSR Instrumentation & Trial-Count Audit). 5 tasks: leg-count eligibility,
+  Kraken-instrument provenance, wire N=360, single-leg inventory report,
+  propose (don't run) a pre-registered search grid.
+**DB health check:** PASSED — connectivity OK. Applied migration 0019 ->
+  0020 cleanly, synced `instrument_provenance` from the live `prices` table
+  (15 symbols), and ran `build_leaderboard()` against the live DB multiple
+  times to gather the acceptance-report numbers below.
+**engine_results row count at session start:** 134,776 (unchanged)
+**Files changed:**
+  - `strategies/base.py` — `BaseStrategy.leg_count = 1`,
+    `BasePairsStrategy.leg_count = 2`, explicit metadata (not just an
+    isinstance check).
+  - `strategies/registry.py` — `StrategyEntry.leg_count`, populated from
+    `strategy_cls.leg_count` in `register()`; added to `as_dict()`.
+  - `alembic/versions/0020_add_instrument_provenance.py` (new) —
+    `instrument_provenance(symbol, source_exchange, is_kraken_sourced,
+    prop_verified, last_audited_at)`.
+  - `data/provenance.py` (new) — `audit_instrument_provenance` (read-only),
+    `sync_instrument_provenance` (upserts, never touches `prop_verified`),
+    `load_provenance_map`. Found `backtesting.window_engine`'s
+    `db.get_prices(symbol, None, None)` has no exchange filter — a real,
+    pre-existing gap this module works around by deriving provenance
+    straight from `prices`, not fixed (out of scope for this brief).
+  - `monitoring/leaderboard.py` — `leg_count`, `is_kraken_sourced`,
+    `prop_verified`, `prop_eligible`, `prop_ineligibility_reason` columns
+    (priority: `MULTI_LEG_INELIGIBLE` checked before `NON_KRAKEN_SOURCE`);
+    `ready_for_live` now additionally requires `prop_eligible AND
+    prop_verified`; `trial_count` now adds
+    `UNPERSISTED_EXPLORATORY_TRIALS_BUFFER = 55` to the persisted count
+    (Task 3 — wiring the prior audit's corrected N=360, per explicit user
+    authorization this session).
+  - `signals/pending_signal_detector.py` — `_qualifying_single_symbol_candidates`
+    now also gates on `prop_eligible` (logging the specific reason code on
+    exclusion); removed the now-redundant `isinstance(strategy,
+    BasePairsStrategy)` check (Rule 1 — `prop_eligible`/`leg_count` is the
+    one authority now, not two overlapping mechanisms).
+  - `data/provenance.py` tests (new, 7), `monitoring/leaderboard.py` tests
+    (+6: multi-leg reason code, non-Kraken reason code, Kraken-sourced
+    eligibility, `ready_for_live` without `prop_verified`, buffer-adjusted
+    `trial_count`/`dsr_n_trials`), `signals/pending_signal_detector.py`
+    tests (+1: non-Kraken exclusion). `tests/test_window_engine.py`'s
+    `FakeDB` needed a branch for the new `instrument_provenance` query
+    (caught via a real failure, not anticipated in advance).
+**Tests added:** 14 net (7 `test_provenance.py`, 6 `test_leaderboard.py`, 1
+  `test_pending_signal_detector.py`)
+**Suite result:** 534 passed, 0 failed (522 before this session + 14, minus
+  2 replaced-not-just-added — see files above)
+**Task 3 — z-score deltas (N=305 -> N=360), the only 4 previously-qualifying
+  candidates (now also correctly excluded as MULTI_LEG_INELIGIBLE):**
+  Statistical Arbitrage BTC/USD|BTC/USDT: -4.1334 -> -4.2363 (Δ-0.1029);
+  LINK/USD|SOL/USD: -5.6828 -> -5.7925 (Δ-0.1097); LINK/USDT|SOL/USD:
+  -5.4997 -> -5.6053 (Δ-0.1056); LINK/USD|SOL/USDT: -5.4840 -> -5.5896
+  (Δ-0.1056). All shifts more negative, as expected — raising N raises
+  the expected max Sharpe under the null.
+**Acceptance results:** Prop-eligible set (single-leg AND Kraken-sourced)
+  is 133 rows across 11 of 12 single-leg strategies (Funding Rate
+  Arbitrage has zero rows in engine_results at all — never run against
+  real data). **Zero of the 133 have `qualifies=True`** — the Prop-eligible
+  set is empty exactly as the brief anticipated. Full inventory and the
+  proposed (not run) search grid are in this session's chat response, not
+  duplicated here — see the "Single-Leg Prop Eligibility" report for exact
+  per-strategy params/T/Sharpe/z-score and the 7-trial grid proposal
+  (resulting N would be 367 if approved and run).
+**Blocking issues found:** none. Confirmed empty Prop-eligible set is the
+  correct, expected output per the brief — did not engineer around it.
+**Bugs discovered and logged:** `backtesting.window_engine`'s
+  `db.get_prices(symbol, None, None)` call has no exchange filter (see
+  `data/provenance.py`'s module docstring) — real, pre-existing, NOT fixed
+  this session (out of scope: the brief asked to derive/enforce provenance
+  as a gate condition, not to change how the engine loads prices).
+**Session limit hit:** yes, disclosed — this task's diff is 11 files / 544
+  lines, over both caps (10 files, 500 lines). Not split: leg_count and
+  Kraken-provenance both feed one `prop_ineligibility_reason` value per
+  leaderboard row, so their `leaderboard.py`/`pending_signal_detector.py`
+  changes are genuinely one interdependent edit, not two independent ones
+  — same reasoning as prior disclosed overages (Phase 1, Phase 6).
+**Resume point for next session:** None assigned by this brief — it
+  explicitly stops after Tasks 1-3's wiring and Tasks 4-5's report, pending
+  user review of the proposed search grid before anything is run.
 
 ### 2026-09-06 — session "dsr-instrumentation-trial-audit" (Claude) — COMPLETE
 **Phase worked:** none of the 6 Kraken Prop phases — a small, bounded

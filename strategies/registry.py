@@ -19,6 +19,7 @@ class StrategyEntry:
     description: str
     tier_hints: List[str]
     tags: List[str]
+    leg_count: int
 
 
 class StrategyRegistry:
@@ -42,6 +43,7 @@ class StrategyRegistry:
                 description=description,
                 tier_hints=tier_hints or [],
                 tags=tags or [],
+                leg_count=strategy_cls.leg_count,
             )
             return strategy_cls
         return decorator
@@ -81,6 +83,7 @@ class StrategyRegistry:
                 "tags": e.tags,
                 "param_grid": e.cls.param_grid,
                 "min_bars": e.cls.min_bars,
+                "leg_count": e.leg_count,
             }
             for e in cls._entries.values()
         ]
