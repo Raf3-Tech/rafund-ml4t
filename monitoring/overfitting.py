@@ -33,6 +33,7 @@ rational approximation (~1e-9 accurate), and the normal CDF uses math.erf.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
@@ -105,17 +106,57 @@ def expected_max_sharpe_under_null(trial_sharpes: Sequence[float], n_trials: int
     return sigma_sr * (term1 + term2)
 
 
+@dataclass(frozen=True)
+class DeflatedSharpeResult:
+    """Everything deflated_sharpe_ratio computed on the way to `probability`.
+
+    `probability` at 0.0 (or 1.0) is a legitimate, honest answer — the
+    normal CDF genuinely saturates to the double-precision floor/ceiling for
+    an extreme enough z_score, well before the true (infinitesimally small)
+    probability would print as anything else. `underflowed` says whether
+    that saturation happened, so a 0.0 from "clearly not skill" and a 0.0
+    from "the CDF floored" are distinguishable from the outside — z_score
+    itself stays signed and unclamped either way, so ranking and
+    distance-from-threshold survive even when every probability floors to
+    the same value.
+    """
+    probability: float
+    z_score: float
+    observed_sharpe: float
+    expected_max_sharpe_null: float
+    n_trials: int
+    n_observations: int
+    skew: float
+    kurtosis: float
+    underflowed: bool
+
+
 def deflated_sharpe_ratio(
     sharpe_hat: float, n_windows: int, trial_sharpes: Sequence[float], n_trials: int,
-) -> Optional[float]:
-    """Probability (0-1) that sharpe_hat reflects real skill, not the best
-    of n_trials noisy trials. None when there isn't enough data to say
-    (fewer than 2 windows for this candidate)."""
-    se = sharpe_standard_error(sharpe_hat, n_windows)
+    skew: float = 0.0, kurtosis: float = 3.0,
+) -> Optional[DeflatedSharpeResult]:
+    """`probability` (0-1) is the chance sharpe_hat reflects real skill, not
+    the best of n_trials noisy trials — plus the full diagnostic trail
+    behind it (see DeflatedSharpeResult). None only when there isn't enough
+    data to compute a standard error at all (fewer than 2 windows for this
+    candidate) — that's a missing-data case, not a 0.0 verdict."""
+    se = sharpe_standard_error(sharpe_hat, n_windows, skew=skew, kurtosis=kurtosis)
     if se is None or se <= 0:
         return None
     sr_0 = expected_max_sharpe_under_null(trial_sharpes, n_trials)
-    return _norm_cdf((sharpe_hat - sr_0) / se)
+    z = (sharpe_hat - sr_0) / se
+    probability = _norm_cdf(z)
+    return DeflatedSharpeResult(
+        probability=probability,
+        z_score=z,
+        observed_sharpe=sharpe_hat,
+        expected_max_sharpe_null=sr_0,
+        n_trials=n_trials,
+        n_observations=n_windows,
+        skew=skew,
+        kurtosis=kurtosis,
+        underflowed=(probability == 0.0),
+    )
 
 
 def walk_forward_oos_within_band(

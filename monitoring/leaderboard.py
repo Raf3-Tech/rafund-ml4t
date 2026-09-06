@@ -274,10 +274,21 @@ def build_leaderboard(db, tier: Optional[str] = None) -> pd.DataFrame:
 
         dsr = deflated_sharpe_ratio(r["avg_sharpe"], r["n_windows"], trial_sharpes, trial_count)
         oos_ok = walk_forward_oos_within_band(window_sharpes)
-        passes_overfitting_gate = bool(dsr is not None and dsr >= min_deflated_sharpe and oos_ok is True)
+        dsr_probability = dsr.probability if dsr is not None else None
+        # Never clamp/floor/epsilon-substitute the probability (see the
+        # DSR Instrumentation brief) — 0.0 is the honest answer; dsr_z_score
+        # below is what preserves ranking once every probability floors there.
+        passes_overfitting_gate = bool(dsr_probability is not None and dsr_probability >= min_deflated_sharpe and oos_ok is True)
 
         r["trial_count"] = trial_count
-        r["deflated_sharpe"] = round(dsr, 4) if dsr is not None else None
+        r["deflated_sharpe"] = round(dsr_probability, 4) if dsr_probability is not None else None
+        r["dsr_z_score"] = round(dsr.z_score, 4) if dsr is not None else None
+        r["dsr_expected_max_sharpe_null"] = round(dsr.expected_max_sharpe_null, 4) if dsr is not None else None
+        r["dsr_n_trials"] = dsr.n_trials if dsr is not None else None
+        r["dsr_n_observations"] = dsr.n_observations if dsr is not None else None
+        r["dsr_skew"] = dsr.skew if dsr is not None else None
+        r["dsr_kurtosis"] = dsr.kurtosis if dsr is not None else None
+        r["dsr_underflowed"] = dsr.underflowed if dsr is not None else None
         r["oos_within_confidence_band"] = oos_ok
         r["passes_overfitting_gate"] = passes_overfitting_gate
         r["ready_for_live"] = bool(basic_live_checks and passes_overfitting_gate)

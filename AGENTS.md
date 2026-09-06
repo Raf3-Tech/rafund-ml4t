@@ -159,6 +159,81 @@ returns (skew=0, kurtosis=3) because `engine_results` stores per-window
 summary stats, not the raw per-trade return series the exact formula needs
 for real skew/kurtosis. This is directional, not exact.
 
+### DSR diagnostics (added 2026-09-06, DSR Instrumentation follow-up)
+
+`deflated_sharpe_ratio()` returns a `DeflatedSharpeResult` (not a bare
+float): `probability`, `z_score` (signed, unclamped — the argument passed
+to the normal CDF), `observed_sharpe`, `expected_max_sharpe_null` (SR_0),
+`n_trials`, `n_observations`, `skew`, `kurtosis`, and `underflowed` (True
+only when `probability` is *exactly* 0.0 because `math.erf` genuinely
+saturates in float64 — verified this happens only once z drops below
+roughly -8.3; the real production z-scores below, at -4.1 to -5.7, are
+small but never hit this floor). All of this is persisted on every
+leaderboard row (`dsr_z_score`, `dsr_expected_max_sharpe_null`,
+`dsr_n_trials`, `dsr_n_observations`, `dsr_skew`, `dsr_kurtosis`,
+`dsr_underflowed`, alongside the existing `deflated_sharpe`) — **never
+clamp, floor, or epsilon-substitute the `probability` value**; 0.0 is the
+honest answer, and `z_score` is what preserves ranking once every
+probability floors at the same displayed 0.0000.
+
+### What counts as one trial (Task 3 audit, 2026-09-06)
+
+**Definition:** one trial = one distinct `(strategy_name, symbol, params)`
+combination present in `engine_results` (`WHERE bars_used IS NOT NULL`),
+aggregated across every `window_type`/`window_start`/`window_end` that
+combination has been evaluated on. This is exactly what
+`monitoring.leaderboard.build_leaderboard()`'s `trial_count` groups by, and
+it's reproducible: re-running the same query against the same DB state
+always yields the same number.
+
+**Audited against the live DB (2026-09-06):**
+- Raw `engine_results` rows: **134,776**.
+- Distinct run_id: 40 (i.e. 40 separate engine invocations produced this table).
+- Distinct `(strategy_name, symbol, params)` — the current `trial_count`
+  basis: **305**.
+- Exact-duplicate `(strategy, symbol, params, window_start, window_end,
+  window_type)` groups: 10,262. These are the same window re-evaluated and
+  re-inserted across multiple engine runs — they inflate a candidate's
+  `n_windows` (and so the precision of its `avg_sharpe`), but **do not**
+  inflate `trial_count`, which counts distinct configs, not window rows.
+- Automated mutation-grid search is **fully persisted**: summed across all
+  12 registered strategies, distinct persisted params (20) exactly equals
+  the sum of each strategy's full `_mutation_grid()` size (20) — verified
+  by direct comparison, not assumed. `window_engine.py::_mutate` does stop
+  early once a passing mutation is found for a given window (so not every
+  grid cell is tried on every window), but across the full set of
+  symbols/windows every strategy's grid has been exercised at least once.
+  No gap on this axis.
+- `tmp/research_decisions.jsonl` (91 entries) is fully **downstream** of
+  `engine_results` — `research/pipeline.py` runs the engine (which
+  persists) before gating, so these are not an independent trial source.
+
+**The real gap, and why N is biased low, not high:** 11 of the 12
+registered strategies have a mutation grid of size **1** — i.e., zero
+automated parameter search. Their single persisted param set (e.g. ATR
+Volatility Breakout's `atr_period=14, multiplier=1.5`) was fixed by manual
+tuning in earlier sessions (cf. the 2026-06-11 "signal-fork-fix" session
+log entry, where `STAT_ARB_ENTRY_Z`/`STAT_ARB_EXIT_Z` were similarly
+frozen into `config/constants.py` after informal experimentation). Whatever
+alternative values were tried by hand before settling on the frozen ones
+never became `engine_results` rows and are unrecoverable. Per the
+brief's explicit instruction to bias the correction upward under this kind
+of ambiguity: **assume 5 unpersisted exploratory trials per hand-tuned
+strategy** (a documented, deliberately round and conservative placeholder —
+not a measurement) — 11 strategies x 5 = **55** — giving a **corrected
+N of 360** (305 persisted + 55 documented buffer) as the more honest
+figure, without pretending false precision about the exact count.
+
+**This corrected N is reported here, not wired into code.** `trial_count`
+and every `passes_overfitting_gate` decision in this codebase still use the
+raw persisted-305 basis as of this entry — changing that is a gate-behavior
+change, explicitly out of scope for the audit that produced this number
+(see the DSR Instrumentation brief's "do not adjust gate behaviour in the
+same session as the audit that motivated it"). A future session updating
+`trial_count`'s basis should reference this section and get explicit user
+sign-off first, since raising N makes `passes_overfitting_gate` *harder* to
+clear for every candidate.
+
 ---
 
 ## GAP BACKLOG — Phased Execution Plan
@@ -514,6 +589,97 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "dsr-instrumentation-trial-audit" (Claude) — COMPLETE
+**Phase worked:** none of the 6 Kraken Prop phases — a small, bounded
+  follow-up brief (DSR Instrumentation & Trial-Count Audit) explicitly
+  scoped to NOT touch the pre-trade gate, NOT extend the overfitting
+  module's correction logic, and NOT write/modify strategies.
+**DB health check:** PASSED — connectivity OK, no schema changes. Ran the
+  real `build_leaderboard()` against the live DB twice (before and after
+  the diagnostic wiring) to get the acceptance-report numbers below.
+**engine_results row count at session start:** 134,776 (unchanged)
+**Files changed:**
+  - `monitoring/overfitting.py` — `deflated_sharpe_ratio()` now returns a
+    `DeflatedSharpeResult` dataclass (probability, z_score, observed_sharpe,
+    expected_max_sharpe_null, n_trials, n_observations, skew, kurtosis,
+    underflowed) instead of a bare float. `underflowed` is only True when
+    `math.erf` genuinely saturates in float64 (verified this needs z below
+    roughly -8.3 — real production z-scores at -4.1 to -5.7 never hit it).
+    No change to the DSR/OOS math itself, only what's exposed.
+  - `monitoring/leaderboard.py` — persists `dsr_z_score`,
+    `dsr_expected_max_sharpe_null`, `dsr_n_trials`, `dsr_n_observations`,
+    `dsr_skew`, `dsr_kurtosis`, `dsr_underflowed` on every row, alongside
+    the existing `deflated_sharpe`. `passes_overfitting_gate`'s threshold
+    comparison unchanged (still `deflated_sharpe >= 0.95`).
+  - `tests/test_overfitting.py` — updated existing tests for the new return
+    type; added the diagnostic-trail test, the underflow-vs-saturation
+    distinction test (with a numerically verified z<-8.3 case), the
+    no-epsilon-substitution test, and Task 2's three required controls
+    (positive: N=3 genuine high Sharpe -> DSR>0.99; negative: N=305
+    noise-level Sharpe -> DSR<0.01; two monotonicity tests, holding each of
+    N and observed Sharpe fixed in turn).
+  - `tests/test_leaderboard.py` — one new test confirming the diagnostic
+    columns actually land on the leaderboard DataFrame, not just returned
+    from the underlying function.
+  - `AGENTS.md` — appended "DSR diagnostics" and "What counts as one trial"
+    subsections under the OVERFITTING GATE RULE (Task 1's persistence
+    requirement + Task 3's audit, both explicitly requested to live here).
+**Tests added:** 9 net (7 in `test_overfitting.py`, 1 in `test_leaderboard.py`,
+  plus type-signature updates to 2 pre-existing tests)
+**Suite result:** 522 passed, 0 failed (514 before this session + 9, less
+  1 dropped-and-replaced count adjustment — see files above)
+**Task 3 audit findings (reported per the brief's acceptance criteria):**
+  - Raw `engine_results` rows: 134,776. Current trial_count basis (distinct
+    strategy x symbol x params): 305.
+  - Verified, not assumed: automated mutation-grid search is fully
+    persisted (20 == 20, summed across all 12 strategies' actual grid
+    sizes vs. distinct persisted params) — no gap there despite
+    `_mutate()`'s early-stop-on-first-pass behavior. `tmp/research_decisions.jsonl`
+    (91 entries) is fully downstream of engine_results, not a separate
+    trial source. 10,262 duplicate-window groups exist but don't affect
+    trial_count (only per-candidate window-averaging precision).
+  - The real gap: 11 of 12 strategies have a mutation grid of size 1 (no
+    automated search) — their params were hand-tuned in earlier sessions
+    (e.g. `STAT_ARB_ENTRY_Z`/`STAT_ARB_EXIT_Z`, 2026-06-11 session log),
+    and whatever was tried before settling on the frozen values never
+    became a persisted row. Per the brief's "bias upward" instruction:
+    documented a conservative constant (5 assumed unpersisted trials per
+    hand-tuned strategy x 11 strategies = 55) giving a **corrected N of
+    360**, written into AGENTS.md's new "What counts as one trial" section.
+    **Not wired into code** — `trial_count` still uses the raw 305 basis,
+    per the brief's explicit "report the number and stop."
+  - Per-strategy z-scores for the 4 currently-qualifying (but
+    non-overfitting-gate-passing) candidates: Statistical Arbitrage on
+    BTC/USD|BTC/USDT z=-4.1334, LINK/USD|SOL/USD z=-5.6828,
+    LINK/USDT|SOL/USD z=-5.4997, LINK/USD|SOL/USDT z=-5.4840. All `deflated_sharpe`
+    rounds to 0.0000 for display, but none are `underflowed` — these are
+    small-but-nonzero probabilities (~1e-5 to 1e-8), not floating-point
+    saturation, and the z-scores show BTC/USD|BTC/USDT is meaningfully
+    closer to the threshold than the other three, exactly the visibility
+    Task 1 asked for.
+**Phase checklist progress:** n/a (not a KRAKEN PROP GAP BACKLOG phase)
+**Phase completion %:** n/a
+**Blocking issues found:** none. Positive control passes (required
+  acceptance criterion); full suite green (required acceptance criterion).
+**Bugs discovered and logged:** none in the DSR/OOS logic — it was already
+  correct, just opaque. One unrelated latent inconsistency noticed during
+  the Task 3 audit and NOT touched (out of scope): `MAX_MUTATION_GENERATIONS
+  = 3` exists in `backtesting/window_engine.py` but the orchestration code
+  only ever calls `_mutate()` once per window (from `default_result`,
+  generation 0 -> 1), never recursively on a still-failing mutation — so
+  generations 2 and 3 are structurally unreachable despite the guard
+  constant implying they're supported. Confirmed against real data (only
+  generations 0 and 1 appear in `engine_results`). Not fixed — flagged for
+  a future session if it matters, per this brief's explicit "do not extend"
+  scope boundary.
+**Resume point for next session:** None from this session specifically —
+  it was a bounded, complete audit. The corrected-N finding (360 vs 305) is
+  a decision point for the user: whether to actually raise `trial_count`'s
+  basis (which would make `passes_overfitting_gate` harder to clear for
+  every candidate) is deliberately left unresolved here.
+**Session limit hit:** no — brief was explicitly scoped small enough to
+  finish in one session (3 tasks, ~5 files, well under both caps).
 
 ### 2026-09-06 — session "kraken-prop-phase6-overfitting-correction" (Claude) — COMPLETE
 **Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 6 (leaderboard overfitting

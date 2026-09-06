@@ -240,6 +240,24 @@ def test_overfitting_columns_present_on_every_row():
         assert col in lb.columns
 
 
+def test_dsr_diagnostic_columns_persisted_next_to_deflated_sharpe():
+    """DSR Instrumentation follow-up (Task 1): the z-score and its
+    supporting inputs must be on the leaderboard record, not just the
+    probability — so a strategy's distance from the threshold is visible
+    even once every probability floors at the same 0.0."""
+    rows = [_row(sharpe=1.0, perm_pass=True) for _ in range(10)]
+    lb = build_leaderboard(MockDB(rows))
+    row = lb.iloc[0]
+    for col in ("dsr_z_score", "dsr_expected_max_sharpe_null", "dsr_n_trials",
+                "dsr_n_observations", "dsr_skew", "dsr_kurtosis", "dsr_underflowed"):
+        assert col in lb.columns, f"missing diagnostic column: {col}"
+    assert isinstance(row["dsr_z_score"], float)
+    assert row["dsr_n_trials"] == 1
+    assert row["dsr_n_observations"] == 10
+    assert row["dsr_skew"] == 0.0
+    assert row["dsr_kurtosis"] == 3.0
+
+
 # Note: "more trials searched lowers the deflated Sharpe for the same
 # observed Sharpe" is tested directly and in isolation in
 # tests/test_overfitting.py::test_deflated_sharpe_ratio_penalizes_more_trials_searched,
