@@ -290,12 +290,39 @@ per session, ≥90% before advancing).
   forbids (one path gated by the new Kraken-Prop properties, one still gated
   by the old dollar-amount soft/hard floor, until Phase 4 unifies them).
   `from_position_state()` is the seam Phase 4 uses to bridge the two.
+- Phase 3's `TradeSetup` is implemented as pure Decimal formulas in
+  `strategies/setup.py` (`derive_size`/`derive_notional`/
+  `derive_leverage_required`/`derive_expected_cost`/`derive_worst_case_loss`/
+  `derive_r_multiple`) consumed by `PendingSignal`'s `_build_payload` — not a
+  second dataclass. This **replaced** `_build_payload`'s prior sizing call to
+  `trading.paper_trader._target_notional` (confirmed with the user): the
+  brief's `size = equity*risk_pct/stop_distance` formula (risk_pct=0.25%,
+  its own constant, deliberately not reading the shared
+  `risk_per_trade_pct=0.5%` config value that `_target_notional` uses for
+  the separate automatic multi-exchange paper-trading concern) is
+  irreconcilable with `_target_notional`'s leg-allocation+headroom-cap
+  approach. The headroom/gap-risk protection `_target_notional` gave up
+  moves to Phase 4's gate as a REJECT, not inline notional-clipping.
+  `pos.equity` (realized only) is used as the sizing input for now, not the
+  fuller `PropAccountState.equity` — swap this once Phase 4's live
+  account-state feed exists (documented in the module docstring).
+- `PendingSignal`'s price/size fields (`limit_price`, `stop_price`,
+  `take_profit_price`, `position_size_usd`, `qty`) plus the new
+  `expected_cost`/`worst_case_loss`/`r_multiple`/`leverage_required` are now
+  Decimal (confirmed with the user), and migration `0018` converts their DB
+  columns from FLOAT8 to NUMERIC (table was empty — zero-risk type change,
+  not a backfill) so Decimal precision survives the round trip, not just
+  in-memory. The `/api/pending-signals` JSON boundary explicitly converts
+  Decimal → float before `jsonify` (Flask's default encoder would otherwise
+  serialize Decimal as a *string*, silently breaking the dashboard's
+  `.toFixed()`/`.toLocaleString()` calls on those fields) — verified live
+  against a running dashboard instance.
 
 | # | Phase | Files | Status |
 |---|---|---|---|
 | 1 | Cost model — commission + funding, Decimal-exact | `risk/cost_model.py` | ✅ DONE 2026-09-06 |
 | 2 | Account state + daily clock (00:30 UTC rollover, two-tier floors) | `risk/prop_account.py`, `risk/daily_clock.py` | ✅ DONE 2026-09-06 |
-| 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ⏳ |
+| 3 | `TradeSetup` (extends `PendingSignal`) + `BaseStrategy` amendment | `strategies/setup.py`, `signals/pending_signal_detector.py` | ✅ DONE 2026-09-06 (as pure formulas + PendingSignal extension — see below; `BaseStrategy` left unchanged as agreed) |
 | 4 | Pre-trade gate — sole path to a live setup | `risk/pretrade_gate.py` | ⏳ |
 | 5 | Publish endpoint (read-only, Tailscale, OpenAPI schema) | `monitoring/routes/*` | ⏳ |
 | 6 | Leaderboard overfitting correction (deflated Sharpe / White's Reality Check) | `monitoring/leaderboard.py` | ⏳ |
@@ -388,6 +415,77 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "kraken-prop-phase3-trade-setup" (Claude) — COMPLETE
+**Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 3 (TradeSetup sizing/cost/risk math)
+**DB health check:** PASSED — connectivity OK; applied migration `0017 -> 0018`
+  cleanly (table was empty, verified via `information_schema.columns` that all
+  5 price/size columns are now `numeric`); live-verified the `/api/pending-signals`
+  endpoint against a running dashboard instance after the change (seeded one
+  NUMERIC-backed row, confirmed JSON response carries real numbers, not
+  Decimal-as-string, then deleted it)
+**engine_results row count at session start:** 134,776 (unchanged)
+**Files changed:**
+  - `strategies/setup.py` (new) — `derive_size` (equity*risk_pct/stop_distance,
+    risk_pct default 0.25%, its own constant), `derive_notional`,
+    `derive_leverage_required` (margin-efficiency readout only, provably
+    unused by `derive_size`), `derive_expected_cost` (wraps
+    `risk.cost_model.total_expected_cost`), `derive_worst_case_loss`,
+    `derive_r_multiple` (cost-adjusted). Pure Decimal, no dataclass.
+  - `tests/test_strategy_setup.py` (new, 11 tests) — including the brief's
+    explicit leverage-invariance acceptance test. **Named to avoid a
+    filename collision**: this session's first attempt overwrote a
+    pre-existing, unrelated `tests/test_setup.py` (an old environment/
+    dependency-verification script, tracked since the initial commit) via
+    `Write` without checking first — caught immediately via `git status`
+    showing it as modified rather than new, restored with `git restore`
+    (confirmed no data loss), new tests moved to this non-colliding name.
+    Lesson: check `git status`/existence before `Write`-ing into `tests/`
+    with a name inferred from a source module, not asserted by the user.
+  - `signals/pending_signal_detector.py` — `PendingSignal` fields converted
+    to Decimal; added `expected_cost`/`worst_case_loss`/`r_multiple`/
+    `leverage_required`/`expected_hold_hours`/`generated_at`. `_build_payload`
+    now sizes via `strategies.setup` instead of `_target_notional` (see
+    "Known conflicts" above).
+  - `tests/test_pending_signal_detector.py` — updated for Decimal types;
+    replaced the now-obsolete "not raw leg allocation" test (that concern no
+    longer applies — there's no leg allocation left in this path) with sizing
+    tests cross-checked against `strategies.setup` directly.
+  - `alembic/versions/0018_pending_signals_decimal.py` (new) — price/size
+    columns FLOAT8 → NUMERIC; adds the 5 new risk/cost columns.
+  - `monitoring/routes/trading_routes.py` — explicit Decimal → float
+    conversion before `jsonify` in `/api/pending-signals` (see "Known
+    conflicts" above for why this is necessary, not optional).
+**Tests added:** 13 net (11 new in `test_strategy_setup.py`; `test_pending_signal_detector.py` net +2 after removing the obsolete test)
+**Suite result:** 477 passed, 0 failed (464 before this phase + 13)
+**Phase checklist progress:** Phase 3 ✅ DONE (TradeSetup math + PendingSignal
+  consolidation; `BaseStrategy` deliberately untouched per the resolution
+  recorded at the top of this backlog)
+**Phase completion %:** 100%
+**Blocking issues found:** none blocking, but two real conflicts were
+  surfaced and resolved with the user before writing code: (a) the brief's
+  sizing formula vs. `_target_notional` — resolved as "switch, don't keep
+  both"; (b) Decimal fields needing NUMERIC DB columns to avoid silently
+  losing precision on write — resolved as "migrate now, table's still empty."
+**Bugs discovered and logged:** the `tests/test_setup.py` filename collision
+  above (self-inflicted this session, caught and fixed before commit — not a
+  pre-existing bug, logging it as a process lesson)
+**Resume point for next session:** Phase 4 — `risk/pretrade_gate.py`. Needs a
+  live `PropAccountState` feed (Phase 2 built the type; nothing populates it
+  from real running state yet — `from_position_state()` plus a real
+  `kraken_mdd_pct` config value and persisted `last_rollover` are the gaps to
+  close first) and Kraken's actual per-asset leverage caps (brief: "verify
+  current values, do not hardcode blindly" — not yet looked up). The gate
+  must be provably the only path to a live setup — brief requires a test
+  asserting this.
+**Session limit hit:** yes, two ways — (1) stopping after Phase 3 per PHASE
+  GATE RULE, pending user review before Phase 4; (2) this phase's diff is 521
+  lines across 7 files, over the 500-line cap (files count is fine, 7/10).
+  Not split into partial commits: the change is one atomic, fully-tested unit
+  (detector rewrite + its migration + its API-boundary fix + updated tests
+  all depend on each other) — splitting would leave intermediate commits with
+  a broken test suite, which the "never leave a failing suite" rule outranks.
+  Disclosing the overage rather than silently ignoring it.
 
 ### 2026-09-06 — session "kraken-prop-phase2-account-clock" (Claude) — COMPLETE
 **Phase worked:** KRAKEN PROP GAP BACKLOG, Phase 2 (account state + daily clock)

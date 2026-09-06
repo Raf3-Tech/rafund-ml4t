@@ -9,27 +9,56 @@ endpoint.
 Reuses (does not reimplement):
   - monitoring.leaderboard.build_leaderboard for the qualifying-strategy gate
   - trading.paper_trader._last_signal / _latest_bars for entry detection
-  - trading.paper_trader._target_notional for position sizing (soft-floor
-    halving + the dual gap-risk/per-trade-risk cap from trading.position)
   - trading.position.load_position / PositionState for account + halt state
   - strategies.base.BaseStrategy.get_stop_level for structural stops
+  - strategies.setup for risk-based sizing / cost / R-multiple math (Kraken
+    Prop's "survival, not returns" formula: size is DERIVED from
+    equity*risk_pct/stop_distance, never chosen or allocation-derived)
+
+Deliberately does NOT reuse trading.paper_trader._target_notional for sizing
+(as an earlier version of this module did) — that function's leg-allocation
++ headroom-cap sizing is the right tool for a diversified book of many
+simultaneously-open *automatic* paper positions across every exchange, not
+one manually-placed Kraken Prop setup sized purely off its own stop
+distance. See AGENTS.md's KRAKEN PROP GAP BACKLOG for the full rationale.
+The old headroom/gap-risk protection this gave up moves to risk/
+pretrade_gate.py (a later phase): REJECT the whole setup if it doesn't fit
+remaining room, rather than silently shrinking its notional.
+
+`pos.equity` (realized only, no unrealized P&L or accrued funding netted in)
+is used as the equity input to sizing — not the fuller risk.prop_account.
+PropAccountState.equity, which needs a live funding-accrual feed and
+rollover-state persistence that don't exist yet. Swap this for
+PropAccountState.equity once risk/pretrade_gate.py (which needs that live
+feed anyway) exists.
 
 Not reused (nothing exists yet to reuse):
-  - take-profit level — derived as an R-multiple of the stop distance
   - a stop-distance fallback for strategies with no structural stop
     (BaseStrategy.get_stop_level returns None for everything but SMCBreakout)
+  - real historical average-hold-time data (expected_hold_hours is a
+    documented default, not a measured figure — see _DEFAULT_EXPECTED_HOLD_HOURS)
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import List, Optional
 
 import structlog
 
 from strategies.base import BasePairsStrategy
 from strategies.registry import StrategyRegistry
-from trading.paper_trader import _last_signal, _latest_bars, _target_notional
+from strategies.setup import (
+    DEFAULT_RISK_PCT,
+    derive_expected_cost,
+    derive_leverage_required,
+    derive_notional,
+    derive_r_multiple,
+    derive_size,
+    derive_worst_case_loss,
+)
+from trading.paper_trader import _last_signal, _latest_bars
 from trading.position import load_position
 
 logger = structlog.get_logger(__name__)
@@ -38,11 +67,16 @@ logger = structlog.get_logger(__name__)
 # returns None) — new, config-overridable, and separate from
 # max_adverse_move_pct (that one models worst-case gap risk for sizing, not a
 # level a human would actually place an order at).
-_DEFAULT_STOP_PCT = 0.02
-_DEFAULT_R_MULTIPLE = 2.0
+_DEFAULT_STOP_PCT = Decimal("0.02")
+_DEFAULT_R_MULTIPLE = Decimal("2.0")
 _DEFAULT_EXPIRY_MINUTES = 30
 _DEFAULT_STALE_MOVE_PCT = 0.01
+_DEFAULT_EXPECTED_HOLD_HOURS = Decimal("24")  # documented default, not measured — see module docstring
 _MIN_BARS_PADDING = 10
+
+_PRICE_Q = Decimal("0.00000001")  # 8 dp — prices and qty
+_USD_Q = Decimal("0.01")          # 2 dp — dollar amounts
+_RATIO_Q = Decimal("0.0001")      # 4 dp — leverage_required, r_multiple
 
 
 @dataclass
@@ -51,16 +85,22 @@ class PendingSignal:
     symbol: str
     exchange: str
     direction: str  # LONG | SHORT
-    limit_price: float
-    stop_price: Optional[float]
-    take_profit_price: Optional[float]
-    position_size_usd: Optional[float]
-    qty: Optional[float]
+    limit_price: Decimal
+    stop_price: Optional[Decimal]
+    take_profit_price: Optional[Decimal]
+    position_size_usd: Optional[Decimal]
+    qty: Optional[Decimal]
     leaderboard_score: float
     leaderboard_rank: int
     thesis: str
     source_timeframe: str
     expires_at: datetime
+    expected_cost: Decimal
+    worst_case_loss: Decimal
+    r_multiple: Decimal
+    leverage_required: Decimal
+    expected_hold_hours: Decimal
+    generated_at: datetime
 
 
 def _qualifying_single_symbol_candidates(db) -> List[tuple]:
@@ -106,7 +146,7 @@ def _qualifying_single_symbol_candidates(db) -> List[tuple]:
 
 
 def _thesis(strategy_name: str, symbol: str, direction: str, rank: int, score: float,
-            stop_price: float, has_structural_stop: bool) -> str:
+            stop_price: Decimal, has_structural_stop: bool) -> str:
     """One-line human-readable rationale. Called with an already-resolved
     stop_price (real or fallback) — always populated by _build_payload."""
     stop_note = "structural stop" if has_structural_stop else f"fallback {_DEFAULT_STOP_PCT:.0%} stop"
@@ -118,43 +158,59 @@ def _thesis(strategy_name: str, symbol: str, direction: str, rank: int, score: f
 
 def _build_payload(
     *, strategy_name: str, symbol: str, exchange: str, rank: int, score: float,
-    signal: str, price: float, stop_price: Optional[float], source_timeframe: str,
+    signal: str, price: Decimal, stop_price: Optional[Decimal], source_timeframe: str,
     pos, cfg,
 ) -> PendingSignal:
     """Pure computation (no DB I/O) — split out so it's unit-testable without
-    a database, mirroring the _target_notional / max_safe_notional tests."""
+    a database, mirroring the strategies/setup.py formula tests."""
     direction = "LONG" if signal == "BUY" else "SHORT"
     has_structural_stop = stop_price is not None
     if stop_price is None:
-        stop_pct = getattr(cfg, "pending_signal_default_stop_pct", _DEFAULT_STOP_PCT)
+        stop_pct = Decimal(str(getattr(cfg, "pending_signal_default_stop_pct", _DEFAULT_STOP_PCT)))
         stop_price = price * (1 - stop_pct) if direction == "LONG" else price * (1 + stop_pct)
 
     stop_distance = abs(price - stop_price)
-    r_multiple = getattr(cfg, "pending_signal_r_multiple", _DEFAULT_R_MULTIPLE)
-    take_profit = price + r_multiple * stop_distance if direction == "LONG" else price - r_multiple * stop_distance
+    r_multiple_target = Decimal(str(getattr(cfg, "pending_signal_r_multiple", _DEFAULT_R_MULTIPLE)))
+    take_profit = price + r_multiple_target * stop_distance if direction == "LONG" else price - r_multiple_target * stop_distance
 
-    stop_distance_pct = stop_distance / price if price > 0 else None
-    notional = _target_notional(pos, cfg, current_price=price, stop_price=stop_price)
-    qty = notional / price if price > 0 else None
+    # Sizing: risk-based, never allocation-based — see strategies/setup.py and
+    # the module docstring for why pos.equity (realized only) is the input.
+    equity = Decimal(str(pos.equity))
+    risk_pct = Decimal(str(getattr(cfg, "pending_signal_risk_pct", DEFAULT_RISK_PCT)))
+    size = derive_size(equity, price, stop_price, risk_pct=risk_pct)
+    notional = derive_notional(size, price)
+    leverage_required = derive_leverage_required(notional, equity)
+
+    expected_hold_hours = Decimal(str(getattr(cfg, "pending_signal_expected_hold_hours", _DEFAULT_EXPECTED_HOLD_HOURS)))
+    expected_cost = derive_expected_cost(notional, expected_hold_hours)
+    worst_case_loss = derive_worst_case_loss(size, price, stop_price, expected_cost)
+    r_multiple = derive_r_multiple(price, stop_price, take_profit, size, expected_cost)
 
     expiry_minutes = getattr(cfg, "pending_signal_expiry_minutes", _DEFAULT_EXPIRY_MINUTES)
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes)
+    generated_at = datetime.now(timezone.utc)
+    expires_at = generated_at + timedelta(minutes=expiry_minutes)
 
     return PendingSignal(
         strategy_name=strategy_name,
         symbol=symbol,
         exchange=exchange,
         direction=direction,
-        limit_price=round(price, 8),
-        stop_price=round(stop_price, 8),
-        take_profit_price=round(take_profit, 8),
-        position_size_usd=round(notional, 2) if notional is not None else None,
-        qty=round(qty, 8) if qty is not None else None,
+        limit_price=price.quantize(_PRICE_Q),
+        stop_price=stop_price.quantize(_PRICE_Q),
+        take_profit_price=take_profit.quantize(_PRICE_Q),
+        position_size_usd=notional.quantize(_USD_Q),
+        qty=size.quantize(_PRICE_Q),
         leaderboard_score=round(score, 4),
         leaderboard_rank=rank,
         thesis=_thesis(strategy_name, symbol, direction, rank, score, stop_price, has_structural_stop),
         source_timeframe=source_timeframe,
         expires_at=expires_at,
+        expected_cost=expected_cost.quantize(_USD_Q),
+        worst_case_loss=worst_case_loss.quantize(_USD_Q),
+        r_multiple=r_multiple.quantize(_RATIO_Q),
+        leverage_required=leverage_required.quantize(_RATIO_Q),
+        expected_hold_hours=expected_hold_hours,
+        generated_at=generated_at,
     )
 
 
@@ -192,8 +248,9 @@ def scan_kraken_signals(db, exchange: str = "kraken") -> List[PendingSignal]:
         if signal not in ("BUY", "SELL"):
             continue
 
-        price = float(df["close"].iloc[-1])
-        stop_price = strategy.get_stop_level(df, params)
+        price = Decimal(str(df["close"].iloc[-1]))
+        stop_level = strategy.get_stop_level(df, params)
+        stop_price = Decimal(str(stop_level)) if stop_level is not None else None
 
         payload = _build_payload(
             strategy_name=strategy_name, symbol=symbol, exchange=exchange, rank=rank,
@@ -218,25 +275,33 @@ def _upsert_active_signal(db, sig: PendingSignal) -> None:
             INSERT INTO pending_signals
                 (strategy_name, symbol, exchange, direction, limit_price, stop_price,
                  take_profit_price, position_size_usd, qty, leaderboard_score,
-                 leaderboard_rank, thesis, source_timeframe, status, expires_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
+                 leaderboard_rank, thesis, source_timeframe, status, expires_at,
+                 expected_cost, worst_case_loss, r_multiple, leverage_required,
+                 expected_hold_hours)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s,%s,%s,%s,%s,%s)
             ON CONFLICT (strategy_name, symbol, direction) WHERE status = 'active'
             DO UPDATE SET
-                limit_price       = EXCLUDED.limit_price,
-                stop_price        = EXCLUDED.stop_price,
-                take_profit_price = EXCLUDED.take_profit_price,
-                position_size_usd = EXCLUDED.position_size_usd,
-                qty               = EXCLUDED.qty,
-                leaderboard_score = EXCLUDED.leaderboard_score,
-                leaderboard_rank  = EXCLUDED.leaderboard_rank,
-                thesis            = EXCLUDED.thesis,
-                expires_at        = EXCLUDED.expires_at
+                limit_price        = EXCLUDED.limit_price,
+                stop_price         = EXCLUDED.stop_price,
+                take_profit_price  = EXCLUDED.take_profit_price,
+                position_size_usd  = EXCLUDED.position_size_usd,
+                qty                = EXCLUDED.qty,
+                leaderboard_score  = EXCLUDED.leaderboard_score,
+                leaderboard_rank   = EXCLUDED.leaderboard_rank,
+                thesis             = EXCLUDED.thesis,
+                expires_at         = EXCLUDED.expires_at,
+                expected_cost      = EXCLUDED.expected_cost,
+                worst_case_loss    = EXCLUDED.worst_case_loss,
+                r_multiple         = EXCLUDED.r_multiple,
+                leverage_required  = EXCLUDED.leverage_required,
+                expected_hold_hours = EXCLUDED.expected_hold_hours
             """,
             (
                 sig.strategy_name, sig.symbol, sig.exchange, sig.direction, sig.limit_price,
                 sig.stop_price, sig.take_profit_price, sig.position_size_usd, sig.qty,
                 sig.leaderboard_score, sig.leaderboard_rank, sig.thesis, sig.source_timeframe,
-                sig.expires_at,
+                sig.expires_at, sig.expected_cost, sig.worst_case_loss, sig.r_multiple,
+                sig.leverage_required, sig.expected_hold_hours,
             ),
         )
         conn.commit()

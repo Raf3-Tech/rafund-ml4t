@@ -545,7 +545,8 @@ def api_pending_signals():
         SELECT id, strategy_name, symbol, exchange, direction, limit_price, stop_price,
                take_profit_price, position_size_usd, qty, leaderboard_score,
                leaderboard_rank, thesis, source_timeframe, status, created_at, expires_at,
-               resolved_at
+               resolved_at, expected_cost, worst_case_loss, r_multiple, leverage_required,
+               expected_hold_hours
         FROM pending_signals
         {where}
         ORDER BY created_at DESC
@@ -559,6 +560,18 @@ def api_pending_signals():
     # resolved_at is nullable (NULL while active) — stringify only non-null
     # values so _records()'s NaN->None pass still turns the rest into JSON null.
     df["resolved_at"] = df["resolved_at"].apply(lambda x: str(x) if pd.notnull(x) else None)
+    # NUMERIC columns come back as Decimal (object dtype) — Flask's default
+    # JSON encoder serializes Decimal as a *string*, which would silently
+    # break the dashboard's Number()-free .toFixed()/.toLocaleString() calls
+    # on these fields. Decimal precision matters internally (the risk/cost
+    # path); at this JSON boundary it's display data, so convert explicitly.
+    decimal_cols = [
+        "limit_price", "stop_price", "take_profit_price", "position_size_usd", "qty",
+        "expected_cost", "worst_case_loss", "r_multiple", "leverage_required",
+        "expected_hold_hours",
+    ]
+    for col in decimal_cols:
+        df[col] = df[col].apply(lambda x: float(x) if pd.notnull(x) else None)
     return jsonify(_records(df))
 
 
