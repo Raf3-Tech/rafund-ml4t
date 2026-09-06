@@ -4,6 +4,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from config.constants import PERIODS_PER_YEAR
 from backtesting.window_engine import (
@@ -13,6 +14,7 @@ from backtesting.window_engine import (
     STANDARD_MAX_DD,
     PERMISSIVE_MAX_DD,
     FUNDING_PERIODS_PER_YEAR,
+    AmbiguousPriceProvenanceError,
     RunResult,
     WalkForwardWindowEngine,
     check_promotion_gate,
@@ -199,7 +201,7 @@ def _fake_db():
     rng = np.random.default_rng(7)
 
     class FakeDB:
-        def get_prices(self, symbol, a, b):
+        def get_prices(self, symbol, a, b, exchange=None, timeframe=None):
             close = 100 * np.exp(np.cumsum(rng.normal(0.0003, 0.03, 2500)))
             return pd.DataFrame({
                 "timestamp": pd.date_range("2018-01-01", periods=2500, freq="D", tz="UTC"),
@@ -234,6 +236,15 @@ def _fake_db():
                 return pd.DataFrame()
             if "instrument_provenance" in query:
                 return pd.DataFrame(columns=["symbol", "is_kraken_sourced", "prop_verified"])
+            if "GROUP BY symbol, exchange" in query:
+                # data.provenance.audit_instrument_provenance's raw-prices
+                # audit — both test symbols single-sourced from one fake
+                # exchange, so window_engine's provenance check passes
+                # rather than raising AmbiguousPriceProvenanceError.
+                return pd.DataFrame([
+                    {"symbol": "BTC/USDT", "exchange": "binance", "n_rows": 2500},
+                    {"symbol": "ETH/USDT", "exchange": "binance", "n_rows": 2500},
+                ])
             return pd.DataFrame(getattr(self, "rows", []))
 
     return FakeDB()
@@ -397,3 +408,95 @@ def test_promotion_gate_uses_only_last_5_windows():
 
 def test_promotion_gate_empty_results():
     assert check_promotion_gate([]) == {}
+
+
+# ── Exchange provenance (Track Record Depth brief, Task 2) ─────────────────
+
+class _ProvenanceDB:
+    """Minimal db double exposing only what _resolve_exchange/_load_prices
+    touch: read_sql for the provenance audit, get_prices for the actual bars."""
+
+    def __init__(self, provenance_rows, prices_df=None, raise_on_get_prices=False):
+        self._provenance_rows = pd.DataFrame(provenance_rows)
+        self._prices_df = prices_df
+        self._raise_on_get_prices = raise_on_get_prices
+
+    def read_sql(self, query, params=None):
+        if "GROUP BY symbol, exchange" in query:
+            return self._provenance_rows
+        return pd.DataFrame()
+
+    def get_prices(self, symbol, a, b, exchange=None, timeframe=None):
+        if self._raise_on_get_prices:
+            raise AssertionError("get_prices must not be called for an ambiguous-provenance symbol")
+        return self._prices_df
+
+
+def test_resolve_exchange_returns_the_single_source():
+    db = _ProvenanceDB([{"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799}])
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=["BTC/USD"])
+    assert engine._resolve_exchange("BTC/USD") == "kraken"
+
+
+def test_resolve_exchange_raises_on_multi_venue_symbol_without_calling_get_prices():
+    """The brief's required test: a multi-venue symbol must fail loudly,
+    never silently blend sources."""
+    db = _ProvenanceDB(
+        [
+            {"symbol": "BTC/USDT", "exchange": "binance", "n_rows": 6532},
+            {"symbol": "BTC/USDT", "exchange": "htx", "n_rows": 3238},
+        ],
+        raise_on_get_prices=True,
+    )
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=["BTC/USDT"])
+    with pytest.raises(AmbiguousPriceProvenanceError):
+        engine._load_prices("BTC/USDT")
+
+
+def test_resolve_exchange_raises_when_symbol_has_no_price_data_at_all():
+    db = _ProvenanceDB([{"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799}])
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=["UNKNOWN/PAIR"])
+    with pytest.raises(AmbiguousPriceProvenanceError):
+        engine._resolve_exchange("UNKNOWN/PAIR")
+
+
+def test_run_strategy_symbol_skips_ambiguous_provenance_without_crashing_the_run(caplog):
+    """The engine-level entry point: a bad symbol is skipped (the run
+    continues for other symbols), but logged distinctly (ERROR,
+    "[AMBIGUOUS PROVENANCE]") from a plain "[SKIP] ... no price data" miss."""
+    db = _ProvenanceDB(
+        [
+            {"symbol": "BTC/USDT", "exchange": "binance", "n_rows": 100},
+            {"symbol": "BTC/USDT", "exchange": "htx", "n_rows": 50},
+        ],
+        raise_on_get_prices=True,
+    )
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=["BTC/USDT"])
+    fake_strategy = type("FakeStrategy", (), {"name": "S"})()
+    import logging
+    with caplog.at_level(logging.ERROR):
+        result = engine._run_strategy_symbol(strategy=fake_strategy, symbol="BTC/USDT")
+    assert result == []
+    assert any("AMBIGUOUS PROVENANCE" in rec.message for rec in caplog.records)
+
+
+def test_load_prices_stamps_verified_exchange_and_provenance():
+    prices_df = pd.DataFrame({
+        "timestamp": pd.date_range("2020-01-01", periods=10, freq="D", tz="UTC"),
+        "close": np.linspace(100, 110, 10),
+    })
+    db = _ProvenanceDB([{"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799}], prices_df=prices_df)
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=["BTC/USD"])
+    result = engine._load_prices("BTC/USD")
+    assert result is not None
+    assert engine._current_exchange == "kraken"
+    assert engine._current_exchange_provenance == "verified"
+
+
+def test_run_result_defaults_to_unknown_exchange_provenance():
+    """A RunResult constructed without exchange info (e.g. hand-built in a
+    test or an older code path) must default to the honest 'unknown' state,
+    not silently claim verification."""
+    r = _make_run_result(sharpe=1.0, perm_pass=True, num_trades=10, win_rate=50.0)
+    assert r.exchange is None
+    assert r.exchange_provenance == "unknown"

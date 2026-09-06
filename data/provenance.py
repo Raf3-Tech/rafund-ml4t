@@ -85,6 +85,75 @@ def sync_instrument_provenance(db) -> int:
     return len(audit)
 
 
+def backfill_engine_results_exchange(db) -> Dict[str, int]:
+    """One-time backfill for engine_results rows persisted before migration
+    0021 added the exchange columns (all NULL/'unknown' by default).
+
+    Only sets exchange_provenance = 'inferred_from_symbol' where current
+    instrument_provenance genuinely establishes a single source for that
+    row's symbol — this is inferred backward from today's provenance state,
+    not a per-row fact recorded at insert time, which is exactly why it's
+    not 'verified'. Everything else (ambiguous or unestablished provenance)
+    is left as 'unknown' — no confident value is invented for it.
+
+    Pairs symbols ("A|B") are backfilled only when BOTH legs resolve to a
+    single exchange; exchange is recorded as "A+B" when the legs differ,
+    or the shared exchange when they match.
+
+    Returns {"single_leg_backfilled": n, "pairs_backfilled": n}.
+    """
+    audit = audit_instrument_provenance(db)
+    single_source = {
+        row["symbol"]: row["source_exchange"]
+        for _, row in audit.iterrows()
+        if row["source_exchange"] is not None
+    }
+
+    conn = db.get_connection()
+    counts = {"single_leg_backfilled": 0, "pairs_backfilled": 0}
+    try:
+        cur = conn.cursor()
+
+        for symbol, exchange in single_source.items():
+            cur.execute(
+                """
+                UPDATE engine_results SET exchange = %s, exchange_provenance = 'inferred_from_symbol'
+                WHERE symbol = %s AND exchange_provenance = 'unknown'
+                """,
+                (exchange, symbol),
+            )
+            counts["single_leg_backfilled"] += cur.rowcount
+
+        cur.execute(
+            "SELECT DISTINCT symbol FROM engine_results WHERE symbol LIKE '%%|%%' AND exchange_provenance = 'unknown'"
+        )
+        pair_symbols = [row[0] for row in cur.fetchall()]
+        for pair_symbol in pair_symbols:
+            legs = pair_symbol.split("|")
+            if len(legs) != 2:
+                continue
+            ex_a, ex_b = single_source.get(legs[0]), single_source.get(legs[1])
+            if ex_a is None or ex_b is None:
+                continue
+            exchange = ex_a if ex_a == ex_b else f"{ex_a}+{ex_b}"
+            cur.execute(
+                """
+                UPDATE engine_results SET exchange = %s, exchange_provenance = 'inferred_from_symbol'
+                WHERE symbol = %s AND exchange_provenance = 'unknown'
+                """,
+                (exchange, pair_symbol),
+            )
+            counts["pairs_backfilled"] += cur.rowcount
+
+        conn.commit()
+        cur.close()
+    finally:
+        db.return_connection(conn)
+
+    logger.info("engine_results_exchange_backfilled", **counts)
+    return counts
+
+
 def load_provenance_map(db) -> Dict[str, Dict[str, Optional[bool]]]:
     """{symbol: {"is_kraken_sourced": bool, "prop_verified": bool}} for
     every symbol in instrument_provenance — the lookup

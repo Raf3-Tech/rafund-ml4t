@@ -26,6 +26,16 @@ class FundingRateArb(BaseStrategy):
     name = "Funding Rate Arbitrage"
     min_bars = 3
     param_grid = {"entry_threshold": 0.01, "exit_threshold": 0.005}
+    # Explicit override, not inherited from BaseStrategy's default of 1:
+    # this is a perpetual-vs-spot hedge (see the class docstring — "shorting
+    # perp + long spot"), a genuine 2-leg position, even though it's coded
+    # against the single-series BaseStrategy.generate_signals interface (one
+    # funding-rate series drives the entry/exit decision for BOTH legs).
+    # leg_count is exactly the escape hatch for this: class hierarchy alone
+    # (isinstance(BasePairsStrategy)) would have missed it. Kraken Prop
+    # ineligible for the same reason as any 2-leg spread — manual execution
+    # can't fill both legs at once.
+    leg_count = 2
 
     # This strategy often passes CONSERVATIVE because drawdown comes from
     # execution slippage rather than directional exposure.

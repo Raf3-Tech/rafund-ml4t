@@ -20,8 +20,15 @@ import pandas as pd
 
 from backtesting.metrics import compute_performance_metrics, empty_metrics
 from config.constants import PERIODS_PER_YEAR
+from data.provenance import audit_instrument_provenance
 
 logger = logging.getLogger(__name__)
+
+
+class AmbiguousPriceProvenanceError(Exception):
+    """Raised when a symbol's `prices` rows come from more than one exchange
+    (or from none at all) — the engine refuses to blend sources into one
+    backtest rather than silently picking whichever rows sort first."""
 
 # ── Regime tier thresholds ────────────────────────────────────────────────────
 CONSERVATIVE_MAX_DD = 3.0
@@ -80,6 +87,8 @@ class RunResult:
     regime_trend: float
     regime_volatility: float
     regime_direction: str
+    exchange: Optional[str] = None
+    exchange_provenance: str = "unknown"  # "verified" | "inferred_from_symbol" | "unknown"
 
 
 # ── Window generation ─────────────────────────────────────────────────────────
@@ -507,6 +516,13 @@ class WalkForwardWindowEngine:
         self.symbols = symbols or []
         self.commission = commission
         self.run_id = str(uuid.uuid4())
+        # Set by _load_prices for whatever symbol was most recently loaded —
+        # safe as instance state because symbols are processed one at a time,
+        # never concurrently. Read by _run_window/_run_pair_window to stamp
+        # RunResult.exchange/exchange_provenance.
+        self._current_exchange: Optional[str] = None
+        self._current_exchange_provenance: str = "unknown"
+        self._provenance_cache: Optional[pd.DataFrame] = None
 
     def run(
         self,
@@ -554,7 +570,11 @@ class WalkForwardWindowEngine:
 
     def _run_strategy_symbol(self, strategy, symbol: str) -> List[RunResult]:
         """Run one single-asset strategy on one symbol across all eligible windows."""
-        prices = self._load_prices(symbol)
+        try:
+            prices = self._load_prices(symbol)
+        except AmbiguousPriceProvenanceError as e:
+            logger.error("[AMBIGUOUS PROVENANCE] %s / %s: %s — refusing to backtest.", strategy.name, symbol, e)
+            return []
         if prices is None or len(prices) < 2:
             logger.warning("[SKIP] %s: no price data", symbol)
             return []
@@ -707,6 +727,8 @@ class WalkForwardWindowEngine:
             regime_trend=regime_trend,
             regime_volatility=regime_vol,
             regime_direction=regime_dir,
+            exchange=self._current_exchange,
+            exchange_provenance=self._current_exchange_provenance,
         )
 
     def _mutate(
@@ -771,6 +793,12 @@ class WalkForwardWindowEngine:
                 logger.warning("[SKIP] %s: no funding data", symbol)
                 continue
             frame = frame.sort_values("timestamp").reset_index(drop=True)
+            # get_funding_rates doesn't go through _load_prices/data.provenance
+            # at all (a different table, always Binance — see
+            # data.collectors.binance_funding_collector) — inferred, not
+            # verified the same way prices-backed rows are.
+            self._current_exchange = "binance"
+            self._current_exchange_provenance = "inferred_from_symbol"
             results.extend(
                 self._run_over_windows(
                     strategy, symbol, frame, FUNDING_PERIODS_PER_YEAR, funding_mode=True
@@ -798,10 +826,23 @@ class WalkForwardWindowEngine:
 
         results: List[RunResult] = []
         for sym_a, sym_b in pairs:
-            pa = self._load_prices(sym_a)
-            pb = self._load_prices(sym_b)
+            try:
+                pa = self._load_prices(sym_a)
+                exchange_a = self._current_exchange
+                pb = self._load_prices(sym_b)
+                exchange_b = self._current_exchange
+            except AmbiguousPriceProvenanceError as e:
+                logger.error(
+                    "[AMBIGUOUS PROVENANCE] %s / %s|%s: %s — refusing to backtest.",
+                    strategy.name, sym_a, sym_b, e,
+                )
+                continue
             if pa is None or pb is None:
                 continue
+            # A pair spanning two different exchanges is still fully
+            # attributable (each leg individually verified) — record both,
+            # joined, rather than picking one arbitrarily.
+            self._current_exchange = exchange_a if exchange_a == exchange_b else f"{exchange_a}+{exchange_b}"
 
             left = pa[["timestamp", "close"]].rename(columns={"close": "close_a"})
             for col in ("high", "low"):
@@ -919,14 +960,43 @@ class WalkForwardWindowEngine:
             regime_trend=regime_trend,
             regime_volatility=regime_vol,
             regime_direction=regime_dir,
+            exchange=self._current_exchange,
+            exchange_provenance=self._current_exchange_provenance,
         )
 
+    def _resolve_exchange(self, symbol: str) -> str:
+        """The single exchange sourcing `symbol`'s prices. Raises
+        AmbiguousPriceProvenanceError if that symbol's rows come from more
+        than one exchange, or from none — a backtest must never silently
+        blend sources for one symbol. See data/provenance.py."""
+        if self._provenance_cache is None:
+            self._provenance_cache = audit_instrument_provenance(self.db).set_index("symbol")
+        if symbol not in self._provenance_cache.index:
+            raise AmbiguousPriceProvenanceError(
+                f"{symbol!r} has no price data at all — cannot establish a source exchange."
+            )
+        source_exchange = self._provenance_cache.loc[symbol, "source_exchange"]
+        if source_exchange is None:
+            exchanges = self._provenance_cache.loc[symbol, "exchanges"]
+            raise AmbiguousPriceProvenanceError(
+                f"{symbol!r} has price data from more than one exchange ({exchanges}) — "
+                "refusing to blend sources into one backtest."
+            )
+        return source_exchange
+
     def _load_prices(self, symbol: str) -> Optional[pd.DataFrame]:
+        """Raises AmbiguousPriceProvenanceError (not caught here — callers
+        must handle it loudly, not silently skip like the plain "no data"
+        case below) if `symbol`'s source exchange can't be established as
+        exactly one."""
+        exchange = self._resolve_exchange(symbol)
         try:
-            df = self.db.get_prices(symbol, None, None)
+            df = self.db.get_prices(symbol, None, None, exchange=exchange)
             if df is None or df.empty:
                 return None
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+            self._current_exchange = exchange
+            self._current_exchange_provenance = "verified"
             return df.sort_values("timestamp").reset_index(drop=True)
         except Exception as e:
             logger.error("Failed to load prices for %s: %s", symbol, e)
@@ -961,6 +1031,8 @@ class WalkForwardWindowEngine:
                 "regime_trend": r.regime_trend,
                 "regime_volatility": r.regime_volatility,
                 "regime_direction": r.regime_direction,
+                "exchange": r.exchange,
+                "exchange_provenance": r.exchange_provenance,
             })
         try:
             self.db.insert_engine_results(rows)

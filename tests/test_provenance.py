@@ -6,7 +6,12 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from data.provenance import audit_instrument_provenance, load_provenance_map, sync_instrument_provenance
+from data.provenance import (
+    audit_instrument_provenance,
+    backfill_engine_results_exchange,
+    load_provenance_map,
+    sync_instrument_provenance,
+)
 
 
 class MockPricesDB:
@@ -104,3 +109,102 @@ def test_load_provenance_map_missing_symbol_is_absent_not_defaulted_true():
     db = MockPricesDB([], [{"symbol": "BTC/USD", "is_kraken_sourced": True, "prop_verified": False}])
     result = load_provenance_map(db)
     assert "SOME/UNKNOWN" not in result
+
+
+# ── backfill_engine_results_exchange ────────────────────────────────────────
+
+class _FakeCursor:
+    def __init__(self, pair_symbols=None):
+        self.executed = []
+        self._pair_symbols = pair_symbols or []
+        self._fetch_result = []
+        self.rowcount = 0
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "SELECT DISTINCT symbol" in sql:
+            self._fetch_result = [(s,) for s in self._pair_symbols]
+        elif sql.strip().startswith("UPDATE"):
+            self.rowcount = 1
+
+    def fetchall(self):
+        return self._fetch_result
+
+    def close(self):
+        pass
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        pass
+
+
+class BackfillDB(MockPricesDB):
+    def __init__(self, price_rows, pair_symbols=None):
+        super().__init__(price_rows)
+        self.cursor = _FakeCursor(pair_symbols)
+        self.conn = _FakeConn(self.cursor)
+
+    def get_connection(self):
+        return self.conn
+
+    def return_connection(self, conn):
+        pass
+
+
+def _update_calls(db, symbol=None):
+    calls = [c for c in db.cursor.executed if c[0].strip().startswith("UPDATE")]
+    if symbol is not None:
+        calls = [c for c in calls if c[1][1] == symbol]
+    return calls
+
+
+def test_backfill_sets_inferred_from_symbol_for_single_sourced_symbols():
+    rows = [{"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799}]
+    db = BackfillDB(rows)
+    counts = backfill_engine_results_exchange(db)
+    assert counts["single_leg_backfilled"] == 1
+    calls = _update_calls(db, "BTC/USD")
+    assert len(calls) == 1
+    assert calls[0][1] == ("kraken", "BTC/USD")
+
+
+def test_backfill_never_touches_ambiguous_symbols():
+    rows = [
+        {"symbol": "BTC/USDT", "exchange": "binance", "n_rows": 1},
+        {"symbol": "BTC/USDT", "exchange": "htx", "n_rows": 1},
+    ]
+    db = BackfillDB(rows)
+    counts = backfill_engine_results_exchange(db)
+    assert counts["single_leg_backfilled"] == 0
+    assert _update_calls(db, "BTC/USDT") == []
+
+
+def test_backfill_pairs_combines_both_legs_when_exchanges_differ():
+    rows = [
+        {"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799},
+        {"symbol": "ETH/USDT", "exchange": "binance", "n_rows": 500},
+    ]
+    db = BackfillDB(rows, pair_symbols=["BTC/USD|ETH/USDT"])
+    counts = backfill_engine_results_exchange(db)
+    assert counts["pairs_backfilled"] == 1
+    calls = _update_calls(db, "BTC/USD|ETH/USDT")
+    assert calls[0][1][0] == "kraken+binance"
+
+
+def test_backfill_pairs_skipped_when_either_leg_ambiguous():
+    rows = [
+        {"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799},
+        {"symbol": "ETH/USDT", "exchange": "binance", "n_rows": 1},
+        {"symbol": "ETH/USDT", "exchange": "htx", "n_rows": 1},
+    ]
+    db = BackfillDB(rows, pair_symbols=["BTC/USD|ETH/USDT"])
+    counts = backfill_engine_results_exchange(db)
+    assert counts["pairs_backfilled"] == 0
+    assert _update_calls(db, "BTC/USD|ETH/USDT") == []

@@ -1068,6 +1068,8 @@ class DatabaseConnection:
                     r.get("regime_trend"),
                     r.get("regime_volatility"),
                     r.get("regime_direction"),
+                    r.get("exchange"),
+                    r.get("exchange_provenance", "unknown"),
                 )
                 for r in rows
             ]
@@ -1078,7 +1080,8 @@ class DatabaseConnection:
                     total_return_pct, sharpe_ratio, max_drawdown_pct, win_rate_pct, num_trades,
                     conservative_pass, standard_pass, permissive_pass,
                     failure_reason, mutation_generation, parent_run_id, bars_used,
-                    regime_trend, regime_volatility, regime_direction
+                    regime_trend, regime_volatility, regime_direction,
+                    exchange, exchange_provenance
                 ) VALUES %s
             """
             execute_values(cursor, query, data)

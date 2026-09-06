@@ -275,8 +275,26 @@ either of these reasons:
    `engine_results` itself has never recorded which exchange a
    backtest's price data came from — `instrument_provenance` (populated by
    `data.provenance.sync_instrument_provenance`, not hand-maintained) is
-   what makes this checkable after the fact; nothing was fixed in
-   `window_engine.py` itself (out of scope for that brief).
+   what makes this checkable after the fact.
+   **Update, 2026-09-06 (Track Record Depth brief, Task 2): fixed, not just
+   worked around.** `backtesting.window_engine.WalkForwardWindowEngine`
+   now resolves each symbol's single source exchange via
+   `data.provenance.audit_instrument_provenance` *before* requesting price
+   data (`_resolve_exchange`), and passes that exchange explicitly to
+   `get_prices`. A symbol with ambiguous provenance (or none) raises
+   `AmbiguousPriceProvenanceError`, caught at `_run_strategy_symbol`/
+   `_run_pairs_strategy` and logged as `[AMBIGUOUS PROVENANCE]` (distinct
+   from the pre-existing `[SKIP] ... no price data` log) — that symbol is
+   skipped, the rest of the run continues, but the gap is now impossible to
+   miss in the logs rather than silently blended. `engine_results` gained
+   `exchange` and `exchange_provenance` columns (migration 0021):
+   `exchange_provenance` is `'verified'` for every row produced by the
+   fixed engine going forward, `'inferred_from_symbol'` for the 44,029
+   legacy rows backfilled from current `instrument_provenance` where a
+   single source could be established after the fact
+   (`data.provenance.backfill_engine_results_exchange`, run once,
+   2026-09-06), and `'unknown'` for the 90,747 legacy rows whose symbol is
+   ambiguous — deliberately not backfilled with a guess.
    **`prop_verified`** is separate and narrower — a boolean on the same
    table, defaulting `false`, populated by hand from the Prop market
    selector (Kraken Prop trades a subset of Kraken's spot universe as
@@ -286,6 +304,36 @@ either of these reasons:
    `ready_for_live` only, so nothing reaches live-ready on an unverified
    pair, without blocking manual-signal proposals on pairs nobody has
    verified yet.
+
+### Funding Rate Arbitrage — retired from the Prop pipeline (2026-09-06, Track Record Depth brief, Task 1)
+
+Two independent, each-sufficient-alone reasons, so nobody revives this
+strategy for Kraken Prop on the assumption that a first backtest is all it
+needs:
+
+1. **Structural — `leg_count = 2`.** `strategies/funding_rate_arb.py`'s own
+   docstring describes it as "shorting perp + long spot (or inverse)" — a
+   hedged two-leg position, even though it's coded against the
+   single-series `BaseStrategy.generate_signals` interface (one funding-rate
+   series drives both legs' entry/exit). `leg_count` is an explicit
+   override on the class now, not inherited from `BaseStrategy`'s default
+   of 1 — class hierarchy alone (`isinstance(BasePairsStrategy)`) missed
+   this misclassification entirely, which is exactly why `leg_count` exists
+   as metadata rather than being inferred. `MULTI_LEG_INELIGIBLE` excludes
+   it the same as Statistical Arbitrage.
+2. **Economic — funding direction is inverted on this account.** The
+   strategy's entire premise is collecting funding payments. Kraken Prop
+   charges funding at 0.033%/day on open positions (a cost, per the
+   original Kraken Prop brief's hard constraints table) — it does not pay
+   the account for holding a position. A strategy built to collect funding
+   is, on this specific account, paying it instead: the edge doesn't just
+   fail to materialize, it runs backwards.
+
+Never run against real data (`engine_results` had zero rows for it as of
+this note). Not deleted — remains available for research/backtesting on
+accounts where funding is actually collected, per the same "multi-leg
+strategies stay fully active outside the Prop pipeline" principle as
+Statistical Arbitrage.
 
 ---
 
@@ -642,6 +690,121 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 ---
 
 ## Session log  (newest first)
+
+### 2026-09-06 — session "track-record-depth" (Claude) — PARTIAL, paused for user decision
+**Phase worked:** none of the 6 Kraken Prop phases — follow-up to 38362e2.
+  5 tasks planned: retire Funding Rate Arbitrage, fix the exchange filter,
+  maximize track record depth, re-baseline, re-propose the grid. **Tasks 1
+  and 2 complete and committed. Task 3 stopped after the report step —
+  found something more fundamental than "T is small," see below. Tasks 4-5
+  not started, per the brief's own "stop before Task 5 if history doesn't
+  support a materially larger T" — except the finding is worse than that
+  clause anticipated (see below), so this session stops before even
+  finishing Task 3's "act" half pending user sign-off on a destructive step.**
+**DB health check:** PASSED — connectivity OK. Applied migration 0021,
+  ran the real exchange backfill against the live DB (44,029 of 134,776
+  rows backfilled), and ran extensive read-only queries against
+  `engine_results` to characterize the actual window/duplication situation.
+**engine_results row count at session start:** 134,776 (unchanged — no
+  rows added or removed this session; only 2 new columns populated)
+**Files changed:**
+  - `strategies/funding_rate_arb.py` — explicit `leg_count = 2` override
+    (Task 1). Confirmed via its own docstring: "shorting perp + long spot"
+    is a hedged two-leg position, miscategorized by class hierarchy alone
+    (`BaseStrategy`, not `BasePairsStrategy`) — exactly the case
+    `leg_count`-as-explicit-metadata exists for. `MULTI_LEG_INELIGIBLE`
+    now excludes it automatically; also documented the independent,
+    each-alone-sufficient economic reason (Kraken Prop charges funding,
+    0.033%/day, rather than paying it — the strategy's premise is inverted
+    on this account) so nobody revives it on "it just needs a first backtest."
+  - `alembic/versions/0021_add_engine_results_exchange.py` (new) —
+    `engine_results.exchange` (nullable) + `exchange_provenance`
+    ('verified' | 'inferred_from_symbol' | 'unknown', default 'unknown').
+  - `backtesting/window_engine.py` (Task 2) — new
+    `AmbiguousPriceProvenanceError`; `_resolve_exchange()` (uses
+    `data.provenance.audit_instrument_provenance`, cached per engine
+    instance) required before every `_load_prices()` call; raises rather
+    than blending when a symbol's `prices` rows span more than one
+    exchange or none. Caught at `_run_strategy_symbol`/`_run_pairs_strategy`
+    with a distinct `[AMBIGUOUS PROVENANCE]` ERROR log — that symbol is
+    skipped, the rest of the run continues. `RunResult`/`_persist_results`
+    thread `exchange`/`exchange_provenance` through to the DB (`'verified'`
+    for every row the fixed engine produces now; funding-rate rows get
+    `'inferred_from_symbol'`/`'binance'` since `get_funding_rates` doesn't
+    go through `_load_prices` at all).
+  - `data/provenance.py` — `backfill_engine_results_exchange()`: one-time
+    backfill for pre-0021 rows, `'inferred_from_symbol'` only where
+    current provenance establishes a single source (44,029 rows: 43,825
+    single-leg + 204 pairs, pairs recorded as `"exA+exB"` when legs
+    differ), `'unknown'` left alone for the rest (90,747 rows) — no
+    confident value invented.
+  - `data/db.py::insert_engine_results` — two new columns in the INSERT.
+  - Tests: `tests/test_window_engine.py` (+6: multi-venue symbol raises
+    without calling `get_prices`, no-provenance-at-all raises, the
+    engine-level catch logs `[AMBIGUOUS PROVENANCE]` and returns `[]`
+    without crashing the run, verified-exchange stamping, `RunResult`
+    default), `tests/test_provenance.py` (+4: backfill single-sourced,
+    backfill skips ambiguous, pairs-combines-both-legs, pairs-skipped-on-
+    either-leg-ambiguous). `FakeDB` in `test_window_engine.py` needed a
+    `GROUP BY symbol, exchange` branch and a `get_prices` signature update
+    (caught via real test failures, not anticipated).
+**Tests added:** 10 (6 window_engine, 4 provenance)
+**Suite result:** 544 passed, 0 failed (534 before this session + 10)
+**Task 3 finding — reported here, NOT acted on yet:** Calendar span for
+  all 7 Kraken `/USD` symbols is identical: 2024-06-29 to 2026-09-05,
+  **798 calendar days, zero gaps, one bar/day.** That alone means T=32-33
+  (the figure both this brief and the prior one treated as the current
+  baseline) was never real. Verified directly: every (strategy, Kraken
+  symbol, params) combination has only **8 distinct (window_start,
+  window_end) pairs** behind however many rows it shows (32 for
+  single-param-grid strategies, 288 for EMA Crossover's 9-param grid) —
+  and all 8 are `EXPANDING` windows sharing the same start (genesis); none
+  are `ROLLING` at all, because a 2-year rolling step can't produce a
+  second distinct window from only 798 days, and 3-year rolling windows
+  never fit even once. **The "32" is ~16 engine re-invocations over
+  2026-06-20 through 2026-09-03 (confirmed via `created_at` timestamps),
+  each contributing 1-2 near-duplicate expanding-from-genesis snapshots as
+  a few more days of Kraken data accumulated between runs** — not 32
+  independent or even deliberately-overlapping evaluation periods. This is
+  the same failure mode the brief warned about ("T cannot be inflated by
+  overlapping windows"), just from a mechanism the brief didn't name
+  (repeated re-runs over calendar time, not a rolling-step config choice).
+  A fixed, non-overlapping scheme sized to the widest single-leg warmup
+  requirement (EMA Crossover's slow=200 needs 230 bars minimum) fits
+  **exactly 3 non-overlapping ~266-day windows** into 798 days, honestly —
+  smaller than the illusory 32, not larger. Implementing this means
+  deleting the ~contaminated existing `EXPANDING` rows for these 7 symbols
+  before inserting fresh ones (otherwise the leaderboard keeps averaging in
+  the near-duplicates) — a real, only-partially-reversible action on
+  historical data the user hasn't yet signed off on, hence stopping here.
+**Blocking issues found:** the Task 3 finding above is the blocker — not a
+  bug in this session's code, a data-history-and-measurement fact that
+  changes what "extend T" even means here.
+**Bugs discovered and logged:** none in this session's own code. The
+  repeated-re-run window duplication is a pre-existing latent issue in how
+  `generate_windows()` + repeated `python main.py engine` invocations
+  interact over time — not introduced this session, surfaced by this
+  session's investigation.
+**Resume point for next session:** Awaiting the user's decision on: (1)
+  whether to delete the 7 Kraken symbols' existing near-duplicate
+  `EXPANDING` engine_results rows and replace them with a fixed,
+  non-overlapping ~3-window scheme (T shrinks from 32 to 3, honestly); (2)
+  whether that new window scheme should be a separate function used only
+  for this Kraken track-record purpose, or a change to `generate_windows()`
+  globally (the latter would also change T for every Binance/HTX-sourced
+  candidate, far beyond this brief's scope, so the former is recommended
+  but not yet built). Once resolved, Task 3's "act" half, Task 4
+  (re-baseline), and Task 5 (re-propose the grid, likely against a
+  significantly less favorable T=3 baseline) all still need to happen.
+**Session limit hit:** yes, disclosed — Tasks 1+2's diff is 585 lines
+  across 8 files (files fine, 8/10; lines over the 500 cap by 85). Not
+  split: `AGENTS.md` carries both tasks' documentation in one file, and
+  splitting it would need interactive patching rather than a clean
+  file-level commit boundary; Task 2's own files (migration, engine, db,
+  provenance, tests) are already one interdependent unit. Also stopped by
+  design pending a user decision on a destructive action, per this
+  session's own judgment that deleting historical rows warrants
+  confirmation first.
 
 ### 2026-09-06 — session "single-leg-prop-eligibility" (Claude) — COMPLETE
 **Phase worked:** none of the 6 Kraken Prop phases — follow-up to 71de319
