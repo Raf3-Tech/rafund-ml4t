@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual Environment
 venv/
+.venv/
 env/
 
 # Environment variables (SECRETS)
@@ -38,6 +39,13 @@ signal research/
 # MLflow artifacts
 mlruns/
 mlflow.db
+
+# Generated leaderboard report — written by monitoring/leaderboard.py, not hand-maintained
+LEADERBOARD.md
+
+# Kraken Prop app reference material (accessibility dumps, screenshots) — reflects a
+# specific account's own screens, kept locally only, never committed
+docs/mobile_nav/
 
 # Pytest coverage artifacts
 .coverage

@@ -32,7 +32,7 @@ rafund-ml4t/
 │   ├── base.py                # BaseStrategy / BasePairsStrategy contracts
 │   ├── registry.py            # StrategyRegistry — decorator-based, agents discover strategies without parsing main.py
 │   ├── stat_arb.py            # StatArbStrategy (unified signal core) + StatArbPairsStrategy
-│   ├── funding_rate_arb.py    # FundingRateArb (8h perpetual carry)
+│   ├── funding_rate_arb.py    # FundingRateArb (8h perpetual carry) — retired from Kraken Prop eligibility (2-leg hedge; Kraken Prop charges funding rather than paying it), still runs elsewhere
 │   ├── smc_breakout.py        # SMC Breakout — structure/BOS + premium-discount zone + engulfing-bar trigger
 │   ├── ema_crossover.py
 │   ├── macd.py
@@ -76,6 +76,14 @@ rafund-ml4t/
 │    `multi_strategy_allocate` is wired into both the leaderboard's display-only column and, since this
 │    session, real paper-trading capital sizing in `trading/paper_trader.py`)
 │
+├── risk/                      # Kraken Prop pre-trade risk gate (see Kraken Prop Risk Engine section)
+│   ├── prop_account.py        # Decimal-exact account state — daily/lifetime MDL/MDD room remaining
+│   ├── daily_clock.py         # Kraken Prop's daily loss-limit reset at 00:30 UTC (not midnight)
+│   ├── cost_model.py          # Commission + funding cost model, Decimal-exact (separate from backtesting/costs.py)
+│   └── pretrade_gate.py       # evaluate() — the only path that can mark a setup APPROVE/REDUCE; audit-logged
+├── signals/
+│   └── pending_signal_detector.py  # scan_kraken_signals — manual-execution detector; the sole caller of risk/pretrade_gate.py
+│
 ├── data/
 │   ├── db.py                  # PostgreSQL connection + all query methods (insert/get_prices are timeframe-aware)
 │   ├── schema.sql             # Reference overview (Alembic is canonical)
@@ -112,9 +120,12 @@ rafund-ml4t/
 │   └── mlflow_config.py       # MLflow run utilities
 │
 ├── alembic/
-│   └── versions/               # 0001 baseline → 0012 (drift reports, engine_results/funding_rates,
+│   └── versions/               # 0001 baseline → 0021 (drift reports, engine_results/funding_rates,
 │                                # research_decisions, paper trading, exchange column, trade journal,
-│                                # manual halt switch, prices.timeframe, paper_positions.stop_price)
+│                                # manual halt switch, prices.timeframe, paper_positions.stop_price,
+│                                # equity curve, system heartbeat, source timeframe, daily trade count,
+│                                # pending_signals + Decimal columns, gate_decisions audit log,
+│                                # instrument provenance, engine_results.exchange)
 │
 ├── research/
 │   └── pipeline.py            # Closed-loop research pipeline: propose → engine run → gate → JSONL decision log
@@ -123,7 +134,7 @@ rafund-ml4t/
 │   ├── oracle-bootstrap.sh    # One-shot bootstrap for a fresh Oracle Cloud "Always Free" ARM instance (git clone + Docker Compose)
 │   └── update.sh              # Manual update: git pull + rebuild + restart services on the running instance
 │
-├── tests/                     # 423 passed
+├── tests/                     # 550 passed
 ├── docs/
 │   ├── CANDLESTICK_PATTERNS.md          # Objective candlestick patterns (engulfing bar) feeding SMC Breakout
 │   ├── STRATEGY_ENGINE_DESIGN.md
@@ -160,7 +171,28 @@ rafund-ml4t/
 | — | Manual halt switch (dashboard kill switch per paper position) | ✅ complete — `paper_positions.manual_halt` (Alembic 0010) |
 | — | CLI (collect, features, engine, leaderboard, train-classifier, research, paper, live, backfill) | ✅ complete |
 
-**Test suite: 423 passed.**
+**Test suite: 550 passed.**
+
+---
+
+## Kraken Prop Risk Engine (`risk/`, `signals/pending_signal_detector.py`)
+
+Kraken Prop is a Kraken proprietary-trading-firm funded-account product with a daily max-loss limit (MDL, exchange-enforced) and a lifetime max-drawdown floor (MDD) — breaching either ends the account. **Kraken Prop has no trading API**; every order has to be placed by a human, by hand, in Kraken's own app. This subsystem exists to make that safe and auditable rather than ad hoc:
+
+| Component | What it does |
+|---|---|
+| `risk/prop_account.py` | Decimal-exact account state: daily/lifetime room remaining against Kraken's own MDL/MDD, computed off the prior day's ending balance |
+| `risk/daily_clock.py` | Kraken Prop's MDL recalculates at **00:30 UTC, not midnight** — a 30-minute offset the code explicitly calls "the off-by-one the task brief calls an account-ending bug" if got wrong |
+| `risk/cost_model.py` | Commission (0.04%/side) + funding (0.033%/day, billed in 4-hour blocks) — Decimal throughout, deliberately separate from the float-based backtest cost model so a rounding error can never let a setup slip past a hard floor |
+| `risk/pretrade_gate.py` | `evaluate()` — the only function allowed to mark a setup APPROVE/REDUCE/REJECT. Six ordered checks (bench status → consecutive-loss breaker → daily hard floor → lifetime hard floor → daily/lifetime soft-floor room → fee filter → correlation cap). Every decision is persisted to `gate_decisions` (Alembic 0019) for a full audit trail |
+| `signals/pending_signal_detector.py` (`python main.py signal-scan`) | The only caller of the gate — scans for candidate setups and shows the operator only what's already been approved. Places no orders itself |
+| `monitoring/routes/publish.py` | Read-only (`GET`-only, structurally enforced by test) API polled by a tablet over Tailscale, showing approved setups plus current daily/lifetime room — so the person manually placing trades in Kraken's app sees the same room-remaining figures the gate itself used |
+
+**Eligibility gates and overfitting correction** (`38362e2`, `5d3f9bb`, `71de319`): a strategy must pass leg-count and Kraken-instrument-provenance checks, then clear a deflated Sharpe ratio (DSR) threshold that corrects for how many strategy/parameter combinations were actually tried (`N=360` trials, plus a fixed buffer for unpersisted exploratory trials) — not a raw backtest Sharpe. DSR returns a full diagnostic (z-score, skew, kurtosis, underflow flag), not a bare pass/fail float, specifically so the correction itself can be checked rather than trusted.
+
+**Current result, stated plainly: zero strategies currently pass Kraken Prop eligibility.** The gate and cost model are real and tested; nothing has yet cleared the statistical bar to be shown to the operator as a live-eligible setup. This is the single most important line for anyone evaluating this system's current capability — see Known Gaps below.
+
+`funding_rate_arb.py` was retired from this eligibility path (not deleted, still runs elsewhere): it's a hedged 2-leg position, which the leg-count gate excludes, and Kraken Prop charges funding rather than paying it — inverting the strategy's whole premise on that specific account.
 
 ---
 
@@ -168,17 +200,18 @@ rafund-ml4t/
 
 **Still open:**
 
-1. **Live trading is unexercised against a real exchange account:** the safety gates (opt-in flag, API-key presence, notional cap, limit-only fills) are implemented and unit-tested, but no live order has yet been placed/verified end-to-end on an exchange.
-2. **Multi-timeframe data has no consumer yet:** `4h` candles can now be collected and stored (`prices.timeframe`, Alembic 0011) without colliding with `1d` rows, but `strategies/base.py`'s `generate_signals(df, params)` still takes exactly one DataFrame and the walk-forward engine (`backtesting/window_engine.py`) still slices exactly one timeframe per run. A true bias/location/trigger multi-timeframe strategy (e.g. daily bias → 4h location → 1h/15m trigger) needs a new strategy interface and engine support — tracked as future work, not yet started.
+1. **Zero strategies currently pass Kraken Prop eligibility** — the pre-trade gate, cost model, and DSR overfitting correction are built and tested, but nothing has cleared the statistical bar yet (see Kraken Prop Risk Engine above). The gate has never had a real setup to approve.
+2. **Live trading is unexercised against a real exchange account:** the safety gates (opt-in flag, API-key presence, notional cap, limit-only fills) are implemented and unit-tested, but no live order has yet been placed/verified end-to-end on an exchange. Kraken Prop orders are placed manually by design (see above); this gap refers to the separate CCXT-based `trading/live_trader.py` path for non-Prop exchanges.
+3. **Multi-timeframe data has no consumer yet:** `4h` candles can now be collected and stored (`prices.timeframe`, Alembic 0011) without colliding with `1d` rows, but `strategies/base.py`'s `generate_signals(df, params)` still takes exactly one DataFrame and the walk-forward engine (`backtesting/window_engine.py`) still slices exactly one timeframe per run. A true bias/location/trigger multi-timeframe strategy (e.g. daily bias → 4h location → 1h/15m trigger) needs a new strategy interface and engine support — tracked as future work, not yet started.
 
 **Resolved (2026-06-25 session):**
 
-3. ~~Missing tests~~ — `tests/test_leaderboard.py` and `tests/test_funding_collector.py` already existed (this list was stale); added `tests/test_regime_classifier.py` (the <200/≥200-row training gate) and extended `tests/test_window_engine.py` with an engine→`build_leaderboard()` NaN/Inf check.
-4. ~~No real engine run yet~~ — also stale; `engine_results` already had 83,497 real rows before this session.
-5. ~~`BacktestEngine` reuse~~ — investigated, **deliberately deferred**: the window engine's 3 private P&L loops and `BacktestEngine` are incompatible state machines (unit-position vs. real capital/leverage, no funding cadence support, different pairs control flow), and there's no regression-pinning test to catch a consolidation silently shifting historical Sharpe. See `AGENTS.md`'s Phase D note.
-6. ~~Portfolio layer not wired into engine~~ — **redirected, not done as literally asked**: wiring `risk_parity_weights`/`kelly_fraction` into the per-bar engine loop would change every strategy's historical Sharpe comparability for no stated benefit (the loops are intentionally unit-position). Wired `multi_strategy_allocate` into **paper-trading capital allocation** instead (`trading/paper_trader.py::_capital_weighted_equity`) — each new paper slot's starting equity is now risk-parity-weighted across today's candidates instead of a flat amount per slot.
-7. ~~SMC Breakout has no structural stop~~ — added `SMCBreakout.get_stop_level()` (the active post-BOS range's near boundary) and wired it into `trading/paper_trader.py`: a paper position now force-closes with `close_reason="stop"` if price breaches it, checked before any new signal each step. Not added to the backtest engine (no intrabar stop-checking framework today — same gap as same-bar fills below).
-8. ~~Regime classifier output is not a live filter~~ — `trading/paper_trader.py` now calls `compute_regime()` on each slot's recent bars before opening a new position and skips a BUY/SELL that fights the bull/bear direction (gated behind `PAPER_REGIME_FILTER_ENABLED`, default on); never blocks closing an existing position.
+4. ~~Missing tests~~ — `tests/test_leaderboard.py` and `tests/test_funding_collector.py` already existed (this list was stale); added `tests/test_regime_classifier.py` (the <200/≥200-row training gate) and extended `tests/test_window_engine.py` with an engine→`build_leaderboard()` NaN/Inf check.
+5. ~~No real engine run yet~~ — also stale; `engine_results` already had 83,497 real rows before this session.
+6. ~~`BacktestEngine` reuse~~ — investigated, **deliberately deferred**: the window engine's 3 private P&L loops and `BacktestEngine` are incompatible state machines (unit-position vs. real capital/leverage, no funding cadence support, different pairs control flow), and there's no regression-pinning test to catch a consolidation silently shifting historical Sharpe. See `AGENTS.md`'s Phase D note.
+7. ~~Portfolio layer not wired into engine~~ — **redirected, not done as literally asked**: wiring `risk_parity_weights`/`kelly_fraction` into the per-bar engine loop would change every strategy's historical Sharpe comparability for no stated benefit (the loops are intentionally unit-position). Wired `multi_strategy_allocate` into **paper-trading capital allocation** instead (`trading/paper_trader.py::_capital_weighted_equity`) — each new paper slot's starting equity is now risk-parity-weighted across today's candidates instead of a flat amount per slot.
+8. ~~SMC Breakout has no structural stop~~ — added `SMCBreakout.get_stop_level()` (the active post-BOS range's near boundary) and wired it into `trading/paper_trader.py`: a paper position now force-closes with `close_reason="stop"` if price breaches it, checked before any new signal each step. Not added to the backtest engine (no intrabar stop-checking framework today — same gap as same-bar fills below).
+9. ~~Regime classifier output is not a live filter~~ — `trading/paper_trader.py` now calls `compute_regime()` on each slot's recent bars before opening a new position and skips a BUY/SELL that fights the bull/bear direction (gated behind `PAPER_REGIME_FILTER_ENABLED`, default on); never blocks closing an existing position.
 
 ---
 
@@ -195,7 +228,7 @@ These are documented research-stage constraints, not hidden bugs:
 | **Regime classifier needs data** — the classifier is non-blocking by design but returns `None` until the `engine_results` table has 200+ rows | `models/regime_classifier.py` | Regime-gated decisions fall back to default tier until enough engine runs accumulate. |
 | **Fair Value Gap not used as an entry gate in SMC Breakout** — on this project's daily-bar, 24/7 crypto data a true 3-candle FVG occurs roughly once per 800+ bars | `strategies/smc_breakout.py` | Gating on FVG produced zero trades in walk-forward testing; FVG is defined but not required for entry. Worth revisiting on an intraday timeframe. |
 
-See `RAFUND_MASTER_AUDIT.md`, `docs/QUANT_AUDIT_REPORT.md`, and `RISK_ENGINE_AUDIT.md` for the full audit trail.
+See `docs/QUANT_AUDIT_REPORT.md` for the audit trail. `RISK_ENGINE_AUDIT.md` predates the `risk/` module described above by several months and does not reflect it — treat it as historical, not current.
 
 ---
 
@@ -269,6 +302,7 @@ python main.py paper [--exchange binance|kraken|htx]          # Run one paper-tr
 python main.py paper --replay-days N [--exchange ...]         # Backfill/replay paper trading day-by-day over the last N days
 python main.py backfill --symbol SYM --timeframe TF --from DATE --to DATE   # One-off historical OHLCV backfill (TF: 1m/5m/15m/1h/4h/1d)
 python main.py live --exchange binance|kraken|htx             # Live limit-order trading (opt-in, see Known Gaps)
+python main.py signal-scan --exchange kraken                  # Kraken Prop: run the pre-trade gate, no orders placed
 ```
 
 ---
@@ -276,7 +310,7 @@ python main.py live --exchange binance|kraken|htx             # Live limit-order
 ## Running the Test Suite
 
 ```bash
-pytest                     # 423 passed
+pytest                     # 550 passed
 pytest --cov=. -q          # with coverage
 ```
 
@@ -297,6 +331,7 @@ pytest --cov=. -q          # with coverage
 - **Live trading is limit-orders-only:** every live order is placed at the signal bar's close and given a timeout to fill; unfilled orders are cancelled rather than chased at a worse price (see `trading/live_trader.py`).
 - **Multi-timeframe storage, single-timeframe consumption:** `prices` can hold `1m`/`5m`/`15m`/`1h`/`4h`/`1d` rows per symbol side by side (Alembic 0011), but every strategy, the walk-forward engine, and paper/live trading still operate on one timeframe at a time (`config/settings.yaml`'s global `timeframe`). Storing a second timeframe today requires the manual `python main.py backfill --timeframe 4h ...` path; nothing consumes it yet.
 - **Alembic is the schema source of truth.** `data/schema.sql` is a reference overview only; do not load it directly.
+- **Kraken Prop execution is manual by necessity, not by choice.** Kraken Prop has no order-placement API, so the system's job stops at showing an operator an already-gated, already-sized setup (via the tablet publish endpoint) — it never places the order itself. The reference material used to build that manual workflow (accessibility-tree dumps and app screenshots) lives locally under `docs/mobile_nav/` and is intentionally gitignored, not part of the repo — it reflects a specific account's screens.
 
 ---
 
@@ -306,4 +341,4 @@ pytest --cov=. -q          # with coverage
 
 ---
 
-**Last Updated:** 2026-06-25
+**Last Updated:** 2026-09-13
