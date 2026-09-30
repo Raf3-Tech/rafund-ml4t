@@ -7,8 +7,10 @@ from execution.compliance_gate import (
     LIVE_BROWSER_EXECUTION_AUTHORIZED,
     ComplianceGateError,
     live_execution_authorized,
+    mobile_observation_authorized,
     observation_authorized,
     require_live_execution_authorized,
+    require_mobile_observation_authorized,
     require_observation_authorized,
 )
 
@@ -71,3 +73,34 @@ def test_require_live_execution_authorized_raises_when_unset(monkeypatch):
     monkeypatch.delenv("KRAKEN_LIVE_BROWSER_EXECUTION_AUTHORIZED", raising=False)
     with pytest.raises(ComplianceGateError):
         require_live_execution_authorized()
+
+
+def test_mobile_observation_not_authorized_by_default(monkeypatch):
+    monkeypatch.delenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", raising=False)
+    assert mobile_observation_authorized() is False
+
+
+def test_mobile_observation_authorized_only_with_exact_value_1(monkeypatch):
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "1")
+    assert mobile_observation_authorized() is True
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "true")
+    assert mobile_observation_authorized() is False
+
+
+def test_mobile_observation_independent_of_browser_observation(monkeypatch):
+    """Authorizing one observation surface must not authorize the other."""
+    monkeypatch.setenv("KRAKEN_BROWSER_OBSERVATION_AUTHORIZED", "1")
+    monkeypatch.delenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", raising=False)
+    assert observation_authorized() is True
+    assert mobile_observation_authorized() is False
+
+
+def test_require_mobile_observation_authorized_raises_when_unset(monkeypatch):
+    monkeypatch.delenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", raising=False)
+    with pytest.raises(ComplianceGateError):
+        require_mobile_observation_authorized()
+
+
+def test_require_mobile_observation_authorized_passes_when_set(monkeypatch):
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "1")
+    require_mobile_observation_authorized()  # must not raise

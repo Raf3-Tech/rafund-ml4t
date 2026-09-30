@@ -6,18 +6,27 @@ technically possible. Kraken's Terms of Service, the Prop Evaluation
 Terms, and the Funded Trader Agreement have not been reviewed by anyone in
 this session; nothing here claims they do or don't permit this workflow.
 
-Two independent, narrower-than-broader flags, both env-var-driven (never
+Independent, narrower-than-broader flags, each env-var-driven (never
 edited to `True` in source — see live_execution_authorized()'s docstring
 for why):
 
   KRAKEN_BROWSER_OBSERVATION_AUTHORIZED=1
       Required before execution/browser/browser_manager.py will launch a
-      browser at all (Phase 4 — read-only observation).
+      browser at all (Phase 4 — read-only web observation).
+
+  KRAKEN_MOBILE_OBSERVATION_AUTHORIZED=1
+      Required before execution/mobile/adb_client.py will run any `adb`
+      command against a device at all (Phase 4 — read-only observation of
+      the Kraken Pro Android app via ADB/uiautomator). Independent of the
+      browser flag above: authorizing one observation surface does not
+      authorize the other — ADB access to a physical device carries its
+      own, different risk profile (device-level access, not just a
+      browser tab) from a Playwright browser session.
 
   KRAKEN_LIVE_BROWSER_EXECUTION_AUTHORIZED=1
       Required before anything is allowed to submit an order (Phase 5+ —
-      does not exist yet). Requires observation authorization too; the
-      reverse is not true.
+      does not exist yet). Requires browser observation authorization too;
+      the reverse is not true.
 
 Neither flag is set by anything in this repository, in any test, or in any
 CI-equivalent config — flipping either is exclusively a human action taken
@@ -47,6 +56,24 @@ def observation_authorized() -> bool:
     platform-terms implications of its own (AGENT_ORCHESTRATION.md Section
     29), not just whatever risk order placement specifically carries."""
     return os.environ.get("KRAKEN_BROWSER_OBSERVATION_AUTHORIZED", "").strip() == "1"
+
+
+def mobile_observation_authorized() -> bool:
+    """Read-only ADB/uiautomator observation of the Kraken Pro Android app
+    (Phase 4). Independent of observation_authorized() (the browser flag)
+    — see module docstring."""
+    return os.environ.get("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "").strip() == "1"
+
+
+def require_mobile_observation_authorized() -> None:
+    if not mobile_observation_authorized():
+        raise ComplianceGateError(
+            "ADB observation of the Kraken Pro app is not authorized. Set "
+            "KRAKEN_MOBILE_OBSERVATION_AUTHORIZED=1 only after verifying Kraken's "
+            "Terms of Service, Prop Evaluation Terms, and Funded Trader Agreement "
+            "permit this workflow, or after obtaining written authorization "
+            "(AGENT_ORCHESTRATION.md Section 11)."
+        )
 
 
 def live_execution_authorized() -> bool:
