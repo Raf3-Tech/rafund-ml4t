@@ -79,6 +79,10 @@ class ExecutionIntent:
     order_type: str  # always "limit" — AGENT_ORCHESTRATION.md Section 16
     price: Decimal
     quantity: Decimal
+    stop_price: Decimal  # risk-mitigation TP/SL, per explicit account-holder mandate —
+    take_profit_price: Decimal  # relayed verbatim from the pending_signals row that
+                                 # already passed pretrade_gate.py's risk checks, never
+                                 # recomputed here (see execution_intent.py)
     reduce_only: bool
     gate_decision: str  # APPROVE | REDUCE | UNKNOWN
     gate_snapshot: Dict[str, Any]

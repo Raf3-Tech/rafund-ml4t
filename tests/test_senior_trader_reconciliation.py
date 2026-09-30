@@ -14,7 +14,8 @@ def _intent(**overrides) -> ExecutionIntent:
     base = dict(
         intent_id="intent-1", decision_id="dec-1", pending_signal_id=1,
         account="kraken_prop_kraken", symbol="BTC/USD", side="BUY", order_type="limit",
-        price=Decimal("100"), quantity=Decimal("0.5"), reduce_only=False,
+        price=Decimal("100"), quantity=Decimal("0.5"),
+        stop_price=Decimal("90"), take_profit_price=Decimal("130"), reduce_only=False,
         gate_decision="APPROVE", gate_snapshot={}, setup_tag="ema_crossover_long",
         strategy_id="EMA Crossover", expires_at=NOW + timedelta(minutes=30), execution_mode="PAPER",
     )

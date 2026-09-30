@@ -37,7 +37,12 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional
 
-from execution.mobile.models import ObservedFavorite, ObservedPositionsPanel, ObservedPropAccountScreen
+from execution.mobile.models import (
+    ObservedFavorite,
+    ObservedPositionsPanel,
+    ObservedPropAccountScreen,
+    ObservedTradeForm,
+)
 
 # Values-per-label, in on-screen order, exactly as captured — see module
 # docstring point 2. "Total equity" has two trailing values (the amount,
@@ -141,6 +146,105 @@ def _parse_positions_panel(texts: List[str]) -> ObservedPositionsPanel:
 
     empty_message = next((t for t in texts if t in _EMPTY_STATE_MARKERS), None)
     return ObservedPositionsPanel(active_tab=active_tab, empty_message=empty_message)
+
+
+_ORDER_TYPE_NAMES = ("Market", "Limit", "Trigger")
+
+# Field label -> ObservedTradeForm attribute. Derived from a REAL captured
+# dump (2026-09-30, content-verified via dump_ui_stable's expect_contains,
+# cross-checked against a screenshot taken at the same moment — see
+# state/integration_plan.md's Phase 5 section). Each label is an
+# EditText's own on-screen caption; the two are SIBLING nodes in document
+# order (EditText's `text` attribute already holds the current value —
+# there is no separate value TextView the way the Prop-account screen has
+# one), so _parse_trade_form pairs each label with the most recently seen
+# EditText's text rather than counting trailing value nodes.
+_FIELD_LABELS = {
+    "Limit price USD": "price",
+    "Market price USD": "price",
+    "Quantity (BTC)": "quantity",
+    "Total (USD)": "total_usd",
+    "Take profit at": "take_profit_price",
+    "Stop loss at": "stop_loss_price",
+}
+
+
+def _parse_trade_form_fields(root: ET.Element) -> Dict[str, Optional[Decimal]]:
+    fields: Dict[str, Optional[Decimal]] = {v: None for v in _FIELD_LABELS.values()}
+    pending_value: Optional[str] = None
+    for node in _all_nodes(root):
+        cls = node.get("class", "")
+        if cls.endswith("EditText"):
+            pending_value = _norm(node.get("text"))
+            continue
+        if cls.endswith("TextView"):
+            label = _norm(node.get("text"))
+            attr = _FIELD_LABELS.get(label)
+            if attr is not None and pending_value is not None:
+                fields[attr] = _parse_money(pending_value)
+    return fields
+
+
+def _order_type(root: ET.Element) -> Optional[str]:
+    for node in _all_nodes(root):
+        if node.get("class", "").endswith("Button") and _norm(node.get("content-desc")) in _ORDER_TYPE_NAMES:
+            return _norm(node.get("content-desc"))
+    return None
+
+
+def _tp_sl_enabled(root: ET.Element) -> bool:
+    for node in _all_nodes(root):
+        if node.get("class", "").endswith("CheckBox") and _norm(node.get("content-desc")) == "TP/SL":
+            return node.get("checked") == "true"
+    return False
+
+
+def _available_usd(texts: List[str]) -> Optional[Decimal]:
+    if "Available" in texts:
+        i = texts.index("Available")
+        if i + 1 < len(texts):
+            return _parse_money(texts[i + 1])
+    return None
+
+
+_SUBMIT_DESC_RE = re.compile(r"^(Buy|Sell)\s+\S+$")
+
+
+def _submit_button_label(root: ET.Element) -> Optional[str]:
+    for node in _all_nodes(root):
+        if node.get("class", "").endswith("Button"):
+            desc = _norm(node.get("content-desc"))
+            if _SUBMIT_DESC_RE.match(desc):
+                return desc
+    return None
+
+
+def parse_trade_form(xml_text: str) -> ObservedTradeForm:
+    """Parses the Trade tab's currently-open order-entry form (Buy or
+    Sell). Caller's responsibility to already be on that screen with the
+    form open — this function never navigates or taps. `side` is always
+    None today: no reliable signal for which of Buy/Sell is the active
+    tab was found in the captured dump (no distinguishing attribute like
+    `selected` differed between the two) — a documented gap, not a silent
+    one, matching ObservedPositionsPanel's precedent for an unobserved
+    state."""
+    root = ET.fromstring(xml_text)
+    texts = _text_view_texts(root)
+    fields = _parse_trade_form_fields(root)
+
+    return ObservedTradeForm(
+        side=None,
+        order_type=_order_type(root),
+        price=fields["price"],
+        quantity=fields["quantity"],
+        total_usd=fields["total_usd"],
+        available_usd=_available_usd(texts),
+        tp_sl_enabled=_tp_sl_enabled(root),
+        take_profit_price=fields["take_profit_price"],
+        stop_loss_price=fields["stop_loss_price"],
+        submit_button_label=_submit_button_label(root),
+        observed_at=datetime.now(timezone.utc),
+    )
 
 
 def parse_prop_account_screen(xml_text: str) -> ObservedPropAccountScreen:

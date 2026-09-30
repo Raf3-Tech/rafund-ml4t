@@ -74,7 +74,12 @@ logger = structlog.get_logger(__name__)
 # max_adverse_move_pct (that one models worst-case gap risk for sizing, not a
 # level a human would actually place an order at).
 _DEFAULT_STOP_PCT = Decimal("0.02")
-_DEFAULT_R_MULTIPLE = Decimal("2.0")
+# 1:3 risk:reward on every signal — explicit account-holder mandate
+# (2026-09-30), binding on Phase 5's mobile order-population pipeline via
+# ExecutionIntent.stop_price/take_profit_price (senior_trader/models.py),
+# which relay these signal-level values verbatim rather than recomputing
+# a second, possibly-divergent R:R downstream.
+_DEFAULT_R_MULTIPLE = Decimal("3.0")
 _DEFAULT_EXPIRY_MINUTES = 30
 _DEFAULT_STALE_MOVE_PCT = 0.01
 _DEFAULT_EXPECTED_HOLD_HOURS = Decimal("24")  # documented default, not measured — see module docstring

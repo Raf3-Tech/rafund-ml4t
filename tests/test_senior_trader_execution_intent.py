@@ -23,6 +23,7 @@ def _signal(**overrides) -> dict:
     base = dict(
         id=1, strategy_name="EMA Crossover", symbol="BTC/USD", direction="LONG",
         limit_price=Decimal("100"), qty=Decimal("0.5"), expires_at=NOW + timedelta(minutes=30),
+        stop_price=Decimal("90"), take_profit_price=Decimal("130"),
     )
     base.update(overrides)
     return base
@@ -40,6 +41,8 @@ def test_build_execution_intent_long_maps_to_buy():
     assert intent.order_type == "limit"
     assert intent.price == Decimal("100")
     assert intent.quantity == Decimal("0.5")
+    assert intent.stop_price == Decimal("90")
+    assert intent.take_profit_price == Decimal("130")
     assert intent.gate_decision == "APPROVE"
     assert intent.setup_tag == "ema_crossover_long"
     assert intent.reduce_only is False

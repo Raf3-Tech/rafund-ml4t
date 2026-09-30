@@ -65,6 +65,13 @@ def build_execution_intent(
         order_type="limit",
         price=Decimal(str(signal["limit_price"])),
         quantity=Decimal(str(signal["qty"])) if signal.get("qty") is not None else Decimal("0"),
+        # Relayed verbatim from the pending_signals row's own stop_price/
+        # take_profit_price — already computed at 1:3 R:R and already
+        # passed risk/pretrade_gate.py's checks. Never recomputed here:
+        # a second TP/SL calculation in the execution layer could diverge
+        # from what the gate actually approved.
+        stop_price=Decimal(str(signal["stop_price"])),
+        take_profit_price=Decimal(str(signal["take_profit_price"])),
         reduce_only=False,
         gate_decision=gate_action,
         gate_snapshot=gate_snapshot,
@@ -83,13 +90,14 @@ def persist_execution_intent(db, intent: ExecutionIntent) -> None:
             """
             INSERT INTO execution_intents
                 (intent_id, decision_id, pending_signal_id, account, symbol, side, order_type,
-                 price, quantity, reduce_only, gate_decision, gate_snapshot, setup_tag,
-                 strategy_id, expires_at, execution_mode, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending')
+                 price, quantity, stop_price, take_profit_price, reduce_only, gate_decision,
+                 gate_snapshot, setup_tag, strategy_id, expires_at, execution_mode, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending')
             """,
             (
                 intent.intent_id, intent.decision_id, intent.pending_signal_id, intent.account,
                 intent.symbol, intent.side, intent.order_type, intent.price, intent.quantity,
+                intent.stop_price, intent.take_profit_price,
                 intent.reduce_only, intent.gate_decision, json.dumps(intent.gate_snapshot, default=str),
                 intent.setup_tag, intent.strategy_id, intent.expires_at, intent.execution_mode,
             ),
