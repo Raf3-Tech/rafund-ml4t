@@ -12,6 +12,16 @@ source for `adb shell input` and fails the build if it ever appears.
 Gated behind execution.compliance_gate.require_mobile_observation_authorized()
 before any adb command runs, same pattern as
 execution/browser/browser_manager.py's compliance check.
+
+One narrow exception to "read-only": tap_bottom_nav() sends a single `adb
+shell input tap` at one of the five bottom-navigation destinations —
+switching tabs, never anything inside a trade/order flow. Coordinates come
+from docs/mobile_nav/kraken_app/NAV_TREE.md's own prior-session capture
+(portrait 1200x1920), not guessed, and the function only accepts one of
+those five named tabs — never arbitrary coordinates. This exists because
+the account holder explicitly authorized navigation (not just observation)
+in-session; it is the ONLY tap/input capability anywhere in this package —
+see tests/test_execution_mobile_boundaries.py, which asserts exactly that.
 """
 from __future__ import annotations
 
@@ -108,6 +118,32 @@ def dump_ui(serial: Optional[str] = None) -> str:
     require_mobile_observation_authorized()
     _run([*_device_args(serial), "shell", "uiautomator", "dump", DEVICE_UI_DUMP_PATH])
     return _run([*_device_args(serial), "shell", "cat", DEVICE_UI_DUMP_PATH])
+
+
+# Portrait 1200x1920 tap coordinates for the five always-visible bottom-nav
+# destinations — captured and validated in an earlier session, see
+# docs/mobile_nav/kraken_app/NAV_TREE.md. Deliberately the only tap targets
+# this module will ever accept.
+_BOTTOM_NAV_TARGETS = {
+    "Prop": (129, 1855),
+    "Markets": (364, 1855),
+    "Trade": (600, 1855),
+    "Portfolio": (835, 1855),
+    "Account": (1070, 1855),
+}
+
+
+def tap_bottom_nav(tab: str, serial: Optional[str] = None) -> None:
+    """Taps one of the five bottom-navigation destinations. Navigation
+    only — this never lands inside a trade/order flow, and raises before
+    touching the device at all if `tab` isn't one of the five known,
+    pre-validated names. This is the only function in execution/mobile/
+    that changes device state rather than only reading it."""
+    if tab not in _BOTTOM_NAV_TARGETS:
+        raise ValueError(f"tap_bottom_nav only supports {sorted(_BOTTOM_NAV_TARGETS)}, got {tab!r}")
+    require_mobile_observation_authorized()
+    x, y = _BOTTOM_NAV_TARGETS[tab]
+    _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
 
 
 def screenshot(serial: Optional[str] = None) -> bytes:
