@@ -174,4 +174,27 @@ Everything below this line in the full spec (execution intent, compliance gate, 
 
 `review_session.py` was refactored to call `adapters.signals.active_signals()` / `adapters.gate.latest_decision()` instead of its own private copies — same behavior, one exchange-scoping bug fixed, zero new risk logic. 26 new tests (one file per adapter module, matching this repo's existing convention), full suite 600 passed.
 
-Phase 3 (Paper Trader — running the full decision/journal/reconciliation loop against simulated execution) is the next reasonable slice; nothing execution-capable has been added yet, and the boundary test from Phase 1 still passes with zero exceptions.
+---
+
+## 10. Phase 3 — Paper Trader (AGENT_ORCHESTRATION.md Section 51)
+
+**Status: done.** Section 51 asks for the full workflow — decision, execution intent, simulated execution, journal, reconciliation, audit — with no real execution, plus measuring decision quality, missed opportunities, false positives, stale signals, execution divergence, and risk adherence.
+
+**New modules:**
+
+| Piece | Module | Notes |
+|---|---|---|
+| Execution intent | `execution_intent.py` | `build_execution_intent()` — never invents a gate decision: reports `"UNKNOWN"` rather than assuming APPROVE if the natural-key lookup ever came up empty. |
+| Simulated execution | `simulation.py` | Deliberately simple: fills at the intent's own limit price, or expires — no fill-probability model. Documented as a simplification, not a claim about real fill rates. |
+| Reconciliation | `reconciliation.py` | Compares intent vs. fill; unreachable-failure today (the simulator can't produce a mismatch by construction) but it's the tested seam a later phase's real, imperfect browser-observed fill plugs into unchanged. |
+| Auditor | `auditor.py` | Four checks against Phase 1-3's actual schema (every TAKE backed by a real APPROVE/REDUCE, no orphan intents, no generic setup tags, only factual close reasons). Section 39's weekly/strategy-review report types are out of scope — not enough history yet to mean anything. |
+| Metrics | `metrics.py` | Decision volume, stale-signal rate, fill rate, incident counts are real. `missed_opportunities`/`false_positives` are `None` on purpose — both need a closed-position outcome, and nothing simulates a CLOSE yet. |
+| Orchestrator | `paper_session.py` | `run_paper_trading_cycle()` — reads TAKE decisions with no execution intent yet (`adapters/decisions.py`, new), builds + simulates + reconciles + journals each, runs the daily audit. Composed on top of Phase 1/2, not folded into `review_session.py`. |
+
+**Gated behind config, not a flag no one will remember:** `senior_trader.execution_mode` (Phase 1's config, unused until now) must be `PAPER` for this to do anything — the default `RESEARCH` makes `run_paper_trading_cycle` a provable no-op. This gives Section 42's mode progression (RESEARCH → PAPER → DRY_RUN → …) real teeth instead of being a documented-but-unenforced convention.
+
+**State machine extended, and actually driven at runtime:** `EXECUTING`/`RECONCILING`/`ESCALATED` were added to `state_machine.py`'s legal-transition table, and `paper_session.py` calls `transition()` through the real `EXECUTION_READY → EXECUTING → RECONCILING → (SIGNAL_REVIEW | ESCALATED)` sequence for every intent it processes — not just a table that exists for its own sake. `ESCALATED` has no path back to a trading state, matching Section 19's "never trade out of a breach."
+
+New CLI: `python main.py senior-trader-paper --exchange kraken`. 36 new tests (execution intent, simulation, reconciliation, auditor, metrics, the new `decisions` adapter, the orchestrator's full wiring, and 3 new state-machine transition tests replacing the one Phase 1 test whose assumption Phase 3 deliberately supersedes). Full suite: 636 passed. The boundary test (no `ccxt`/`playwright`/`trading.execution`/`trading.live_trader` import anywhere in `senior_trader/`) still passes unchanged — nothing in this phase can place a real order.
+
+Phase 4 (Browser Observer, read-only) is the next reasonable slice per the spec — and the first one that would touch Playwright at all, gated by Section 11's compliance review before it goes further than observation.

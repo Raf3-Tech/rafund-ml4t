@@ -39,6 +39,27 @@ def latest_decision(db, strategy_name: str, symbol: str, direction: str) -> Opti
     return {"id": row[0], "action": row[1], "reason_code": row[2], "created_at": row[3]}
 
 
+def decision_by_id(db, gate_decision_id: int) -> Optional[dict]:
+    """One gate_decisions row by its primary key — used by
+    senior_trader/paper_session.py to resolve the exact gate decision a
+    `decisions` row's gate_decision_id points at, as opposed to
+    latest_decision()'s natural-key best-effort lookup."""
+    conn = db.get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, action, reason_code, created_at FROM gate_decisions WHERE id = %s",
+            (gate_decision_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        db.return_connection(conn)
+    if row is None:
+        return None
+    return {"id": row[0], "action": row[1], "reason_code": row[2], "created_at": row[3]}
+
+
 def recent_decisions(
     db, *, strategy_name: Optional[str] = None, symbol: Optional[str] = None, limit: int = 20,
 ) -> List[dict]:

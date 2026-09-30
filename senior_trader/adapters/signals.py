@@ -13,28 +13,44 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+# Shared by active_signals() and signal_by_id() so both return the same
+# shape — execution_intent.py's builder depends on that (it reads `qty`,
+# `limit_price`, `expires_at` off either result interchangeably).
+_FULL_COLUMNS = (
+    "id, strategy_name, symbol, exchange, direction, limit_price, "
+    "stop_price, take_profit_price, position_size_usd, qty, "
+    "leaderboard_score, leaderboard_rank, thesis, source_timeframe, "
+    "created_at, expires_at"
+)
+
 
 def active_signals(db, exchange: Optional[str] = None) -> List[dict]:
     """status='active' pending_signals rows — the same population
     monitoring.routes.publish's tablet endpoint shows — restricted to
     `exchange` if given."""
-    columns = (
-        "id, strategy_name, symbol, exchange, direction, limit_price, "
-        "stop_price, take_profit_price, position_size_usd, qty, "
-        "leaderboard_score, leaderboard_rank, thesis, source_timeframe, "
-        "created_at, expires_at"
-    )
     if exchange is not None:
         df = db.read_sql(
-            f"SELECT {columns} FROM pending_signals "
+            f"SELECT {_FULL_COLUMNS} FROM pending_signals "
             "WHERE status = 'active' AND exchange = %s ORDER BY created_at DESC",
             params=[exchange],
         )
     else:
         df = db.read_sql(
-            f"SELECT {columns} FROM pending_signals WHERE status = 'active' ORDER BY created_at DESC"
+            f"SELECT {_FULL_COLUMNS} FROM pending_signals WHERE status = 'active' ORDER BY created_at DESC"
         )
     return df.to_dict("records") if not df.empty else []
+
+
+def signal_by_id(db, pending_signal_id: int) -> Optional[dict]:
+    """One pending_signals row by id, regardless of status — so a signal
+    that has since expired or been resolved can still be looked up when
+    building an execution intent for a TAKE decision made about it earlier
+    (senior_trader/paper_session.py's use case)."""
+    df = db.read_sql(
+        f"SELECT {_FULL_COLUMNS} FROM pending_signals WHERE id = %s",
+        params=[pending_signal_id],
+    )
+    return df.to_dict("records")[0] if not df.empty else None
 
 
 def recent_signals(

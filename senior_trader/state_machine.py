@@ -1,12 +1,17 @@
-"""Deterministic Senior Trader state machine — Phase 1 subset.
+"""Deterministic Senior Trader state machine.
 
-Only the states/transitions Phase 1's read-only review cycle
-(senior_trader/review_session.py) actually visits are wired into
-_LEGAL_TRANSITIONS below. EXECUTION_READY, EXECUTING, RECONCILING,
-POSITION_MONITORING, HALTED, and ESCALATED exist in the TraderState enum —
-so a later phase adding them doesn't need a migration or a rename — but have
-no legal transition INTO them yet beyond what's listed here. See
-state/integration_plan.md Section 5 for the phase boundary this encodes.
+Phase 1 wired STARTING through EXECUTION_READY/NO_TRADE (review_session.py).
+Phase 3 adds EXECUTING/RECONCILING/ESCALATED — senior_trader/paper_session.py
+drives one EXECUTION_READY -> EXECUTING -> RECONCILING -> (SIGNAL_REVIEW |
+ESCALATED) transition per execution intent it processes, so this table is
+actually exercised at runtime, not just tested in isolation. POSITION_MONITORING
+and HALTED still have no legal transition into them: POSITION_MONITORING
+implies an open-position lifecycle Phase 3 doesn't track (no CLOSE
+simulation exists yet — see senior_trader/metrics.py's module docstring),
+and HALTED is a later phase's emergency-stop concern
+(AGENT_ORCHESTRATION.md Section 19). ESCALATED deliberately has no path
+back to trading states — Section 19: "never attempt to trade its way out of
+a breach" — a human clears an incident, this state machine doesn't.
 """
 from __future__ import annotations
 
@@ -29,10 +34,6 @@ class TraderState(str, Enum):
     SHUTDOWN = "SHUTDOWN"
 
 
-# Phase 1 legal transitions only. A later phase implementing execution adds
-# EXECUTION_READY -> EXECUTING -> RECONCILING -> POSITION_MONITORING here;
-# until then EXECUTION_READY is a dead end (a TAKE decision is recorded, but
-# nothing carries it further) by design, not by oversight.
 _LEGAL_TRANSITIONS = {
     TraderState.STARTING: {TraderState.HEALTH_CHECK},
     TraderState.HEALTH_CHECK: {TraderState.OBSERVING, TraderState.SHUTDOWN},
@@ -42,7 +43,12 @@ _LEGAL_TRANSITIONS = {
         TraderState.NO_TRADE, TraderState.EXECUTION_READY, TraderState.SHUTDOWN,
     },
     TraderState.NO_TRADE: {TraderState.SIGNAL_REVIEW, TraderState.SHUTDOWN},
-    TraderState.EXECUTION_READY: {TraderState.SHUTDOWN},
+    TraderState.EXECUTION_READY: {TraderState.EXECUTING, TraderState.SHUTDOWN},
+    TraderState.EXECUTING: {TraderState.RECONCILING, TraderState.SHUTDOWN},
+    TraderState.RECONCILING: {
+        TraderState.SIGNAL_REVIEW, TraderState.ESCALATED, TraderState.SHUTDOWN,
+    },
+    TraderState.ESCALATED: {TraderState.SHUTDOWN},
     TraderState.SHUTDOWN: set(),
 }
 

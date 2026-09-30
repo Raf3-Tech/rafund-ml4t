@@ -1,7 +1,6 @@
-"""Tests for senior_trader/state_machine.py — the Phase 1 legal-transition
-subset. Mirrors AGENT_ORCHESTRATION.md Section 33's own example
-(`REJECTED -> EXECUTING must be impossible`), applied to this phase's
-actual state set.
+"""Tests for senior_trader/state_machine.py. Mirrors AGENT_ORCHESTRATION.md
+Section 33's own example (`REJECTED -> EXECUTING must be impossible`),
+applied to this codebase's actual state set.
 """
 from __future__ import annotations
 
@@ -25,9 +24,34 @@ def test_decision_pending_can_reach_execution_ready():
     assert state == TraderState.EXECUTION_READY
 
 
-def test_execution_ready_cannot_reach_executing_in_phase_1():
+def test_full_happy_path_take_and_simulated_execution_cycle():
+    """The exact sequence senior_trader/paper_session.py drives per
+    execution intent: EXECUTION_READY -> EXECUTING -> RECONCILING -> back
+    to SIGNAL_REVIEW for the next candidate."""
+    state = transition(TraderState.DECISION_PENDING, TraderState.EXECUTION_READY)
+    state = transition(state, TraderState.EXECUTING)
+    state = transition(state, TraderState.RECONCILING)
+    state = transition(state, TraderState.SIGNAL_REVIEW)
+    assert state == TraderState.SIGNAL_REVIEW
+
+
+def test_reconciliation_failure_reaches_escalated_not_trading_states():
+    state = transition(TraderState.RECONCILING, TraderState.ESCALATED)
+    assert state == TraderState.ESCALATED
+
+
+def test_escalated_has_no_path_back_to_trading():
+    """AGENT_ORCHESTRATION.md Section 19: never attempt to trade out of a
+    breach — a human clears an incident, this state machine doesn't."""
     with pytest.raises(IllegalTransition):
-        transition(TraderState.EXECUTION_READY, TraderState.EXECUTING)
+        transition(TraderState.ESCALATED, TraderState.SIGNAL_REVIEW)
+    with pytest.raises(IllegalTransition):
+        transition(TraderState.ESCALATED, TraderState.EXECUTING)
+
+
+def test_execution_ready_cannot_skip_straight_to_reconciling():
+    with pytest.raises(IllegalTransition):
+        transition(TraderState.EXECUTION_READY, TraderState.RECONCILING)
 
 
 def test_shutdown_has_no_outgoing_transitions():

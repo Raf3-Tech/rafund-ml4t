@@ -30,6 +30,7 @@ Usage:
     python main.py live                             # Live trading (DANGER — not implemented)
     python main.py signal-scan --exchange kraken    # Manual-execution signal detector (no orders placed)
     python main.py senior-trader-review --exchange kraken  # Agent Orchestration Phase 1: read-only decision/escalation review
+    python main.py senior-trader-paper --exchange kraken   # Agent Orchestration Phase 3: simulated execution (no-op unless execution_mode=PAPER)
 """
 
 import argparse
@@ -80,6 +81,7 @@ def main() -> int:
             "drift", "backfill", "pipeline", "bootstrap", "dashboard", "paper",
             "live", "benchmark", "models", "engine", "leaderboard",
             "train-classifier", "research", "signal-scan", "senior-trader-review",
+            "senior-trader-paper",
         ],
     )
     parser.add_argument("submode", nargs="?")
@@ -249,6 +251,14 @@ def main() -> int:
             else:
                 from cli.senior_trader import run_senior_trader_review_cmd
                 success = run_senior_trader_review_cmd(exchange="kraken")
+
+        elif args.mode == "senior-trader-paper":
+            if args.exchange not in (None, "kraken"):
+                logger.error("senior-trader-paper currently supports only --exchange kraken")
+                success = False
+            else:
+                from cli.senior_trader import run_senior_trader_paper_cmd
+                success = run_senior_trader_paper_cmd(exchange="kraken")
 
         elif args.mode == "live":
             from cli.backtest import run_live_trading

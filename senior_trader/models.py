@@ -1,4 +1,6 @@
-"""Data models for Senior Trader decisions, escalations, and journal entries.
+"""Data models for Senior Trader: decisions, escalations, execution intents,
+simulated fills, reconciliation results, audit findings, session metrics,
+and journal entries.
 
 Plain frozen dataclasses, matching the rest of this codebase's convention
 (risk/pretrade_gate.py's GateDecision, signals/pending_signal_detector.py's
@@ -9,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 TAKE = "TAKE"
 NO_TRADE = "NO_TRADE"
@@ -52,6 +54,96 @@ class EscalationEvent:
     recommended_action: str
     execution_status: str = "none"
     created_at: Optional[datetime] = None
+
+
+FILLED = "filled"
+EXPIRED = "expired"
+
+RECONCILED = "RECONCILED"
+RECONCILIATION_FAILURE = "RECONCILIATION_FAILURE"
+
+
+@dataclass(frozen=True)
+class ExecutionIntent:
+    """AGENT_ORCHESTRATION.md Section 13/14 — the immutable bridge between a
+    TAKE decision and anything that could eventually submit an order. Phase
+    3 builds and simulates these in-process (senior_trader/execution_intent.py,
+    senior_trader/simulation.py); nothing here talks to a browser or an
+    exchange API."""
+    intent_id: str
+    decision_id: str
+    pending_signal_id: Optional[int]
+    account: str
+    symbol: str
+    side: str  # BUY | SELL
+    order_type: str  # always "limit" — AGENT_ORCHESTRATION.md Section 16
+    price: Decimal
+    quantity: Decimal
+    reduce_only: bool
+    gate_decision: str  # APPROVE | REDUCE | UNKNOWN
+    gate_snapshot: Dict[str, Any]
+    setup_tag: str
+    strategy_id: str
+    expires_at: datetime
+    execution_mode: str  # RESEARCH | PAPER | DRY_RUN — see senior_trader/config.py
+
+
+@dataclass(frozen=True)
+class SimulatedFill:
+    """Phase 3's stand-in for a real fill result — see
+    senior_trader/simulation.py's module docstring for why this is
+    deliberately not a fill-probability model."""
+    intent_id: str
+    status: str  # FILLED | EXPIRED
+    fill_price: Optional[Decimal]
+    filled_at: Optional[datetime]
+    reason: str
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """AGENT_ORCHESTRATION.md Section 38 — compares an ExecutionIntent
+    against a fill result (Phase 3: SimulatedFill; a later phase: a
+    browser-observed fill, through the same function unchanged)."""
+    status: str  # RECONCILED | RECONCILIATION_FAILURE
+    evidence: Dict[str, Any]
+
+
+@dataclass
+class AuditFinding:
+    """One check from senior_trader/auditor.py's daily audit."""
+    check: str
+    passed: bool
+    evidence: Dict[str, Any]
+
+
+@dataclass
+class AuditReport:
+    findings: List[AuditFinding]
+
+    @property
+    def all_passed(self) -> bool:
+        return all(f.passed for f in self.findings)
+
+
+@dataclass(frozen=True)
+class SessionMetrics:
+    """AGENT_ORCHESTRATION.md Section 51's "Measure" list, scoped to what
+    Phase 3's schema can honestly answer — see senior_trader/metrics.py's
+    module docstring for why missed_opportunities/false_positives are None
+    rather than a fabricated number."""
+    decisions_total: int
+    decisions_take: int
+    decisions_no_trade: int
+    stale_signal_no_trade: int
+    intents_built: int
+    fills_filled: int
+    fills_expired: int
+    reconciliation_failures: int
+    incidents_total: int
+    incidents_by_category: Dict[str, int]
+    missed_opportunities: Optional[int]
+    false_positives: Optional[int]
 
 
 @dataclass(frozen=True)
