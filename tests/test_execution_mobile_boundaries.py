@@ -22,13 +22,26 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from execution.mobile.adb_client import _BOTTOM_NAV_TARGETS, _TRADE_ACTION_TARGETS, tap_bottom_nav, tap_trade_action
+from execution.mobile.adb_client import (
+    _BOTTOM_NAV_TARGETS,
+    _ORDER_TYPE_OPTION_TARGETS,
+    _TRADE_ACTION_TARGETS,
+    _TRADE_VIEW_TOGGLE_TARGETS,
+    tap_bottom_nav,
+    tap_order_type_dropdown,
+    tap_order_type_option,
+    tap_trade_action,
+    tap_trade_view_toggle,
+)
 
 _EXECUTION_MOBILE_DIR = Path(__file__).resolve().parent.parent / "execution" / "mobile"
 _ADB_CLIENT_FILE = _EXECUTION_MOBILE_DIR / "adb_client.py"
 
 _INTERACTION_TOKENS = ("input", "am", "pm")
-_ALLOWED_INTERACTION_FUNCTIONS = {"tap_bottom_nav", "tap_trade_action"}
+_ALLOWED_INTERACTION_FUNCTIONS = {
+    "tap_bottom_nav", "tap_trade_action", "tap_trade_view_toggle",
+    "tap_order_type_dropdown", "tap_order_type_option",
+}
 
 
 def _function_defs(tree: ast.Module):
@@ -77,6 +90,58 @@ def test_bottom_nav_targets_are_exactly_the_five_known_tabs():
 
 def test_trade_action_targets_are_exactly_buy_and_sell():
     assert set(_TRADE_ACTION_TARGETS) == {"Buy", "Sell"}
+
+
+def test_tap_trade_view_toggle_accepts_only_a_named_icon_not_raw_coordinates():
+    tree = ast.parse(_ADB_CLIENT_FILE.read_text())
+    func = next(f for f in _function_defs(tree) if f.name == "tap_trade_view_toggle")
+    param_names = [a.arg for a in func.args.args]
+    assert param_names == ["icon", "serial"], (
+        f"tap_trade_view_toggle must take exactly (icon, serial) — no raw x/y coordinate "
+        f"parameters: got {param_names}"
+    )
+
+
+def test_trade_view_toggle_targets_are_exactly_left_and_right():
+    assert set(_TRADE_VIEW_TOGGLE_TARGETS) == {"left", "right"}
+
+
+def test_tap_trade_view_toggle_rejects_unknown_icon_before_touching_the_device():
+    import pytest
+
+    with pytest.raises(ValueError):
+        tap_trade_view_toggle("middle")
+
+
+def test_tap_order_type_dropdown_takes_no_selectable_argument():
+    tree = ast.parse(_ADB_CLIENT_FILE.read_text())
+    func = next(f for f in _function_defs(tree) if f.name == "tap_order_type_dropdown")
+    param_names = [a.arg for a in func.args.args]
+    assert param_names == ["serial"], (
+        f"tap_order_type_dropdown always opens the same dropdown — it must take only "
+        f"(serial), no coordinate or option argument: got {param_names}"
+    )
+
+
+def test_tap_order_type_option_accepts_only_a_named_option_not_raw_coordinates():
+    tree = ast.parse(_ADB_CLIENT_FILE.read_text())
+    func = next(f for f in _function_defs(tree) if f.name == "tap_order_type_option")
+    param_names = [a.arg for a in func.args.args]
+    assert param_names == ["option", "serial"], (
+        f"tap_order_type_option must take exactly (option, serial) — no raw x/y "
+        f"coordinate parameters: got {param_names}"
+    )
+
+
+def test_order_type_option_targets_are_exactly_limit_market_trigger():
+    assert set(_ORDER_TYPE_OPTION_TARGETS) == {"Limit", "Market", "Trigger"}
+
+
+def test_tap_order_type_option_rejects_unknown_option_before_touching_the_device():
+    import pytest
+
+    with pytest.raises(ValueError):
+        tap_order_type_option("StopLimit")
 
 
 def test_tap_bottom_nav_rejects_unknown_tab_before_touching_the_device():

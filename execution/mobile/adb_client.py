@@ -28,7 +28,7 @@ from __future__ import annotations
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from execution.compliance_gate import require_mobile_observation_authorized
 
@@ -125,25 +125,49 @@ def dump_ui(serial: Optional[str] = None) -> str:
     return _run([*_device_args(serial), "shell", "cat", DEVICE_UI_DUMP_PATH])
 
 
-def dump_ui_stable(serial: Optional[str] = None, *, max_attempts: int = 5, delay_s: float = 0.4) -> str:
-    """dump_ui(), retried until two consecutive dumps are byte-identical —
-    a stale dump changes between calls (it's returning old-but-varying
-    content only if the screen itself is still changing, e.g. live prices
-    ticking) or two consecutive stale reads would need to coincidentally
-    match, which live-updating price data makes unlikely. Raises
-    AdbCommandError if no two consecutive attempts agree within
-    max_attempts. This is the ONLY dump function anything order-related
-    should call — see dump_ui()'s docstring for why a single call isn't
-    safe."""
+def dump_ui_stable(
+    serial: Optional[str] = None,
+    *,
+    max_attempts: int = 5,
+    delay_s: float = 0.4,
+    expect_contains: Optional[Sequence[str]] = None,
+) -> str:
+    """dump_ui(), retried until two consecutive dumps are byte-identical.
+
+    CONFIRMED INSUFFICIENT ON ITS OWN (2026-09-30): self-consistency alone
+    caught a dump that visibly CHANGED between stale and fresh (the
+    original bug this function fixed), but a later call demonstrated
+    uiautomator can also return the SAME stale content on every call —
+    two dumps agreeing with each other, both wrong, while a screenshot
+    taken at the same moment showed a completely different real screen
+    (Kraken's order-entry form, vs. a dump showing the plain Trade tab
+    underneath it). Self-consistency cannot detect a consistently-wrong
+    cache.
+
+    expect_contains fixes this: pass substrings that MUST appear in the
+    stabilized dump (e.g. "Quantity" or "Buy BTC" for an open order form).
+    If the stable dump doesn't contain all of them, that attempt is
+    treated as a miss and retried — a wrong-but-internally-consistent dump
+    can no longer silently pass. Order-related callers MUST pass this;
+    omitting it (None) preserves the old, weaker self-consistency-only
+    behavior for non-critical callers (e.g. the Prop tab's mostly-static
+    account stats, where NAV_TREE.md's original stale-dump report was
+    "an unrelated app's data," not silently-wrong Kraken content).
+
+    Raises AdbCommandError if no attempt both stabilizes and (when given)
+    satisfies expect_contains within max_attempts."""
     previous: Optional[str] = None
     for _ in range(max_attempts):
         current = dump_ui(serial)
         if previous is not None and current == previous:
-            return current
+            if expect_contains is None or all(s in current for s in expect_contains):
+                return current
         previous = current
         time.sleep(delay_s)
+    reason = f"expected content {list(expect_contains)} never appeared in a stable dump" if expect_contains else \
+        "no two consecutive dumps agreed"
     raise AdbCommandError(
-        f"dump_ui_stable: no two consecutive dumps agreed within {max_attempts} attempts — "
+        f"dump_ui_stable: {reason} within {max_attempts} attempts — "
         "refusing to return a possibly-stale dump for order-related use."
     )
 
@@ -199,6 +223,75 @@ def tap_trade_action(action: str, serial: Optional[str] = None) -> None:
         raise ValueError(f"tap_trade_action only supports {sorted(_TRADE_ACTION_TARGETS)}, got {action!r}")
     require_mobile_observation_authorized()
     x, y = _TRADE_ACTION_TARGETS[action]
+    _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
+
+
+# Trade tab's two unlabeled icon buttons, bottom-right of the order book
+# panel, just above the bottom nav bar — bounds estimated visually from a
+# real screenshot (2026-09-30), not from a uiautomator dump: these two
+# nodes carry no text or content-desc in the accessibility tree at all,
+# and the dump's own reported bounds for this region didn't reliably line
+# up with screenshot pixels (see adb_client.py commit history — the same
+# session that found the stale-dump bug also found this coordinate
+# mismatch). Named by position, not function, because their function is
+# not yet confirmed — see tap_trade_view_toggle's docstring.
+_TRADE_VIEW_TOGGLE_TARGETS = {
+    "left": (1067, 1939),
+    "right": (1133, 1939),
+}
+
+
+def tap_trade_view_toggle(icon: str, serial: Optional[str] = None) -> None:
+    """Taps one of the two unlabeled icon buttons bottom-right of the
+    Trade tab's order book. Purpose unconfirmed as of writing — this
+    function exists to observe what each one does, not because either is
+    known to be safe/navigation-only the way tap_bottom_nav's targets
+    are. Like the other tap functions, accepts only a named position,
+    never raw coordinates."""
+    if icon not in _TRADE_VIEW_TOGGLE_TARGETS:
+        raise ValueError(f"tap_trade_view_toggle only supports {sorted(_TRADE_VIEW_TOGGLE_TARGETS)}, got {icon!r}")
+    require_mobile_observation_authorized()
+    x, y = _TRADE_VIEW_TOGGLE_TARGETS[icon]
+    _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
+
+
+# Order form's order-type dropdown row ("Market ⌄") — bounds estimated
+# visually from a real screenshot (2026-09-30) of the open Buy form.
+# Discovery-only: opens whatever selector Kraken shows (expected: Market/
+# Limit options) so real coordinates for "Limit" can be captured before
+# any function commits to tapping it.
+_ORDER_TYPE_DROPDOWN_TARGET = (345, 218)
+
+
+def tap_order_type_dropdown(serial: Optional[str] = None) -> None:
+    """Taps the order form's order-type dropdown (shows "Market" by
+    default) to open its option list. See tap_order_type_option() for the
+    reviewed, real-coordinate function that selects from it."""
+    require_mobile_observation_authorized()
+    x, y = _ORDER_TYPE_DROPDOWN_TARGET
+    _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
+
+
+# Order-type dropdown's three options — bounds captured from a real
+# screenshot (2026-09-30) of the open dropdown: Limit, Market (checked by
+# default), Trigger, top to bottom, ~57px apart.
+_ORDER_TYPE_OPTION_TARGETS = {
+    "Limit": (155, 287),
+    "Market": (155, 344),
+    "Trigger": (155, 401),
+}
+
+
+def tap_order_type_option(option: str, serial: Optional[str] = None) -> None:
+    """Selects one option from an ALREADY-OPEN order-type dropdown (call
+    tap_order_type_dropdown() first). This system is limit-only by design
+    (AGENT_ORCHESTRATION.md Section 16) — any order-form population
+    function must call this with "Limit" explicitly; Kraken's own default
+    is "Market", which nothing in this codebase should ever submit."""
+    if option not in _ORDER_TYPE_OPTION_TARGETS:
+        raise ValueError(f"tap_order_type_option only supports {sorted(_ORDER_TYPE_OPTION_TARGETS)}, got {option!r}")
+    require_mobile_observation_authorized()
+    x, y = _ORDER_TYPE_OPTION_TARGETS[option]
     _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
 
 
