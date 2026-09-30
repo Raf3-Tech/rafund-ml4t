@@ -86,6 +86,16 @@ strategy:
   ready_for_live_min_pass_ratio: 1.0    # 100% of walk-forward windows must pass
   ready_for_live_min_paper_trades: 10   # minimum paper closed trades
 
+# Agent Orchestration (Senior Trader), Phase 1 — see AGENT_ORCHESTRATION.md
+# and state/integration_plan.md. correlation_cap_pct/consecutive_loss_limit
+# are read by senior_trader/config.py::build_gate_context() but NOT yet wired
+# into signals/pending_signal_detector.py's gate call (see that module's
+# docstring for why) — set them here now so they're ready for a later phase.
+senior_trader:
+  execution_mode: RESEARCH   # RESEARCH | PAPER | DRY_RUN (Phase 1 only)
+  correlation_cap_pct: null
+  consecutive_loss_limit: null
+
 backtesting:
   commission: 0.001
 
