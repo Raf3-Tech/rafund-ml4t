@@ -154,3 +154,24 @@ Follow the existing repo convention (`tests/test_pretrade_gate.py`, `tests/test_
 **Status: Phase 1 done** (commit `75975c4`, branch `feature/agent-orchestration`). One deliberate deviation from §7: no separate structural test file was added for the `senior_trader/` boundary check — it landed as `tests/test_senior_trader_boundaries.py` rather than being folded into another file, same effect. The `correlation_cap_pct`/`consecutive_loss_limit` config values (§3) are implemented and tested but intentionally **not** wired into `signals/pending_signal_detector.py::scan_kraken_signals` — see `senior_trader/config.py`'s docstring for why that stays a follow-up rather than a Phase 1 change.
 
 Everything below this line in the full spec (execution intent, compliance gate, browser observer, supervised/autonomous execution, reconciliation, auditor) is out of scope until this slice is reviewed and merged.
+
+---
+
+## 9. Phase 2 — Research Adapter (AGENT_ORCHESTRATION.md Section 50)
+
+**Status: done** (branch `feature/agent-orchestration`). Section 50 asks for read-only adapters covering: signal-scan, strategy eligibility, pretrade gate, backtest results, walk-forward results, DSR metrics, account state, positions, orders. Account state and strategy eligibility already existed from Phase 1 (`adapters/account.py`, `adapters/research.py::eligible_candidates`); Phase 2 filled in the rest and hardened what was there:
+
+| Spec category | Module | Notes |
+|---|---|---|
+| signal-scan | `adapters/signals.py` | `active_signals()`, `recent_signals()`. Extracted from `review_session.py`'s Phase 1 private helper — and fixed to actually scope by `exchange`, which the private version silently didn't. |
+| strategy eligibility | `adapters/research.py` | `eligible_candidates()` (Phase 1) + new `leaderboard_row()`, a full-row lookup other adapters build on. |
+| pretrade gate | `adapters/gate.py` | `latest_decision()` (extracted from Phase 1's private helper) + new `recent_decisions()` for auditing rejects, not just what approved an active signal. |
+| backtest results / walk-forward results | `adapters/backtest.py` | One adapter, not two — `engine_results` is this codebase's only result store for both (repository_map.md's architecture section); `walk_forward_windows()` returns the un-aggregated per-window rows `build_leaderboard()` collapses away. |
+| DSR metrics | `adapters/dsr.py` | `dsr_metrics()` — a thin projection of `research.leaderboard_row()`, never a second deflated-Sharpe computation. |
+| account state | `adapters/account.py` | Unchanged behavior; refactored to build on the new `adapters/positions.py` instead of loading its own `PositionState` copy. |
+| positions | `adapters/positions.py` | New. `current_position()` — Kraken Prop's single `run_id="live_{exchange}"` slot, not the multi-slot paper-trading model. |
+| orders | `adapters/orders.py` | New. `recent_fills()` against `paper_orders` — context only; there is still nowhere a manually-executed Kraken Prop fill gets journaled (that's `senior_trader/journal.py`'s `trade_journal`, still empty until a later phase). |
+
+`review_session.py` was refactored to call `adapters.signals.active_signals()` / `adapters.gate.latest_decision()` instead of its own private copies — same behavior, one exchange-scoping bug fixed, zero new risk logic. 26 new tests (one file per adapter module, matching this repo's existing convention), full suite 600 passed.
+
+Phase 3 (Paper Trader — running the full decision/journal/reconciliation loop against simulated execution) is the next reasonable slice; nothing execution-capable has been added yet, and the boundary test from Phase 1 still passes with zero exceptions.

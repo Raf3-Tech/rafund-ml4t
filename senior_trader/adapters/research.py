@@ -10,7 +10,7 @@ deliberate, documented reuse, not an accident.
 """
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 def eligible_candidates(db) -> List[Tuple[int, str, str, dict, float]]:
@@ -22,3 +22,20 @@ def eligible_candidates(db) -> List[Tuple[int, str, str, dict, float]]:
     from signals.pending_signal_detector import _qualifying_single_symbol_candidates
 
     return _qualifying_single_symbol_candidates(db)
+
+
+def leaderboard_row(db, strategy_name: str, symbol: str) -> Optional[dict]:
+    """Full leaderboard row (every computed column, including the DSR
+    fields senior_trader.adapters.dsr projects) for one strategy x symbol,
+    or None if not present. Calls build_leaderboard() fresh each time —
+    Phase 2 doesn't cache within a request, same as the CLI/dashboard's own
+    repeated calls to it today."""
+    from monitoring.leaderboard import build_leaderboard
+
+    lb = build_leaderboard(db)
+    if lb.empty:
+        return None
+    match = lb[(lb["strategy_name"] == strategy_name) & (lb["symbol"] == symbol)]
+    if match.empty:
+        return None
+    return match.iloc[0].to_dict()

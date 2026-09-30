@@ -14,6 +14,14 @@ risk.pretrade_gate.evaluate() a second time: the gate decision already made
 for a status='active' row is authoritative and is only *read* here, never
 recomputed. See state/integration_plan.md Section 4 for the design this
 implements, and Section 6 for what it deliberately leaves out.
+
+Phase 2 note: the pending_signals/gate_decisions reads that were private
+helpers here in Phase 1 are now senior_trader.adapters.signals.active_signals
+and senior_trader.adapters.gate.latest_decision — shared adapters, not
+duplicated logic. This module's own behavior is unchanged except that
+active_signals is now correctly scoped to `exchange` (Phase 1's private
+version queried every exchange regardless of the argument — harmless today
+since only Kraken is scanned, fixed now that it's a shared adapter).
 """
 from __future__ import annotations
 
@@ -21,11 +29,13 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import structlog
 
 from senior_trader.adapters.account import current_state as account_current_state
+from senior_trader.adapters.gate import latest_decision as gate_latest_decision
+from senior_trader.adapters.signals import active_signals as signals_active_signals
 from senior_trader.escalation import RISK_BREACH, check_account_state_consistency, record_incident
 from senior_trader.models import (
     NO_TRADE,
@@ -36,48 +46,6 @@ from senior_trader.models import (
 )
 
 logger = structlog.get_logger(__name__)
-
-
-def _latest_gate_decision(db, strategy_name: str, symbol: str, direction: str) -> Optional[dict]:
-    """Best-effort lookup by natural key (strategy_name, symbol, direction) —
-    pending_signals rows carry no gate_decisions foreign key today (they're
-    written by two separate statements in
-    signals.pending_signal_detector.scan_kraken_signals with no id passed
-    between them). Correct as long as no newer REJECT for the same key has
-    been persisted since, which holds by construction: a REJECT never
-    reaches _upsert_active_signal, so an active row's most recent
-    APPROVE/REDUCE gate_decisions entry is the one that actually approved
-    it (see state/repository_map.md Section 6 for the linkage gap this
-    works around)."""
-    conn = db.get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, action, reason_code, created_at FROM gate_decisions
-            WHERE strategy_name = %s AND symbol = %s AND direction = %s
-              AND action IN ('APPROVE', 'REDUCE')
-            ORDER BY created_at DESC LIMIT 1
-            """,
-            (strategy_name, symbol, direction),
-        )
-        row = cur.fetchone()
-        cur.close()
-    finally:
-        db.return_connection(conn)
-    if row is None:
-        return None
-    return {"id": row[0], "action": row[1], "reason_code": row[2], "created_at": row[3]}
-
-
-def _active_pending_signals(db) -> List[dict]:
-    df = db.read_sql(
-        """
-        SELECT id, strategy_name, symbol, direction, limit_price, expires_at
-        FROM pending_signals WHERE status = 'active' ORDER BY created_at DESC
-        """
-    )
-    return df.to_dict("records") if not df.empty else []
 
 
 def _decide_one(signal: dict, gate: Optional[dict], now: datetime) -> DecisionRecord:
@@ -161,7 +129,7 @@ def run_review_cycle(db, exchange: str = "kraken") -> ReviewCycleReport:
         incidents_raised += 1
         logger.warning("senior_trader_account_state_inconsistent", exchange=exchange, issues=issues)
 
-    signals = _active_pending_signals(db)
+    signals = signals_active_signals(db, exchange=exchange)
     take_count = 0
     no_trade_count = 0
 
@@ -176,7 +144,7 @@ def run_review_cycle(db, exchange: str = "kraken") -> ReviewCycleReport:
         logger.info("senior_trader_no_active_signals", exchange=exchange)
     else:
         for signal in signals:
-            gate = _latest_gate_decision(db, signal["strategy_name"], signal["symbol"], signal["direction"])
+            gate = gate_latest_decision(db, signal["strategy_name"], signal["symbol"], signal["direction"])
             record = _decide_one(signal, gate, now)
             _persist_decision(db, record)
             if record.decision == TAKE:
