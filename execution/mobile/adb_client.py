@@ -146,6 +146,34 @@ def tap_bottom_nav(tab: str, serial: Optional[str] = None) -> None:
     _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
 
 
+# Trade tab's Buy/Sell buttons — bounds captured LIVE in this session
+# (2026-09-30) from a real uiautomator dump of the Trade tab (BTC/USD
+# 10x): Buy [30,1747][519,1807] -> center (274,1777), Sell
+# [531,1747][1020,1807] -> center (775,1777). Not guessed. Re-verify
+# against a fresh dump if Kraken changes this layout — see
+# tests/test_execution_mobile_trade_form.py for how to check bounds
+# before trusting these again.
+_TRADE_ACTION_TARGETS = {
+    "Buy": (274, 1777),
+    "Sell": (775, 1777),
+}
+
+
+def tap_trade_action(action: str, serial: Optional[str] = None) -> None:
+    """Taps the Buy or Sell button on the Trade tab to OPEN the order
+    entry form. This does not place an order — Kraken's own UI requires
+    completing the form and its own separate confirmation step afterward
+    (AGENT_ORCHESTRATION.md Section 14's two-phase submission; Phase 5's
+    order-submission function, once it exists, is a distinct, more
+    tightly gated capability from this one). Like tap_bottom_nav, this
+    accepts only a named action, never raw coordinates."""
+    if action not in _TRADE_ACTION_TARGETS:
+        raise ValueError(f"tap_trade_action only supports {sorted(_TRADE_ACTION_TARGETS)}, got {action!r}")
+    require_mobile_observation_authorized()
+    x, y = _TRADE_ACTION_TARGETS[action]
+    _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
+
+
 def screenshot(serial: Optional[str] = None) -> bytes:
     """`exec-out screencap -p` — raw PNG bytes, for a human to review
     alongside (or instead of) the parsed accessibility tree."""
