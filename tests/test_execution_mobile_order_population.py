@@ -15,18 +15,23 @@ from unittest.mock import patch
 import pytest
 
 from execution.mobile.models import ObservedTradeForm
-from execution.mobile.order_population import populate_order_form, verify_order_form
+from execution.mobile.order_population import RiskRewardViolation, populate_order_form, verify_order_form
 from senior_trader.models import ExecutionIntent
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+# risk = 85247.4 - 84500 = 747.4; reward = 3 * risk = 2242.2 -> TP 87489.6 — a genuine 1:3 setup.
+_PRICE = Decimal("85247.4")
+_STOP = Decimal("84500")
+_TAKE_PROFIT = Decimal("87489.6")
 
 
 def _intent(**overrides) -> ExecutionIntent:
     base = dict(
         intent_id="intent-1", decision_id="dec-1", pending_signal_id=1,
         account="kraken_prop_kraken", symbol="BTC/USD", side="BUY", order_type="limit",
-        price=Decimal("85247.4"), quantity=Decimal("0.001"),
-        stop_price=Decimal("84500"), take_profit_price=Decimal("86000"),
+        price=_PRICE, quantity=Decimal("0.001"),
+        stop_price=_STOP, take_profit_price=_TAKE_PROFIT,
         reduce_only=False, gate_decision="APPROVE", gate_snapshot={}, setup_tag="smc_breakout_long",
         strategy_id="SMC Breakout", expires_at=NOW + timedelta(minutes=30), execution_mode="DRY_RUN",
     )
@@ -36,9 +41,9 @@ def _intent(**overrides) -> ExecutionIntent:
 
 def _form(**overrides) -> ObservedTradeForm:
     base = dict(
-        side=None, order_type="Limit", price=Decimal("85247.4"), quantity=Decimal("0.001"),
+        side=None, order_type="Limit", price=_PRICE, quantity=Decimal("0.001"),
         total_usd=Decimal("85.25"), available_usd=Decimal("5000.00"), tp_sl_enabled=True,
-        take_profit_price=Decimal("86000"), stop_loss_price=Decimal("84500"),
+        take_profit_price=_TAKE_PROFIT, stop_loss_price=_STOP,
         submit_button_label="Buy BTC", observed_at=NOW,
     )
     base.update(overrides)
@@ -57,6 +62,33 @@ def test_rejects_unknown_side_before_touching_the_device():
         populate_order_form(_intent(side="CLOSE"))
 
 
+def test_rejects_bad_risk_reward_before_touching_the_device():
+    """T4 (Content Manager test suite): a setup that cannot meet the
+    account holder's non-negotiable 1:3 risk:reward mandate must be
+    refused, not silently populated."""
+    bad_intent = _intent(take_profit_price=_PRICE + Decimal("10"))  # ~1:0.01, nowhere near 1:3
+    with patch("execution.mobile.order_population.adb_client") as mock_adb:
+        with pytest.raises(RiskRewardViolation):
+            populate_order_form(bad_intent)
+    mock_adb.tap_trade_action.assert_not_called()
+
+
+def test_rejects_zero_risk_before_touching_the_device():
+    zero_risk_intent = _intent(stop_price=_PRICE)
+    with patch("execution.mobile.order_population.adb_client") as mock_adb:
+        with pytest.raises(RiskRewardViolation):
+            populate_order_form(zero_risk_intent)
+    mock_adb.tap_trade_action.assert_not_called()
+
+
+def test_accepts_risk_reward_within_tolerance():
+    """Decimal rounding on real signal prices can land a hair off exactly
+    3.000 — within +/-5% must still pass."""
+    close_enough = _intent(take_profit_price=_PRICE + Decimal("3") * (_PRICE - _STOP) * Decimal("1.04"))
+    with patch("execution.mobile.order_population.adb_client"):
+        populate_order_form(close_enough)  # must not raise
+
+
 def test_drives_full_sequence_in_order_for_a_buy():
     with patch("execution.mobile.order_population.adb_client") as mock_adb:
         populate_order_form(_intent())
@@ -67,7 +99,7 @@ def test_drives_full_sequence_in_order_for_a_buy():
     mock_adb.set_order_form_field.assert_any_call("limit_price", "85247.4", None)
     mock_adb.set_order_form_field.assert_any_call("quantity", "0.001", None)
     mock_adb.tap_tp_sl_toggle.assert_called_once_with(None)
-    mock_adb.set_order_form_field.assert_any_call("take_profit", "86000", None)
+    mock_adb.set_order_form_field.assert_any_call("take_profit", "87489.6", None)
     mock_adb.set_order_form_field.assert_any_call("stop_loss", "84500", None)
     assert mock_adb.set_order_form_field.call_count == 4
 

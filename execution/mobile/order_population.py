@@ -43,6 +43,38 @@ def _field_value(value: Decimal) -> str:
     return format(value, "f")
 
 
+REQUIRED_RISK_REWARD_RATIO = Decimal("3")
+RISK_REWARD_TOLERANCE = Decimal("0.05")  # +/-5% of the required ratio — Decimal rounding slack only
+
+
+class RiskRewardViolation(ValueError):
+    """Raised when an ExecutionIntent's stop/target don't reflect the
+    account holder's standing 1:3 risk:reward mandate. Never silently
+    adjusted or rounded into compliance — the intent is wrong upstream
+    and must be fixed at the source (signals/pending_signal_detector.py),
+    not patched here."""
+
+
+def validate_risk_reward(intent: ExecutionIntent) -> None:
+    """Refuses an intent whose reward:risk ratio isn't ~1:3, per the
+    account holder's explicit, non-negotiable mandate. Checked before any
+    device interaction — a bad ratio never reaches the order form."""
+    risk = abs(intent.price - intent.stop_price)
+    reward = abs(intent.take_profit_price - intent.price)
+    if risk == 0:
+        raise RiskRewardViolation(
+            f"intent {intent.intent_id}: stop_price equals price ({intent.price}) — cannot compute a risk:reward ratio"
+        )
+    ratio = reward / risk
+    lower = REQUIRED_RISK_REWARD_RATIO * (1 - RISK_REWARD_TOLERANCE)
+    upper = REQUIRED_RISK_REWARD_RATIO * (1 + RISK_REWARD_TOLERANCE)
+    if not (lower <= ratio <= upper):
+        raise RiskRewardViolation(
+            f"intent {intent.intent_id}: risk:reward is 1:{ratio:.2f} (risk={risk}, reward={reward}), "
+            f"required 1:{REQUIRED_RISK_REWARD_RATIO} +/-{RISK_REWARD_TOLERANCE:.0%} — refusing to populate this order"
+        )
+
+
 def populate_order_form(intent: ExecutionIntent, serial: Optional[str] = None) -> None:
     """Opens the order form for intent.side and populates it end to end:
     Limit order type, quantity, price, and — unconditionally — TP/SL.
@@ -52,6 +84,7 @@ def populate_order_form(intent: ExecutionIntent, serial: Optional[str] = None) -
         raise ValueError(f"populate_order_form only supports limit orders, got {intent.order_type!r}")
     if intent.side not in ("BUY", "SELL"):
         raise ValueError(f"populate_order_form only supports BUY/SELL, got {intent.side!r}")
+    validate_risk_reward(intent)
 
     action = "Buy" if intent.side == "BUY" else "Sell"
     adb_client.tap_trade_action(action, serial)
