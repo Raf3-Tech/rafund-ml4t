@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from execution.mobile.adb_client import AdbCommandError, AdbDevice, dump_ui, list_devices, screenshot
+from execution.mobile.adb_client import AdbCommandError, AdbDevice, dump_ui, dump_ui_stable, list_devices, screenshot
 
 
 def _completed(stdout="", stderr="", returncode=0):
@@ -86,3 +86,43 @@ def test_run_raises_on_timeout(monkeypatch):
     with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="adb", timeout=15)):
         with pytest.raises(AdbCommandError, match="timed out"):
             dump_ui()
+
+
+# ── dump_ui_stable ───────────────────────────────────────────────────────
+# Added after confirming empirically (2026-09-30) that a single dump_ui()
+# call can return stale content right after a real tap on the device —
+# see adb_client.py's dump_ui docstring.
+
+def test_dump_ui_stable_returns_immediately_when_first_two_dumps_agree(monkeypatch):
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "1")
+    with patch("execution.mobile.adb_client.dump_ui", side_effect=["<a/>", "<a/>", "<a/>"]) as mock_dump, \
+         patch("time.sleep"):
+        result = dump_ui_stable()
+    assert result == "<a/>"
+    assert mock_dump.call_count == 2
+
+
+def test_dump_ui_stable_retries_past_a_stale_first_read(monkeypatch):
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "1")
+    # Simulates exactly what was observed live: a stale dump, then two
+    # agreeing fresh ones.
+    with patch("execution.mobile.adb_client.dump_ui", side_effect=["<stale/>", "<fresh/>", "<fresh/>"]), \
+         patch("time.sleep"):
+        result = dump_ui_stable()
+    assert result == "<fresh/>"
+
+
+def test_dump_ui_stable_raises_if_never_stabilizes(monkeypatch):
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "1")
+    with patch("execution.mobile.adb_client.dump_ui", side_effect=["<a/>", "<b/>", "<c/>", "<d/>", "<e/>"]), \
+         patch("time.sleep"):
+        with pytest.raises(AdbCommandError, match="refusing to return a possibly-stale dump"):
+            dump_ui_stable(max_attempts=5)
+
+
+def test_dump_ui_stable_sleeps_between_attempts(monkeypatch):
+    monkeypatch.setenv("KRAKEN_MOBILE_OBSERVATION_AUTHORIZED", "1")
+    with patch("execution.mobile.adb_client.dump_ui", side_effect=["<a/>", "<a/>"]), \
+         patch("time.sleep") as mock_sleep:
+        dump_ui_stable(delay_s=0.7)
+    mock_sleep.assert_called_once_with(0.7)

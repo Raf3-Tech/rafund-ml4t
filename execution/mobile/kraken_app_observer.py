@@ -1,8 +1,12 @@
 """High-level, read-only observer for the Kraken Pro Android app —
 combines adb_client's device I/O with parser's XML parsing, and applies
-the two safety checks docs/mobile_nav/kraken_app/NAV_TREE.md's own capture
+the safety checks docs/mobile_nav/kraken_app/NAV_TREE.md's own capture
 notes call out as real, previously-observed footguns before trusting a
-dump: wrong/stale window focus, and a live phone-call overlay.
+dump: wrong/stale window focus, a live phone-call overlay, and (confirmed
+empirically, not just theorized — 2026-09-30) a uiautomator dump that
+silently returns the previous screen's content right after a state
+change. Uses adb_client.dump_ui_stable(), never the single-shot dump_ui(),
+for exactly that reason.
 """
 from __future__ import annotations
 
@@ -39,5 +43,5 @@ def observe_prop_account_screen(serial: Optional[str] = None, *, verify_focus: b
         if call and "mCallState=0" not in call and "mCallState = 0" not in call:
             raise StaleOrUnexpectedScreenError(f"Device does not report an idle call state: {call!r}")
 
-    xml_text = adb_client.dump_ui(serial)
+    xml_text = adb_client.dump_ui_stable(serial)
     return parse_prop_account_screen(xml_text)

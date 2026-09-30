@@ -26,6 +26,7 @@ see tests/test_execution_mobile_boundaries.py, which asserts exactly that.
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -111,13 +112,40 @@ def call_state(serial: Optional[str] = None) -> str:
 
 def dump_ui(serial: Optional[str] = None) -> str:
     """`uiautomator dump` + pull, returning the raw XML as a string.
-    NAV_TREE.md's own notes: this can silently return a stale or
-    wrong-app dump — callers should cross-check current_focus() (and
-    ideally expected on-screen text) before trusting the result for
-    anything that matters."""
+    NAV_TREE.md's own notes warned this can silently return a stale or
+    wrong-app dump — CONFIRMED empirically (2026-09-30): immediately after
+    tap_trade_action('Buy') opened Kraken's real order-entry form (verified
+    by screenshot), the very next dump_ui() call returned content
+    byte-identical to the pre-tap screen. A single dump_ui() call must
+    NEVER be trusted alone for anything order-related — use
+    dump_ui_stable() instead, which only returns once two consecutive
+    dumps agree."""
     require_mobile_observation_authorized()
     _run([*_device_args(serial), "shell", "uiautomator", "dump", DEVICE_UI_DUMP_PATH])
     return _run([*_device_args(serial), "shell", "cat", DEVICE_UI_DUMP_PATH])
+
+
+def dump_ui_stable(serial: Optional[str] = None, *, max_attempts: int = 5, delay_s: float = 0.4) -> str:
+    """dump_ui(), retried until two consecutive dumps are byte-identical —
+    a stale dump changes between calls (it's returning old-but-varying
+    content only if the screen itself is still changing, e.g. live prices
+    ticking) or two consecutive stale reads would need to coincidentally
+    match, which live-updating price data makes unlikely. Raises
+    AdbCommandError if no two consecutive attempts agree within
+    max_attempts. This is the ONLY dump function anything order-related
+    should call — see dump_ui()'s docstring for why a single call isn't
+    safe."""
+    previous: Optional[str] = None
+    for _ in range(max_attempts):
+        current = dump_ui(serial)
+        if previous is not None and current == previous:
+            return current
+        previous = current
+        time.sleep(delay_s)
+    raise AdbCommandError(
+        f"dump_ui_stable: no two consecutive dumps agreed within {max_attempts} attempts — "
+        "refusing to return a possibly-stale dump for order-related use."
+    )
 
 
 # Portrait 1200x1920 tap coordinates for the five always-visible bottom-nav

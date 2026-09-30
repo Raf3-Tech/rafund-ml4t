@@ -27,7 +27,7 @@ def test_raises_when_call_state_not_idle():
 def test_observes_and_parses_when_focus_and_call_state_ok():
     with patch("execution.mobile.adb_client.current_focus", return_value="mCurrentFocus=Window{... com.kraken.trade/.MainActivity}"), \
          patch("execution.mobile.adb_client.call_state", return_value="mCallState=0"), \
-         patch("execution.mobile.adb_client.dump_ui", return_value=_FIXTURE_XML):
+         patch("execution.mobile.adb_client.dump_ui_stable", return_value=_FIXTURE_XML):
         screen = observe_prop_account_screen()
 
     assert screen.account_label == "Prop • Test Fixture Account"
@@ -37,7 +37,7 @@ def test_observes_and_parses_when_focus_and_call_state_ok():
 def test_verify_focus_false_skips_focus_and_call_checks():
     with patch("execution.mobile.adb_client.current_focus") as mock_focus, \
          patch("execution.mobile.adb_client.call_state") as mock_call, \
-         patch("execution.mobile.adb_client.dump_ui", return_value=_FIXTURE_XML):
+         patch("execution.mobile.adb_client.dump_ui_stable", return_value=_FIXTURE_XML):
         observe_prop_account_screen(verify_focus=False)
 
     mock_focus.assert_not_called()
