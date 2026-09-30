@@ -141,14 +141,16 @@ Follow the existing repo convention (`tests/test_pretrade_gate.py`, `tests/test_
 
 ```
 [x] Repository architecture mapped              — this document + repository_map.md
-[ ] Existing risk gate integrated (read-only)    — adapters/research.py, adapters/account.py
-[ ] Decision records implemented                 — decisions table + models.py
-[ ] Escalation implemented (log-only, no action)  — incidents table + escalation.py
-[ ] State machine implemented (Phase 1 subset)    — state_machine.py
-[ ] Journal schema implemented (empty until later)— trade_journal table
-[ ] CLI entry point                                — cli/senior_trader.py, python main.py senior-trader-review
-[ ] Tests per §7 passing
-[ ] No existing table altered, no existing module's behavior changed
+[x] Existing risk gate integrated (read-only)    — adapters/research.py, adapters/account.py
+[x] Decision records implemented                 — decisions table + models.py
+[x] Escalation implemented (log-only, no action)  — incidents table + escalation.py
+[x] State machine implemented (Phase 1 subset)    — state_machine.py
+[x] Journal schema implemented (empty until later)— trade_journal table
+[x] CLI entry point                                — cli/senior_trader.py, python main.py senior-trader-review
+[x] Tests per §7 passing                           — 24 new tests, full suite 574 passed
+[x] No existing table altered, no existing module's behavior changed
 ```
+
+**Status: Phase 1 done** (commit `75975c4`, branch `feature/agent-orchestration`). One deliberate deviation from §7: no separate structural test file was added for the `senior_trader/` boundary check — it landed as `tests/test_senior_trader_boundaries.py` rather than being folded into another file, same effect. The `correlation_cap_pct`/`consecutive_loss_limit` config values (§3) are implemented and tested but intentionally **not** wired into `signals/pending_signal_detector.py::scan_kraken_signals` — see `senior_trader/config.py`'s docstring for why that stays a follow-up rather than a Phase 1 change.
 
 Everything below this line in the full spec (execution intent, compliance gate, browser observer, supervised/autonomous execution, reconciliation, auditor) is out of scope until this slice is reviewed and merged.
