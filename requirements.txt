@@ -28,3 +28,9 @@ gunicorn>=21.2  # production WSGI server (see monitoring/run_dashboard.build_app
 
 # Optional: stationarity tests in `python main.py features`
 statsmodels>=0.14.0
+
+# Optional: Agent Orchestration Phase 4 browser observer (execution/browser/).
+# Not required for anything else in this repo — execution/browser/'s own
+# modules lazy-import playwright so they stay importable without this.
+# After installing, also run: playwright install chromium
+playwright>=1.40
