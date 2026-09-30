@@ -25,6 +25,7 @@ see tests/test_execution_mobile_boundaries.py, which asserts exactly that.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -292,6 +293,69 @@ def tap_order_type_option(option: str, serial: Optional[str] = None) -> None:
         raise ValueError(f"tap_order_type_option only supports {sorted(_ORDER_TYPE_OPTION_TARGETS)}, got {option!r}")
     require_mobile_observation_authorized()
     x, y = _ORDER_TYPE_OPTION_TARGETS[option]
+    _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
+
+
+# Order form's Quantity (BTC) and Limit price USD input fields — bounds
+# estimated visually from a real screenshot (2026-09-30) of the open
+# Limit order form. These change position slightly depending on order
+# type (Market has no price field above Quantity; Limit does), so these
+# targets are specifically the Limit-mode layout — always call
+# tap_order_type_option('Limit') first.
+_ORDER_FORM_FIELD_TARGETS = {
+    "quantity": (345, 357),
+    "limit_price": (345, 288),
+    # Only present once tap_tp_sl_toggle() has enabled TP/SL — bounds
+    # captured live (2026-09-30) from the form in that state.
+    "take_profit": (345, 656),
+    "stop_loss": (345, 723),
+}
+
+# Comfortably more backspaces than any realistic price/quantity string
+# needs, to clear a pre-filled field before typing a new value — e.g.
+# Kraken pre-fills Limit price USD with a near-market default.
+_CLEAR_FIELD_BACKSPACE_COUNT = 25
+
+
+def set_order_form_field(field: str, value: str, serial: Optional[str] = None) -> None:
+    """Taps the named order-form field, clears any existing text (a fixed
+    number of backspace keyevents — simpler and more reliable on this
+    app than select-all, which some Android text fields don't expose to
+    a bare tap), then types `value`. `value` must contain no whitespace
+    or shell-meaningful characters (enforced below) — this function is
+    for numeric price/quantity entry only, never arbitrary text."""
+    if field not in _ORDER_FORM_FIELD_TARGETS:
+        raise ValueError(f"set_order_form_field only supports {sorted(_ORDER_FORM_FIELD_TARGETS)}, got {field!r}")
+    if not re.fullmatch(r"[0-9.]+", value):
+        raise ValueError(f"set_order_form_field only accepts a plain numeric string, got {value!r}")
+
+    require_mobile_observation_authorized()
+    x, y = _ORDER_FORM_FIELD_TARGETS[field]
+    dev_args = _device_args(serial)
+    _run([*dev_args, "shell", "input", "tap", str(x), str(y)])
+    for _ in range(_CLEAR_FIELD_BACKSPACE_COUNT):
+        _run([*dev_args, "shell", "input", "keyevent", "KEYCODE_DEL"])
+    _run([*dev_args, "shell", "input", "text", value])
+
+
+# TP/SL toggle on the order form — bounds estimated visually from a real
+# screenshot (2026-09-30) of the populated Limit order form. Per explicit
+# user direction: every order this system helps place must have TP/SL
+# risk mitigation attached — this toggle existing and being tested is a
+# hard requirement, not an optional nicety.
+_TP_SL_TOGGLE_TARGET = (36, 600)
+
+
+def tap_tp_sl_toggle(serial: Optional[str] = None) -> None:
+    """Toggles the order form's TP/SL (Take Profit / Stop Loss) switch.
+    Per explicit user direction, every order this system populates MUST
+    have TP/SL enabled before Phase 5's order-population pipeline is
+    considered complete — this is a risk-mitigation requirement, not an
+    optional field. Does not itself set TP/SL price values; expected to
+    reveal new fields for those once enabled (unconfirmed until tested
+    live — see state/integration_plan.md's Phase 5 notes)."""
+    require_mobile_observation_authorized()
+    x, y = _TP_SL_TOGGLE_TARGET
     _run([*_device_args(serial), "shell", "input", "tap", str(x), str(y)])
 
 

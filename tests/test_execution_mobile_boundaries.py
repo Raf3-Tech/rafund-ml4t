@@ -24,12 +24,15 @@ from pathlib import Path
 
 from execution.mobile.adb_client import (
     _BOTTOM_NAV_TARGETS,
+    _ORDER_FORM_FIELD_TARGETS,
     _ORDER_TYPE_OPTION_TARGETS,
     _TRADE_ACTION_TARGETS,
     _TRADE_VIEW_TOGGLE_TARGETS,
+    set_order_form_field,
     tap_bottom_nav,
     tap_order_type_dropdown,
     tap_order_type_option,
+    tap_tp_sl_toggle,
     tap_trade_action,
     tap_trade_view_toggle,
 )
@@ -40,7 +43,8 @@ _ADB_CLIENT_FILE = _EXECUTION_MOBILE_DIR / "adb_client.py"
 _INTERACTION_TOKENS = ("input", "am", "pm")
 _ALLOWED_INTERACTION_FUNCTIONS = {
     "tap_bottom_nav", "tap_trade_action", "tap_trade_view_toggle",
-    "tap_order_type_dropdown", "tap_order_type_option",
+    "tap_order_type_dropdown", "tap_order_type_option", "set_order_form_field",
+    "tap_tp_sl_toggle",
 }
 
 
@@ -142,6 +146,44 @@ def test_tap_order_type_option_rejects_unknown_option_before_touching_the_device
 
     with pytest.raises(ValueError):
         tap_order_type_option("StopLimit")
+
+
+def test_set_order_form_field_accepts_only_a_named_field_not_raw_coordinates():
+    tree = ast.parse(_ADB_CLIENT_FILE.read_text())
+    func = next(f for f in _function_defs(tree) if f.name == "set_order_form_field")
+    param_names = [a.arg for a in func.args.args]
+    assert param_names == ["field", "value", "serial"], (
+        f"set_order_form_field must take exactly (field, value, serial) — no raw x/y "
+        f"coordinate parameters: got {param_names}"
+    )
+
+
+def test_order_form_field_targets_are_exactly_the_four_known_fields():
+    assert set(_ORDER_FORM_FIELD_TARGETS) == {"quantity", "limit_price", "take_profit", "stop_loss"}
+
+
+def test_set_order_form_field_rejects_unknown_field_before_touching_the_device():
+    import pytest
+
+    with pytest.raises(ValueError):
+        set_order_form_field("total_usd", "100")
+
+
+def test_set_order_form_field_rejects_non_numeric_value_before_touching_the_device():
+    import pytest
+
+    with pytest.raises(ValueError):
+        set_order_form_field("quantity", "0.01; rm -rf /")
+
+
+def test_tap_tp_sl_toggle_takes_no_selectable_argument():
+    tree = ast.parse(_ADB_CLIENT_FILE.read_text())
+    func = next(f for f in _function_defs(tree) if f.name == "tap_tp_sl_toggle")
+    param_names = [a.arg for a in func.args.args]
+    assert param_names == ["serial"], (
+        f"tap_tp_sl_toggle always taps the same switch — it must take only (serial), "
+        f"no coordinate argument: got {param_names}"
+    )
 
 
 def test_tap_bottom_nav_rejects_unknown_tab_before_touching_the_device():

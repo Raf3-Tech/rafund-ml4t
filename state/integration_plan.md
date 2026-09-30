@@ -239,3 +239,35 @@ This moves the mobile observer from "parses a fixture correctly" to "confirmed w
 26 new tests. Full suite (including Phase 4's browser-path tests): 692 collected, 691 passed — the one failure is `tests/test_live_signal_risk.py`'s `PropFirmRiskGuard` drawdown test, caused by an uncommitted, pre-existing local modification to `portfolio/risk.py` that this session did not make and has not touched (verified via `git diff`: the committed version's equity-floor drawdown logic differs from what's currently on disk). Unrelated to Agent Orchestration; left alone.
 
 Phase 5 (Supervised Execution — a human-in-the-loop order preview/confirm flow) is the next spec phase. It can now build on a *verified* observation path (the mobile one) rather than waiting on browser locator verification — though the same "no submission capability" structural discipline must carry forward into whatever executes on the confirmed side.
+
+---
+
+## 12. Phase 5 — Supervised Execution, in progress
+
+**Status: form population live-verified end to end; submission (tap "Buy BTC") deliberately not built or attempted.** Started only after the account holder explicitly confirmed Kraken's Terms of Service / Prop Evaluation Terms / Funded Trader Agreement had been reviewed (Section 11's gate).
+
+Order-form population is now a chain of narrow, named, real-coordinate tap/type functions in `execution/mobile/adb_client.py`, each following the exact discipline `tap_bottom_nav` established in Phase 4 — named target only, never raw coordinates, rejects an unknown name before touching the device, covered by its own structural boundary test:
+
+| Function | Does | Live-verified |
+|---|---|---|
+| `tap_trade_action("Buy"\|"Sell")` | Opens Kraken's order-entry form | Yes — screenshot confirmed the real form, not a dump (which was stale — see below) |
+| `tap_order_type_dropdown()` / `tap_order_type_option(...)` | Opens/selects Market, **Limit**, or Trigger | Yes — switched to Limit, confirmed via screenshot ("Limit price USD" field appeared) |
+| `set_order_form_field("quantity"\|"limit_price"\|"take_profit"\|"stop_loss", value)` | Taps a field, clears it (fixed backspace count), types a plain-numeric value (regex-validated before touching the device) | Yes, all four fields — full draft confirmed: Limit $85,247.4, 0.001 BTC, TP $86,000, SL $84,500, Kraken's own computed Est. profit/loss shown |
+| `tap_tp_sl_toggle()` | Enables the TP/SL fields | Yes — confirmed via screenshot |
+| `tap_trade_view_toggle("left"\|"right")` | Two unlabeled icon buttons, bottom-right of the order book | Tapped live, **no observable effect** — purpose still unconfirmed, parked per the user's own direction ("we'll continue this later, take note") |
+
+**Explicit new requirement from the account holder, now binding on Phase 5's design:** every order this pipeline populates must have TP/SL attached — not optional, a risk-mitigation requirement. `tap_tp_sl_toggle()` + the `take_profit`/`stop_loss` fields exist specifically to satisfy this; the still-unbuilt higher-level "populate one full order" orchestration function must call `tap_tp_sl_toggle()` and populate both fields unconditionally, never skip them for a bare entry-only order.
+
+**Two real reliability bugs found and fixed while doing this, not just anticipated:**
+
+1. `dump_ui()` can return a dump byte-identical to the *previous* screen right after a real state change (tap opened the order form; the very next dump showed the old Trade-tab-only content). Fixed by `dump_ui_stable()` (retry until two consecutive dumps agree) — see Section 11a.
+2. Self-consistency alone was later shown **insufficient**: two consecutive dumps agreed with each other while both were stale — a screenshot taken at the same instant showed the real, different, open order form. Fixed by adding `expect_contains` to `dump_ui_stable()`: pass required substrings (e.g. `["Quantity", "Buy BTC"]`); a stable-but-wrong dump missing them is retried, not returned. `dump_ui_stable()` also correctly **raised** (rather than silently returning bad data) when a later real-world case — the on-screen keyboard's presence — pushed it past `max_attempts` without finding a dump containing `"0.001"` and `"Buy BTC"`; a follow-up screenshot confirmed the actual on-screen state hadn't broken, just that this specific dump attempt should not be trusted. This fail-closed behavior is exactly the design intent, not a bug to chase further.
+
+**What's still missing before Phase 5 is actually complete** (per Section 14's two-phase submission checklist and Section 43's supervised flow):
+
+- The higher-level orchestration function that takes an `ExecutionIntent` (already exists, Phase 3) and drives the whole populate sequence (open form → Limit → quantity → price → TP/SL) in one reviewed call, rather than each step being invoked by hand as done in this session.
+- The verification step: parsing the populated form back (via `dump_ui_stable(expect_contains=...)`) into a structured `ObservedTradeForm` and comparing every field against the `ExecutionIntent` per Section 14's checklist (correct market, side, price, quantity, no stale signal, no account breach, etc.) before anything is allowed to proceed toward submission.
+- The actual human-confirmation break and `submit` step. Per this project's own design (see the Phase 5 kickoff discussion in-session): the human-confirmation gate is the chat turn itself, not an in-process token — the pipeline stops after presenting the full preview, and a human's own explicit, separate reply is what authorizes the next call, never a config flag alone.
+- `submit_order()` / equivalent does not exist yet. Nothing in this codebase can currently submit a real order — the "Buy BTC" tap has been available and enabled on-screen multiple times this session and was never used.
+
+35+ new tests across the new tap/field functions in this section. Full suite: 750 passed.
