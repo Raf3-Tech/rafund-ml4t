@@ -5,7 +5,7 @@ is enforced correctly when the loop re-invokes python main.py paper within the
 same calendar day.
 
 Revision ID: 0016
-Revises: 0015
+Revises: 0012
 Create Date: 2026-06-30 00:00:00.000000
 """
 
@@ -13,7 +13,10 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0016"
-down_revision = "0015"
+# 0013-0015 were never committed; 0016 originally named 0015 as its parent,
+# which left the chain unresolvable. A DB already stamped 0013-0015 needs a
+# one-time `alembic stamp 0016` (after confirming the column exists).
+down_revision = "0012"
 branch_labels = None
 depends_on = None
 

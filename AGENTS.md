@@ -321,6 +321,25 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 
 ## Session log  (newest first)
 
+### 2026-10-14 — session "model-benchmark-ci" (Claude) — COMPLETE (CI not yet green: pre-existing failures below)
+**Phase worked:** none of A–F (tooling/CI)
+**DB health check:** PASSED on a fresh local Postgres 16 (`test_connection` OK, migrated to 0016, `prices` empty so `verify_data` reports gaps as expected)
+**engine_results row count at session start:** 0 (fresh local DB, not the production DB)
+**Files changed:**
+  - `models/predict.py`, `main.py` — per-instance model cache (`_get_model`) replaces the bound-method `lru_cache`; `benchmark_predict(..., offline=True)` / `python main.py benchmark --offline` runs with a synthetic sklearn model + pass-through blocker (no DB/MLflow). The default online mode raises on DB/MLflow failure and never falls back; the pool is closed in a `finally`.
+  - `data/db.py` — `read_sql` passes the raw `%s` query + positional params straight to the driver (pandas → `exec_driver_sql`) instead of a regex → `text()` rewrite (which broke on `:` literals and handled `%%` inconsistently); param-count mismatch now raises `ValueError`.
+  - `data/verify_data.py` — runnable as `python data/verify_data.py` (repo-root path bootstrap); single `INTERVAL_MINUTES` incl. 4h/8h; gap query filters by `timeframe` (+ optional `--exchange`); cursor/pool cleanup; DB init failure returns False.
+  - `alembic/versions/0016_add_daily_trade_count.py` — `down_revision` 0015 → 0012 (0013–0015 were never committed, so `alembic upgrade` failed for every DB). A DB stamped 0013–0015 needs a one-time `alembic stamp 0016`.
+  - `.github/workflows/ci.yml` — blocking `db` job: Postgres 16 service → migrations → DB check → full suite with `RAFUND_LIVE_DB=1` → offline benchmark smoke. Stale constants.py notes removed.
+  - Tests: `tests/test_db_live.py` (new; skips unless `RAFUND_LIVE_DB=1`), `tests/test_prediction_latency.py`, `tests/test_verify_data.py`
+**Suite result (local, live DB):** 415 passed, 13 failed — every failure is pre-existing on `main`:
+  - 11 × `tests/test_risk_sizing_and_alerts.py`: `trading/position.py::max_safe_notional` reads `cfg.risk_per_trade_pct`, which Settings never defines (so real paper/live sizing breaks too). Needs a chosen default — separate fix.
+  - `tests/test_multi_exchange.py::test_log_order_records_exchange`: `paper_orders.source_timeframe` has no migration (it was presumably in the missing 0013–0015).
+  - `tests/test_setup.py::test_binance`: live api.binance.com call (blocked here; GitHub US runners typically get HTTP 451).
+**Bugs discovered and logged:** the three above.
+**Resume point for next session:** restore or rewrite the missing 0013–0015 schema changes (at least `paper_orders.source_timeframe`) as a new migration after 0016; add `risk_per_trade_pct` to `config/loader.py` Settings.
+**Session limit hit:** no (10 files)
+
 ### 2026-06-25 — session "close-known-gaps" (Claude) — COMPLETE
 **Phase worked:** none of A–F (post-pivot work — see staleness banner at top of this file)
 **DB health check:** PASSED — applied + verified migrations 0011→0012 cleanly on the dev DB; ran `run_paper_cycle` live against real data twice (once for the regime filter, once for the stop wiring) with no errors

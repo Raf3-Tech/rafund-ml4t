@@ -93,6 +93,12 @@ def main() -> int:
              "(runs every exchange in one cycle). live: default $LIVE_EXCHANGE or binance.",
     )
     parser.add_argument("--runs", type=int, default=100)
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="benchmark: use a synthetic model and skip the DB/MLflow "
+             "(explicit opt-in; measures predict-path overhead only).",
+    )
     parser.add_argument("--top-n", type=int, default=5, dest="top_n")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument("--all", action="store_true")
@@ -186,7 +192,7 @@ def main() -> int:
                 logger.error("--model and --symbol are required for benchmark")
                 return 1
             from models.predict import benchmark_predict
-            benchmark_predict(args.model, args.symbol, n_runs=args.runs)
+            benchmark_predict(args.model, args.symbol, n_runs=args.runs, offline=args.offline)
             success = True
 
         elif args.mode == "models":

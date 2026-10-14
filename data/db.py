@@ -14,11 +14,11 @@ from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import execute_values
 import pandas as pd
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from pathlib import Path
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 
 from config.loader import build_database_url
 from config.logging_config import get_logger
@@ -34,6 +34,10 @@ def load_env() -> None:
 
 
 load_env()
+
+# Positional psycopg2 placeholders; ``%%`` (an escaped literal percent) is
+# consumed first so it is never counted as a placeholder.
+_PLACEHOLDER_RE = re.compile(r"%%|%s")
 
 # Tables that may be referenced by identifier in dynamically-built SQL
 # (COUNT/DELETE-all helpers). Any table interpolated into a query must be a
@@ -135,27 +139,30 @@ class DatabaseConnection:
             self._engine = create_engine(url, pool_pre_ping=True)
         return self._engine
 
-    def read_sql(self, query: str, params: Optional[list] = None) -> pd.DataFrame:
+    def read_sql(self, query: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         """Run a read-only query through the SQLAlchemy engine.
 
-        Accepts the legacy positional ``%s`` placeholder style with a list of
-        params and converts it to SQLAlchemy named bind parameters, so existing
-        queries work unchanged while staying clean under pandas 2.x.
+        The query uses the same psycopg2 ``%s`` placeholder style as the write
+        path, with positional ``params``. The string is handed to the driver
+        unchanged (pandas routes a plain string via ``exec_driver_sql``), so
+        ``%%`` escapes, ``::type`` casts and literals containing ``:`` behave
+        exactly as they do under psycopg2. (The previous ``text()`` rewrite
+        parsed any ``:word`` as a bind parameter and treated ``%%`` differently
+        depending on whether params were given.)
         """
-        if params:
-            bound = {f"p{i}": v for i, v in enumerate(params)}
-            counter = {"i": 0}
-
-            def _sub(_match: "re.Match") -> str:
-                key = f":p{counter['i']}"
-                counter["i"] += 1
-                return key
-
-            sql_text = text(re.sub(r"%s", _sub, query))
+        if params is None or len(params) == 0:
             with self.engine.connect() as conn:
-                return pd.read_sql(sql_text, conn, params=bound)
+                return pd.read_sql(query, conn)
+
+        if isinstance(params, (str, bytes)) or not isinstance(params, Sequence):
+            raise TypeError("read_sql params must be a list or tuple of positional values")
+        expected = sum(1 for m in _PLACEHOLDER_RE.findall(query) if m == "%s")
+        if expected != len(params):
+            raise ValueError(
+                f"read_sql got {len(params)} params for {expected} %s placeholders"
+            )
         with self.engine.connect() as conn:
-            return pd.read_sql(text(query), conn)
+            return pd.read_sql(query, conn, params=tuple(params))
 
     def get_connection(self):
         """Get a connection from the pool."""
