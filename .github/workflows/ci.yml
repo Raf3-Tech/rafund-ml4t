@@ -2,35 +2,23 @@
 #
 # Job DAG:
 #
-#     lint ─┐
-#           ├─► coverage ──► build
-#     unit ─┤
-#           └─► integration ─┘
+#     lint (advisory)
+#     unit ─┬─► coverage ─┐
+#           └─► db ───────┴─► build
 #
-#   - lint + unit run in parallel (fast feedback, no DB needed)
-#   - coverage + integration run after both succeed
-#   - build runs last (package import smoke + byte-compile)
+#   - unit: full offline suite (live-DB tests skip with an explicit reason)
+#   - db:   Postgres 16 service → migrations → DB check → full suite with
+#           RAFUND_LIVE_DB=1 → offline benchmark smoke test. BLOCKING.
+#   - coverage: offline suite under coverage (gate 60%)
+#   - build: byte-compile + import smoke
 #
-# NOTE ON REPO PREREQUISITES (see also the "Prerequisites" section in the PR/report):
-#   * `config/constants.py` currently has a stray `</content>` tag on its last
-#     line (corrupted file) which is a hard SyntaxError. Until that single line
-#     is removed, ~10 test modules fail to import and `compileall` fails, so the
-#     unit / coverage / build jobs below will be RED. Fix that first.
-#   * pytest-cov is already in requirements.txt (good).
-#   * There is no pyproject.toml / setup.py, so this repo is run-as-source (not a
-#     pip-installable package). The build job therefore does an import smoke test
-#     + compileall rather than `pip install .`.
-#   * There is no [tool.ruff] / ruff.toml / [tool.pytest] config and no pytest
-#     markers. To make lint meaningfully enforced and integration tests
-#     selectable, add a `[tool.ruff]` section + a `pytest.ini`/pyproject with
-#     `markers = ["integration: ..."]`. Until then, lint is advisory
-#     (continue-on-error) and integration selects DB tests by keyword.
+# Lint stays advisory (continue-on-error) until the repo adds a ruff config.
 
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -96,28 +84,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Create runtime dirs
+        run: mkdir -p logs
+
       - name: Run unit tests
         env:
           # Force JSON structured logs in CI so output is machine-parseable.
           LOG_FORMAT: json
           LOG_LEVEL: WARNING
         run: |
-          pytest -q --maxfail=1 \
-            -k "not integration and not retraining_integration"
+          pytest -q -rs
 
   # ---------------------------------------------------------------------------
-  # INTEGRATION — spins up Postgres 16 as a service, runs Alembic migrations,
-  # then runs DB-touching tests. The repo has FEW true live-DB tests (most mock
-  # psycopg2), so this is marked allowed-to-be-partial via continue-on-error:
-  # the Postgres service + migrations are wired correctly, but a green/empty
-  # result here must not block the pipeline. Tighten once real integration
-  # tests + an `integration` pytest marker exist.
+  # DB — Postgres 16 service, migrations, a connectivity/read-path check, the
+  # full suite including live-DB tests (RAFUND_LIVE_DB=1), and a benchmark
+  # smoke test. BLOCKING. The benchmark uses the explicit --offline flag
+  # (synthetic model, no MLflow registry needed); the online path is covered
+  # by unit tests asserting it fails loudly rather than falling back.
   # ---------------------------------------------------------------------------
-  integration:
-    name: Integration tests (Postgres)
+  db:
+    name: DB + benchmark (Postgres)
     runs-on: ubuntu-latest
-    needs: [lint, unit]
-    continue-on-error: true
+    needs: [unit]
 
     services:
       postgres:
@@ -128,7 +116,6 @@ jobs:
           POSTGRES_DB: rafund
         ports:
           - 5432:5432
-        # Health check so the job waits until Postgres accepts connections.
         options: >-
           --health-cmd "pg_isready -U rafund -d rafund"
           --health-interval 10s
@@ -143,6 +130,7 @@ jobs:
       DB_USER: rafund
       DB_PASSWORD: rafund_ci
       LOG_FORMAT: json
+      LOG_LEVEL: WARNING
 
     steps:
       - uses: actions/checkout@v4
@@ -162,11 +150,36 @@ jobs:
       - name: Run Alembic migrations
         run: alembic upgrade head
 
-      - name: Run DB-touching tests
+      - name: DB check (connectivity + read path)
         run: |
-          # Select integration-style tests by keyword (no marker exists yet).
-          # `|| true`-style tolerance is handled by continue-on-error above.
-          pytest -q -k "integration or db or database or retraining_integration"
+          python - <<'PY'
+          import sys
+          from data.db import DatabaseConnection
+          db = DatabaseConnection()
+          try:
+              if not db.test_connection():
+                  sys.exit("DB connection test failed")
+              df = db.read_sql("SELECT %s::int AS ok", [1])
+              assert int(df.iloc[0]["ok"]) == 1, df
+              n = int(db.read_sql("SELECT COUNT(*) AS n FROM prices").iloc[0]["n"])
+              print(f"DB check OK (prices rows: {n})")
+          finally:
+              db.close_pool()
+          PY
+
+      - name: Create runtime dirs
+        run: mkdir -p logs
+
+      - name: Run full test suite (incl. live-DB tests)
+        env:
+          RAFUND_LIVE_DB: "1"
+        run: pytest -q -rs
+
+      - name: Benchmark smoke test (offline)
+        run: |
+          python main.py benchmark --offline --model ci_smoke --symbol BTC/USDT --runs 25 | tee benchmark.txt
+          grep -q "mode=offline" benchmark.txt
+          grep -q "p95_ms" benchmark.txt
 
   # ---------------------------------------------------------------------------
   # COVERAGE — full offline suite under coverage. Reports to the run summary and
@@ -175,15 +188,13 @@ jobs:
   # TARGET coverage: 80% (the goal for this codebase).
   # ENFORCED gate:   --cov-fail-under=60  (realistic current floor).
   #
-  # Why 60 and not 80: today the *collectable* offline suite sits well below 80%
-  # (and the constants.py SyntaxError zeroes out 10 modules entirely). 60 is a
-  # ratchet that passes once constants.py is fixed; raise it toward 80 as
-  # coverage improves. Bump this number — don't lower it — over time.
+  # 60 is a ratchet: raise it toward 80 as coverage improves. Bump this
+  # number — don't lower it — over time.
   # ---------------------------------------------------------------------------
   coverage:
     name: Coverage (gate 60% / target 80%)
     runs-on: ubuntu-latest
-    needs: [lint, unit]
+    needs: [unit]
     steps:
       - uses: actions/checkout@v4
 
@@ -199,6 +210,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Create runtime dirs
+        run: mkdir -p logs
+
       - name: Run tests with coverage
         env:
           LOG_FORMAT: json
@@ -208,8 +222,7 @@ jobs:
             --cov=. \
             --cov-report=term-missing \
             --cov-report=xml \
-            --cov-fail-under=60 \
-            -k "not integration and not retraining_integration"
+            --cov-fail-under=60
 
       - name: Upload coverage XML
         if: always()
@@ -221,13 +234,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # BUILD — final gate. No pyproject/setup.py exists, so this is an import smoke
-  # test of every top-level package + a full byte-compile of the tree. This is
-  # what catches the kind of corruption currently in config/constants.py.
+  # test of every top-level package + a full byte-compile of the tree.
   # ---------------------------------------------------------------------------
   build:
     name: Build / import smoke
     runs-on: ubuntu-latest
-    needs: [integration, coverage]
+    needs: [db, coverage]
     steps:
       - uses: actions/checkout@v4
 

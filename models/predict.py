@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import mlflow
@@ -15,7 +14,7 @@ import structlog
 from config.mlflow_config import configure_mlflow, get_latest_model
 from data.db import DatabaseConnection
 from models.blocker import ModelBlocker
-from models.exceptions import ModelBlockedError
+from models.exceptions import BlockStatus, ModelBlockedError
 
 logger = structlog.get_logger(__name__)
 
@@ -38,12 +37,17 @@ class Predictor:
         symbol: str,
         db: DatabaseConnection,
         model: Any | None = None,
+        blocker: Any | None = None,
     ) -> None:
         self.model_name = model_name
         self.symbol = symbol
         self.db = db
-        self.blocker = ModelBlocker(db)
+        self.blocker = blocker if blocker is not None else ModelBlocker(db)
         self.model = model
+        # Per-instance memo of the MLflow-loaded model. (A class-level
+        # lru_cache on a bound method is shared across instances and keeps
+        # every Predictor alive for the life of the process.)
+        self._model_cache: Any | None = None
 
     def _load_model(self) -> Any:
         configure_mlflow()
@@ -52,9 +56,12 @@ class Predictor:
             raise ValueError(f"No production model available for {self.model_name}")
         return model
 
-    @lru_cache(maxsize=16)
-    def _cached_model(self) -> Any:
-        return self._load_model()
+    def _get_model(self) -> Any:
+        if self.model is not None:
+            return self.model
+        if self._model_cache is None:
+            self._model_cache = self._load_model()
+        return self._model_cache
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         status = self.blocker.is_blocked(self.model_name, self.symbol)
@@ -67,7 +74,7 @@ class Predictor:
             )
             raise ModelBlockedError(f"Model {self.model_name} blocked: {status.reason}")
 
-        model = self.model if self.model is not None else self._cached_model()
+        model = self._get_model()
         start = time.perf_counter()
         prediction = model.predict(X)
         latency_ms = (time.perf_counter() - start) * 1000.0
@@ -90,13 +97,13 @@ class Predictor:
         return np.asarray(prediction)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        model = self.model if self.model is not None else self._cached_model()
+        model = self._get_model()
         if hasattr(model, 'predict_proba'):
             return model.predict_proba(X)
         raise ValueError('Model does not support probability predictions')
 
     def get_feature_importance(self) -> dict:
-        model = self.model if self.model is not None else self._cached_model()
+        model = self._get_model()
         if hasattr(model, 'feature_importances_'):
             return {'importances': model.feature_importances_}
         if hasattr(model, 'coef_'):
@@ -104,18 +111,73 @@ class Predictor:
         return {}
 
 
-def benchmark_predict(model_name: str, symbol: str, n_runs: int = 100) -> dict:
-    db = DatabaseConnection()
-    predictor = Predictor(model_name=model_name, symbol=symbol, db=db)
-    model = predictor._cached_model()
-    feature_names = _infer_feature_names(model)
-    dummy = pd.DataFrame(np.random.normal(size=(n_runs, len(feature_names))), columns=feature_names)
+class _PassThroughBlocker:
+    """Blocker used only by the explicit offline benchmark: never blocks."""
 
-    latencies = []
-    for _ in range(n_runs):
-        start = time.perf_counter()
-        predictor.predict(dummy.iloc[0:1])
-        latencies.append((time.perf_counter() - start) * 1000.0)
+    def is_blocked(self, model_name: str, symbol: str) -> BlockStatus:
+        return BlockStatus(
+            blocked=False,
+            reason=None,
+            model_age_days=None,
+            last_drift_severity=None,
+            safe_to_trade=True,
+        )
+
+
+def _synthetic_model(seed: int, n_features: int = 10) -> Any:
+    """Deterministic in-process model for the offline benchmark."""
+    from sklearn.linear_model import LinearRegression
+
+    rng = np.random.default_rng(seed)
+    columns = [f'feature_{i}' for i in range(n_features)]
+    X = pd.DataFrame(rng.normal(size=(256, n_features)), columns=columns)
+    y = X.to_numpy() @ rng.normal(size=n_features)
+    return LinearRegression().fit(X, y)
+
+
+def benchmark_predict(
+    model_name: str,
+    symbol: str,
+    n_runs: int = 100,
+    *,
+    offline: bool = False,
+    seed: int = 0,
+) -> dict:
+    """Benchmark single-row prediction latency through ``Predictor.predict``.
+
+    ``offline=False`` (default) needs a live DB (block gate) and an MLflow
+    Production model; any failure there is raised, never papered over.
+    ``offline=True`` must be requested explicitly: it uses a synthetic sklearn
+    model and a pass-through blocker, touching neither the DB nor MLflow, so it
+    measures the predict path's overhead, not a production model.
+    """
+    db = None
+    try:
+        if offline:
+            logger.warning('benchmark_offline_mode', model_name=model_name, symbol=symbol)
+            predictor = Predictor(
+                model_name=model_name,
+                symbol=symbol,
+                db=None,
+                model=_synthetic_model(seed),
+                blocker=_PassThroughBlocker(),
+            )
+        else:
+            db = DatabaseConnection()
+            predictor = Predictor(model_name=model_name, symbol=symbol, db=db)
+        model = predictor._get_model()
+        feature_names = _infer_feature_names(model)
+        rng = np.random.default_rng(seed)
+        dummy = pd.DataFrame(rng.normal(size=(1, len(feature_names))), columns=feature_names)
+
+        latencies = []
+        for _ in range(n_runs):
+            start = time.perf_counter()
+            predictor.predict(dummy)
+            latencies.append((time.perf_counter() - start) * 1000.0)
+    finally:
+        if db is not None:
+            db.close_pool()
 
     result = {
         'mean_ms': float(np.mean(latencies)),
@@ -125,10 +187,9 @@ def benchmark_predict(model_name: str, symbol: str, n_runs: int = 100) -> dict:
         'max_ms': float(np.max(latencies)),
     }
 
-    print('Prediction latency benchmark:')
+    print(f"Prediction latency benchmark (mode={'offline' if offline else 'online'}, runs={n_runs}):")
     print('mean_ms  p50_ms  p95_ms  p99_ms  max_ms')
     print(f"{result['mean_ms']:.2f}   {result['p50_ms']:.2f}   {result['p95_ms']:.2f}   {result['p99_ms']:.2f}   {result['max_ms']:.2f}")
-    db.close_pool()
     return result
 
 
