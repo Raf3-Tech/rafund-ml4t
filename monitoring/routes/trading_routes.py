@@ -173,7 +173,7 @@ def api_trading_chart():
         """
         SELECT timestamp, open, high, low, close, volume
         FROM prices
-        WHERE symbol = %s AND exchange = %s
+        WHERE symbol = %s AND exchange = %s AND timeframe = '1d'
         ORDER BY timestamp DESC
         LIMIT %s
         """,
@@ -386,7 +386,7 @@ def api_equity_curve():
         """
         SELECT timestamp, close
         FROM prices
-        WHERE symbol = %s AND exchange = %s AND timestamp >= %s
+        WHERE symbol = %s AND exchange = %s AND timeframe = '1d' AND timestamp >= %s
         ORDER BY timestamp ASC
         """,
         [symbol, exchange, start_ts],

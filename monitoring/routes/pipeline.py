@@ -47,6 +47,7 @@ def api_data_status():
                    MAX(timestamp) AS latest,
                    COUNT(*)       AS bars
             FROM prices
+            WHERE timeframe = '1d'
             GROUP BY symbol, exchange
             ORDER BY symbol, exchange
         """)
