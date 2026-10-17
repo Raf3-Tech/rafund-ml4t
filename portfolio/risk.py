@@ -175,7 +175,7 @@ class PropFirmRiskGuard:
     dependency-free so it can be used by the dashboard and live helpers.
 
     Scaling rule for `.max_notional()`:
-      - Let `daily_limit` = account_size * daily_loss_limit_pct
+      - Let `daily_limit` = daily_start_equity * daily_loss_limit_pct (Kraken MDL basis)
       - Let `drawdown_floor` = account_size * drawdown_limit_pct
       - Compute dollars-to-daily = (equity - daily_start_equity) negative means loss
       - When account has lost >= 50% of the distance to either floor, scale
@@ -193,6 +193,22 @@ class PropFirmRiskGuard:
         self.daily_start_equity = float(daily_start_equity)
         self.peak_equity = float(peak_equity)
 
+    def _daily_limit(self) -> float:
+        """Kraken Prop MDL: 3% of the account *balance* at the 00:30 UTC
+        rollover (support.kraken.com/articles/how-kraken-prop-evaluations-work),
+        so it is sized from the day-start balance, not the initial account size."""
+        return self.daily_start_equity * self.rules.daily_loss_limit_pct
+
+    def _distance_to_daily_limit(self, current_equity: float) -> float:
+        """Dollars of loss left today before the MDL line; <= 0 means breached.
+
+        The loss must be *subtracted* from the limit. The previous form,
+        `daily_limit + min(0, pnl) * -1`, added it, so the remaining room grew
+        as the day's loss grew and the guard could never halt on daily loss.
+        """
+        daily_loss = max(0.0, self.daily_start_equity - current_equity)
+        return self._daily_limit() - daily_loss
+
     def check(self, current_equity: float) -> dict:
         """Return halt status and distances in dollars.
 
@@ -200,12 +216,11 @@ class PropFirmRiskGuard:
                    distance_to_drawdown_floor: float, current_drawdown_pct: float }
         """
         acct = self.rules
-        daily_limit = acct.account_size * acct.daily_loss_limit_pct
+        daily_limit = self._daily_limit()
         drawdown_floor_amount = acct.account_size * acct.drawdown_limit_pct
         drawdown_floor_equity = acct.account_size * (1.0 - acct.drawdown_limit_pct)
 
-        daily_pnl = current_equity - self.daily_start_equity
-        distance_to_daily_limit = daily_limit + min(0.0, daily_pnl) * -1.0  # dollars until hit (positive if not hit)
+        distance_to_daily_limit = self._distance_to_daily_limit(current_equity)
 
         # Mirror backtesting.engine._update_propfirm exactly: the halt uses a fixed
         # floor at initial_capital * (1 - drawdown_limit_pct), not a trailing peak-equity drawdown.
@@ -216,12 +231,14 @@ class PropFirmRiskGuard:
 
         halted = False
         reason = None
-        if distance_to_daily_limit <= 0:
-            halted = True
-            reason = "daily_loss_limit"
-        elif distance_to_drawdown_floor <= 0:
+        # Lifetime floor first: when both are breached, the drawdown is the
+        # one that never resets.
+        if distance_to_drawdown_floor <= 0:
             halted = True
             reason = "drawdown_floor"
+        elif distance_to_daily_limit <= 0:
+            halted = True
+            reason = "daily_loss_limit"
 
         return {
             "halted": halted,
@@ -245,12 +262,11 @@ class PropFirmRiskGuard:
         base_max = acct.account_size * acct.max_leverage
 
         # compute distances
-        daily_limit = acct.account_size * acct.daily_loss_limit_pct
+        daily_limit = self._daily_limit()
         drawdown_floor_amount = acct.account_size * acct.drawdown_limit_pct
         drawdown_floor_equity = acct.account_size * (1.0 - acct.drawdown_limit_pct)
 
-        daily_pnl = current_equity - self.daily_start_equity
-        dist_daily = daily_limit + min(0.0, daily_pnl) * -1.0
+        dist_daily = self._distance_to_daily_limit(current_equity)
         dist_drawdown = max(0.0, current_equity - drawdown_floor_equity)
 
         def scale_from_distance(dist, floor_value):
