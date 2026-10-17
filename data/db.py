@@ -244,12 +244,13 @@ class DatabaseConnection:
                 INSERT INTO prices (symbol, timestamp, open, high, low, close, volume, exchange, timeframe)
                 VALUES %s
                 ON CONFLICT (exchange, symbol, timeframe, timestamp) DO NOTHING
+                RETURNING 1
             """
 
-            execute_values(cursor, query, data)
+            # cursor.rowcount after execute_values only reflects the last page
+            # (page_size=100), so count the RETURNING rows across all pages.
+            inserted = len(execute_values(cursor, query, data, fetch=True))
             conn.commit()
-
-            inserted = cursor.rowcount
             logger.info(f"Inserted {inserted} price records into database")
             return inserted
 
