@@ -70,7 +70,7 @@ class LiveSignalGenerator:
                 """
                 SELECT timestamp, close
                 FROM prices
-                WHERE symbol = %s
+                WHERE symbol = %s AND timeframe = '1d'
                 ORDER BY timestamp DESC
                 LIMIT %s
                 """,
@@ -80,7 +80,7 @@ class LiveSignalGenerator:
                 """
                 SELECT timestamp, close
                 FROM prices
-                WHERE symbol = %s
+                WHERE symbol = %s AND timeframe = '1d'
                 ORDER BY timestamp DESC
                 LIMIT %s
                 """,

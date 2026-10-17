@@ -659,7 +659,7 @@ def backfill_paper_slot(
         """
         SELECT timestamp, open, high, low, close, volume
         FROM prices
-        WHERE symbol = %s AND exchange = %s
+        WHERE symbol = %s AND exchange = %s AND timeframe = '1d'
         ORDER BY timestamp ASC
         """,
         [symbol, exchange],

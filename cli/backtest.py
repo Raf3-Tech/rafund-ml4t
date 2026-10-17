@@ -14,8 +14,8 @@ logger = get_logger(__name__)
 
 
 def _aligned_pair_frame(db, symbol_a: str, symbol_b: str) -> Optional[pd.DataFrame]:
-    pa = db.get_prices(symbol_a, None, None)
-    pb = db.get_prices(symbol_b, None, None)
+    pa = db.get_prices(symbol_a, None, None, timeframe="1d")
+    pb = db.get_prices(symbol_b, None, None, timeframe="1d")
     if pa.empty or pb.empty:
         return None
     left = pa[["timestamp", "close"]].rename(columns={"close": "price_a"})
@@ -62,8 +62,8 @@ def run_backtest() -> bool:
         results_summary = []
 
         for idx, (pair_a, pair_b) in enumerate(pairs, start=1):
-            pa = db.get_prices(pair_a, None, None)
-            pb = db.get_prices(pair_b, None, None)
+            pa = db.get_prices(pair_a, None, None, timeframe="1d")
+            pb = db.get_prices(pair_b, None, None, timeframe="1d")
             if pa.empty or pb.empty:
                 continue
 
@@ -290,8 +290,8 @@ def run_full_pipeline() -> bool:
         pair_a = os.getenv("EVAL_PAIR_A", "BTC/USDT")
         pair_b = os.getenv("EVAL_PAIR_B", "ETH/USDT")
 
-        pa = db.get_prices(pair_a, None, None)
-        pb = db.get_prices(pair_b, None, None)
+        pa = db.get_prices(pair_a, None, None, timeframe="1d")
+        pb = db.get_prices(pair_b, None, None, timeframe="1d")
         prices = pd.concat([pa, pb], ignore_index=True)
 
         from config.loader import get_settings

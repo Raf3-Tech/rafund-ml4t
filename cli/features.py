@@ -38,8 +38,8 @@ def calculate_features() -> bool:
                     continue
                 pair_name = f"{sym_a}/{sym_b}"
                 try:
-                    prices_a = db.get_prices(sym_a, None, None)
-                    prices_b = db.get_prices(sym_b, None, None)
+                    prices_a = db.get_prices(sym_a, None, None, timeframe="1d")
+                    prices_b = db.get_prices(sym_b, None, None, timeframe="1d")
                     if prices_a.empty or prices_b.empty:
                         db.delete_features_for_pair(sym_a, sym_b)
                         invalid_pairs += 1
@@ -118,8 +118,8 @@ def generate_signals() -> bool:
         }
         signals_list = []
         for sym_a, sym_b in pairs:
-            pa = db.get_prices(sym_a, None, None)
-            pb = db.get_prices(sym_b, None, None)
+            pa = db.get_prices(sym_a, None, None, timeframe="1d")
+            pb = db.get_prices(sym_b, None, None, timeframe="1d")
             if pa.empty or pb.empty:
                 continue
             db_signals = strategy.signals_to_db_format(pa, pb, params, sym_a, sym_b)

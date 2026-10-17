@@ -440,6 +440,22 @@ def test_resolve_exchange_returns_the_single_source():
     assert engine._resolve_exchange("BTC/USD") == "kraken"
 
 
+def test_load_prices_pins_the_daily_timeframe():
+    """prices also holds 1h/3h/4h/1w bars since multi-timeframe collection;
+    an unfiltered read would interleave them into one series (QA N1)."""
+    calls = []
+
+    class _TimeframeDB(_ProvenanceDB):
+        def get_prices(self, symbol, a, b, exchange=None, timeframe=None):
+            calls.append(timeframe)
+            return pd.DataFrame()
+
+    db = _TimeframeDB([{"symbol": "BTC/USD", "exchange": "kraken", "n_rows": 799}])
+    engine = WalkForwardWindowEngine(db=db, strategies=[], symbols=["BTC/USD"])
+    engine._load_prices("BTC/USD")
+    assert calls == ["1d"]
+
+
 def test_resolve_exchange_raises_on_multi_venue_symbol_without_calling_get_prices():
     """The brief's required test: a multi-venue symbol must fail loudly,
     never silently blend sources."""

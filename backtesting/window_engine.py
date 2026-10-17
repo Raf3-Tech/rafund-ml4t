@@ -1077,7 +1077,9 @@ class WalkForwardWindowEngine:
         exactly one."""
         exchange = self._resolve_exchange(symbol)
         try:
-            df = self.db.get_prices(symbol, None, None, exchange=exchange)
+            # Pin the primary daily series: the prices table also holds 1h/3h/4h/1w
+            # bars, which would otherwise be interleaved into one series.
+            df = self.db.get_prices(symbol, None, None, exchange=exchange, timeframe="1d")
             if df is None or df.empty:
                 return None
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
