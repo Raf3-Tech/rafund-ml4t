@@ -34,6 +34,8 @@ rafund-ml4t/
 │   ├── stat_arb.py            # StatArbStrategy (unified signal core) + StatArbPairsStrategy
 │   ├── funding_rate_arb.py    # FundingRateArb (8h perpetual carry) — retired from Kraken Prop eligibility (2-leg hedge; Kraken Prop charges funding rather than paying it), still runs elsewhere
 │   ├── smc_breakout.py        # SMC Breakout — structure/BOS + premium-discount zone + engulfing-bar trigger
+│   ├── setup.py                # Risk-based Decimal sizing math for a Kraken Prop setup (derive_size, derive_leverage_required) — sizing is never a function of leverage
+│   ├── timeframe_resolver.py  # TopDownSignalResolver — 1w/1d bias, 4h confirm, 1h entry; degrades to coarser TF if a finer one has no bars yet
 │   ├── ema_crossover.py
 │   ├── macd.py
 │   ├── rsi_extremes.py
@@ -49,6 +51,7 @@ rafund-ml4t/
 │   ├── position.py            # PositionState — persisted paper/live position + risk-control state
 │   ├── paper_trader.py        # Paper trading: one concurrent slot per (strategy × symbol × exchange) with avg_sharpe > 0, risk-parity-weighted starting capital, regime-filtered opens, structural-stop force-close; day-by-day backfill/replay
 │   ├── live_trader.py         # CCXT limit-order execution (opt-in, capped notional, per-exchange API keys)
+│   ├── execution.py            # ExecutionOrder + adapter layer separating decision logic from order placement (paper/shadow + CCXT live: Binance, Kraken, HTX)
 │   └── alerts.py              # Paper/live trade + risk-control alert dispatch
 │
 ├── monitoring/
@@ -82,7 +85,8 @@ rafund-ml4t/
 │   ├── cost_model.py          # Commission + funding cost model, Decimal-exact (separate from backtesting/costs.py)
 │   └── pretrade_gate.py       # evaluate() — the only path that can mark a setup APPROVE/REDUCE; audit-logged
 ├── signals/
-│   └── pending_signal_detector.py  # scan_kraken_signals — manual-execution detector; the sole caller of risk/pretrade_gate.py
+│   ├── pending_signal_detector.py  # scan_kraken_signals — manual-execution detector; the sole caller of risk/pretrade_gate.py
+│   └── live_signal.py         # LiveSignal — read-only BUY/SELL/HOLD derivation for display; never places orders
 │
 ├── data/
 │   ├── db.py                  # PostgreSQL connection + all query methods (insert/get_prices are timeframe-aware)
@@ -133,6 +137,12 @@ rafund-ml4t/
 ├── deploy/
 │   ├── oracle-bootstrap.sh    # One-shot bootstrap for a fresh Oracle Cloud "Always Free" ARM instance (git clone + Docker Compose)
 │   └── update.sh              # Manual update: git pull + rebuild + restart services on the running instance
+│
+├── kraken_api_research/
+│   └── __init__.py            # KrakenAPIInspector — lightweight public-API inspection (server status, symbol metadata); guards against Kraken returning an error/array payload instead of the expected AssetPairs dict
+│
+├── scripts/
+│   └── rebuild_kraken_track_record.py  # Re-runnable: replaces contaminated overlapping-EXPANDING-window engine_results rows for Kraken symbols with a fixed non-overlapping partition
 │
 ├── tests/                     # 550 passed
 ├── docs/
@@ -341,4 +351,4 @@ pytest --cov=. -q          # with coverage
 
 ---
 
-**Last Updated:** 2026-09-13
+**Last Updated:** 2026-09-30

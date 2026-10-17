@@ -10,10 +10,12 @@ database:
 collect:
   start_date: "2017-08-17"
   timeframe: "1d"
-  # Multi-timeframe hierarchy: 1w/1d = bias, 4h = confirmation, 1h = entry timing.
+  # Multi-timeframe hierarchy: 1w/1d = bias, 4h/3h = confirmation, 1h = entry timing.
   # Collector fetches OHLCV for every listed timeframe per asset per exchange.
+  # 3h is not served by Kraken/Binance/HTX; it is built from stored 1h bars.
   timeframes:
     - 1h
+    - 3h
     - 4h
     - 1d
     - 1w

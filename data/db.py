@@ -103,10 +103,16 @@ class DatabaseConnection:
             # concurrent jobs (drift checks, retraining, health) that check out
             # connections from multiple threads. SimpleConnectionPool is not
             # thread-safe and corrupts its free-list under concurrency.
+            # Pin the session to UTC. prices.timestamp is `timestamp without time
+            # zone`, so a tz-aware UTC value is converted to the *session* zone on
+            # write; on a host set to America/New_York that stored 00:00Z bars as
+            # 20:00/19:00 local, and the same bar written from a UTC host became a
+            # second row — the source of the duplicated Binance 1d bars.
             self.pool = ThreadedConnectionPool(
                 self.min_conn,
                 self.max_conn,
                 dsn=dsn,
+                options="-c timezone=UTC",
             )
             logger.info(f"Database connection pool initialized for {self.database}")
         except Exception as e:
@@ -132,7 +138,9 @@ class DatabaseConnection:
                 user=self.user,
                 password=self.password,
             )
-            self._engine = create_engine(url, pool_pre_ping=True)
+            self._engine = create_engine(
+                url, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"}
+            )
         return self._engine
 
     def read_sql(self, query: str, params: Optional[list] = None) -> pd.DataFrame:
@@ -217,9 +225,12 @@ class DatabaseConnection:
             has_timeframe = 'timeframe' in df.columns
             data = []
             for _, row in df.iterrows():
+                ts = pd.Timestamp(row['timestamp'])
+                if ts.tzinfo is not None:
+                    ts = ts.tz_convert("UTC").tz_localize(None)
                 data.append((
                     row['symbol'],
-                    row['timestamp'],
+                    ts.to_pydatetime(),
                     float(row['open']),
                     float(row['high']),
                     float(row['low']),
@@ -304,13 +315,17 @@ class DatabaseConnection:
             logger.error(f"Error retrieving prices: {str(e)}")
             return pd.DataFrame()
 
-    def get_latest_timestamp(self, symbol: str, exchange: str = "binance") -> Optional[datetime]:
+    def get_latest_timestamp(
+        self, symbol: str, exchange: str = "binance", timeframe: Optional[str] = None
+    ) -> Optional[datetime]:
         """
         Get the latest timestamp for a symbol on a given exchange.
 
         Args:
             symbol: Trading symbol
             exchange: Exchange to filter by (default "binance")
+            timeframe: Restrict to one timeframe. Without it, a fresh 1h series
+                would be skipped as "up to date" because the 1d series is current.
 
         Returns:
             Latest timestamp or None if no data
@@ -320,10 +335,12 @@ class DatabaseConnection:
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT MAX(timestamp) FROM prices WHERE symbol = %s AND exchange = %s",
-                (symbol, exchange)
-            )
+            query = "SELECT MAX(timestamp) FROM prices WHERE symbol = %s AND exchange = %s"
+            params: list = [symbol, exchange]
+            if timeframe:
+                query += " AND timeframe = %s"
+                params.append(timeframe)
+            cursor.execute(query, params)
             result = cursor.fetchone()
             return result[0] if result[0] else None
         except Exception as e:

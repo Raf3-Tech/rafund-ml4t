@@ -233,7 +233,7 @@ class Settings:
         # Multi-timeframe hierarchy: higher frames define bias, lower frames time the entry.
         # Collector fetches OHLCV for every listed timeframe on startup and each cycle.
         self.timeframes: List[str] = list(
-            collect.get("timeframes", ["1h", "4h", "1d", "1w"])
+            collect.get("timeframes", ["1h", "3h", "4h", "1d", "1w"])
         )
 
         # Warn immediately if settings.yaml is missing or has no [evaluation] section —
