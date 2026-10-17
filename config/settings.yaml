@@ -99,7 +99,7 @@ senior_trader:
   consecutive_loss_limit: null
 
 backtesting:
-  commission: 0.001
+  commission: 0.0004  # Kraken Prop 0.04%/side (risk/kraken_fees.py); funding charged separately
 
 data:
   timeframe: 1d

@@ -18,6 +18,7 @@ import re
 from datetime import timezone
 from typing import List, Optional, Tuple
 
+from risk.kraken_fees import KRAKEN_PROP_FEES
 import pandas as pd
 
 from config.logging_config import get_logger
@@ -33,7 +34,12 @@ from trading.position import (
 
 logger = get_logger(__name__)
 
-_COMMISSION_PCT = 0.001
+_COMMISSION_PCT = 0.001  # non-Kraken venues
+
+
+def _commission_pct(exchange: str) -> float:
+    """Kraken paper slots model the Kraken Prop account (risk/kraken_fees.py)."""
+    return KRAKEN_PROP_FEES.commission_rate if exchange == "kraken" else _COMMISSION_PCT
 SUPPORTED_EXCHANGES = ("binance", "kraken", "htx")
 
 
@@ -208,7 +214,7 @@ def _open(
     pos: PositionState, side: str, price: float, notional: float, as_of=None,
     stop_price: Optional[float] = None,
 ) -> None:
-    commission = notional * _COMMISSION_PCT
+    commission = notional * _commission_pct(pos.exchange)
     pos.qty = notional / price
     pos.side = side
     pos.entry_price = price
@@ -218,16 +224,20 @@ def _open(
     pos.stop_price = stop_price
 
 
-def _close(pos: PositionState, price: float) -> float:
-    """Close position in-place; return realised P&L (net of commission)."""
+def _close(pos: PositionState, price: float, as_of=None) -> float:
+    """Close position in-place; return realised P&L (net of commission and,
+    for Kraken slots given `as_of`, Kraken Prop margin funding over the hold)."""
     if pos.is_flat or pos.entry_price is None:
         return 0.0
     if pos.side == "LONG":
         gross_pnl = pos.qty * (price - pos.entry_price)
     else:
         gross_pnl = -pos.qty * (price - pos.entry_price)
-    commission = abs(pos.qty * price) * _COMMISSION_PCT
-    pnl = gross_pnl - commission
+    commission = abs(pos.qty * price) * _commission_pct(pos.exchange)
+    funding = 0.0
+    if pos.exchange == "kraken" and as_of is not None and pos.entry_time is not None:
+        funding = KRAKEN_PROP_FEES.funding(abs(pos.qty * pos.entry_price), pos.entry_time, as_of)
+    pnl = gross_pnl - commission - funding
     pos.equity += pnl
     pos.qty = 0.0
     pos.side = "FLAT"
@@ -416,7 +426,7 @@ def _apply_paper_step(
 
     # Close stale position if the strategy/symbol this run_id tracks rotated
     if not pos.is_flat and (pos.strategy_name != strategy_name or pos.symbol != symbol):
-        pnl = _close(pos, price)
+        pnl = _close(pos, price, as_of=bar_time)
         log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="rotation",
                   source_timeframe=source_timeframe, created_at=bar_time)
         n_orders += 1
@@ -465,7 +475,7 @@ def _apply_paper_step(
     # Force-close and stop if account is blown (hard floor or other failure)
     if pos.account_failed:
         if not pos.is_flat:
-            pnl = _close(pos, price)
+            pnl = _close(pos, price, as_of=bar_time)
             log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="account_failed",
                       source_timeframe=source_timeframe, created_at=bar_time)
             n_orders += 1
@@ -478,7 +488,7 @@ def _apply_paper_step(
 
     # Structural stop: force-close before evaluating any new signal this step.
     if _stop_breached(pos, price):
-        pnl = _close(pos, price)
+        pnl = _close(pos, price, as_of=bar_time)
         log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="stop",
                   source_timeframe=source_timeframe, created_at=bar_time)
         n_orders += 1
@@ -528,7 +538,7 @@ def _apply_paper_step(
                 logger.info("paper_trader: OPEN %s %s @ %.4f  equity=%.2f",
                             target, symbol, price, pos.equity)
         elif pos.side != target:
-            pnl = _close(pos, price)
+            pnl = _close(pos, price, as_of=bar_time)
             log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="position_flip",
                       source_timeframe=source_timeframe, created_at=bar_time)
             n_orders += 1
@@ -544,7 +554,7 @@ def _apply_paper_step(
                             target, symbol, price, pos.equity)
     else:
         if not pos.is_flat:
-            pnl = _close(pos, price)
+            pnl = _close(pos, price, as_of=bar_time)
             log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="signal_exit",
                       source_timeframe=source_timeframe, created_at=bar_time)
             n_orders += 1
@@ -745,7 +755,7 @@ def _force_close_one(db, exchange: str, pos: PositionState) -> dict:
     if df is None or df.empty:
         return {"exchange": exchange, "run_id": pos.run_id, "closed": False, "error": "no price data"}
     price = float(df["close"].iloc[-1])
-    pnl = _close(pos, price)
+    pnl = _close(pos, price, as_of=df["timestamp"].iloc[-1])
     log_order(db, pos, "CLOSE", price, pnl=pnl, close_reason="kill_switch")
     pos.manual_halt = True
     save_position(db, pos)

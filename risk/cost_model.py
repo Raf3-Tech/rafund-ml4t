@@ -17,11 +17,14 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
-COMMISSION_PCT_PER_SIDE = Decimal("0.0004")  # 0.04%
+from risk.kraken_fees import KRAKEN_PROP_FEES
+
+# Rates come from risk/kraken_fees.py, the single source of truth.
+COMMISSION_PCT_PER_SIDE = KRAKEN_PROP_FEES.commission_per_side  # 0.04%
 ROUND_TRIP_COMMISSION_PCT = COMMISSION_PCT_PER_SIDE * 2  # 0.08%
 
-FUNDING_PCT_PER_DAY = Decimal("0.00033")  # 0.033%/day
-FUNDING_BLOCK_HOURS = Decimal("4")
+FUNDING_PCT_PER_DAY = KRAKEN_PROP_FEES.funding_per_day  # 0.033%/day
+FUNDING_BLOCK_HOURS = Decimal(KRAKEN_PROP_FEES.funding_interval_hours)
 FUNDING_BLOCKS_PER_DAY = Decimal("24") / FUNDING_BLOCK_HOURS  # 6
 FUNDING_PCT_PER_BLOCK = FUNDING_PCT_PER_DAY / FUNDING_BLOCKS_PER_DAY
 

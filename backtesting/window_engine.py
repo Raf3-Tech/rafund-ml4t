@@ -16,6 +16,7 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from risk.kraken_fees import KRAKEN_PROP_FEES
 import pandas as pd
 
 from backtesting.metrics import compute_performance_metrics, empty_metrics
@@ -258,8 +259,9 @@ def _stats_from_equity(
 def _compute_metrics_from_signals(
     df: pd.DataFrame,
     signals: pd.Series,
-    commission: float = 0.001,
+    commission: float = KRAKEN_PROP_FEES.commission_rate,
     annualization: int = PERIODS_PER_YEAR,
+    funding_per_bar: float = KRAKEN_PROP_FEES.funding_rate_for_hours(24),
 ) -> Dict:
     """Mark-to-market backtest of a BUY/SELL/HOLD series (one-unit position).
 
@@ -268,7 +270,9 @@ def _compute_metrics_from_signals(
     does NOT flatten). A position is held until the opposite signal, so a trend
     entry is held across the HOLD bars between crossovers and DCA accumulates.
     The open position is marked to market every bar, so Sharpe and drawdown
-    reflect intra-hold moves; commission is charged on turnover at each change.
+    reflect intra-hold moves; commission is charged on turnover at each change,
+    and Kraken Prop margin funding (`funding_per_bar`, default one day of
+    0.033%/day for 1d bars) is charged on every bar a position is held.
     """
     # Guard against missing candles: a NaN close would NaN-poison the equity curve.
     close = df["close"].astype(float).ffill().bfill().reset_index(drop=True)
@@ -296,6 +300,7 @@ def _compute_metrics_from_signals(
         prev_px = close.iloc[i - 1]
         if position != 0 and prev_px > 0:
             equity *= 1.0 + (close.iloc[i] / prev_px - 1.0) * position
+            equity *= 1.0 - funding_per_bar * abs(position)
 
         if target != position:
             turnover = abs(target - position)          # 1 to open/close, 2 to flip
@@ -553,7 +558,7 @@ class WalkForwardWindowEngine:
         db,
         strategies: Optional[List] = None,
         symbols: Optional[List[str]] = None,
-        commission: float = 0.001,
+        commission: float = KRAKEN_PROP_FEES.commission_rate,
     ):
         self.db = db
         self.strategies = strategies or []

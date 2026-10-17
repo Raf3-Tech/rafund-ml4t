@@ -358,7 +358,7 @@ class Settings:
         self.leg_allocation_pct = _env_float(
             "LEG_ALLOCATION_PCT", float(strat.get("leg_allocation_pct", 0.18))
         )
-        self.commission = _env_float("COMMISSION", float(bt.get("commission", 0.001)))
+        self.commission = _env_float("COMMISSION", float(bt.get("commission", 0.0004)))
         self.stop_loss_spread_pct = _env_float(
             "STOP_LOSS_SPREAD_PCT", float(strat.get("stop_loss_spread_pct", 0.03))
         )
