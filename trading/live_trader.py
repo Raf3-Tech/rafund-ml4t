@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -165,16 +166,134 @@ def _build_execution_engine(exchange_name: str, shadow: bool):
     return build_execution_engine(exchange_name, shadow=shadow, max_notional=_max_notional())
 
 
-def _place_limit_order(engine, symbol: str, side: str, qty: float, price: float) -> Optional[dict]:
-    """Place a limit order through an execution engine and return the raw order."""
+@dataclass
+class _Fill:
+    """What the exchange actually executed for one limit order.
+
+    qty is the *filled* quantity (0 when nothing filled, < requested on a
+    partial fill). uncertain=True means the final order state could not be
+    read back from the exchange, so local state cannot be trusted to match.
+    """
+    qty: float
+    price: float
+    order_id: Optional[str]
+    uncertain: bool = False
+
+
+def _fill_from_status(status: dict, requested: float, fallback_price: float,
+                      order_id: Optional[str]) -> _Fill:
+    if status.get("status") == "error":
+        return _Fill(0.0, fallback_price, order_id, uncertain=True)
+    filled = status.get("filled")
+    if filled is None:
+        # Some venues omit `filled`; only a fully closed order implies a full fill.
+        filled = requested if status.get("status") == "closed" else 0.0
+    filled = max(0.0, min(float(filled), requested))
+    price = float(status.get("average") or status.get("price") or fallback_price)
+    return _Fill(filled, price, order_id)
+
+
+def _execute_limit(engine, symbol: str, side: str, qty: float, price: float) -> _Fill:
+    """Place a limit order, wait up to _LIMIT_FILL_TIMEOUT_S for it to fill,
+    cancel whatever is left, and return what actually filled.
+
+    Callers must update local position state from the returned fill only —
+    never from the requested qty — so the DB can't drift from the exchange.
+    """
     order = engine.place_limit_order(symbol, side, qty, price)
-    if order is None:
+    if order is None or order.status == "error":
+        err = (order.raw or {}).get("error") if order is not None else "no order returned"
+        logger.error("live_trader: limit %s %s qty=%.8f rejected — %s", side, symbol, qty, err)
+        return _Fill(0.0, price, None)
+    if order.status == "shadow":
+        return _Fill(qty, price, None)
+
+    oid = order.order_id
+    status = order.raw or {}
+    waited = 0.0
+    while status.get("status") != "closed" and waited < _LIMIT_FILL_TIMEOUT_S:
+        time.sleep(_LIMIT_POLL_INTERVAL_S)
+        waited += _LIMIT_POLL_INTERVAL_S
+        status = engine.adapter.fetch_order(oid, symbol)
+
+    if status.get("status") != "closed":
+        engine.adapter.cancel_order(oid, symbol)
+        # Re-read after cancelling: picks up fills that raced the cancel and
+        # the final partially-filled quantity.
+        status = engine.adapter.fetch_order(oid, symbol)
+
+    fill = _fill_from_status(status, qty, price, oid)
+    if fill.qty < qty:
+        logger.warning("live_trader: limit %s %s filled %.8f of %.8f — remainder cancelled  id=%s",
+                       side, symbol, fill.qty, qty, oid)
+    return fill
+
+
+def _halt_unreconciled(db, pos, what: str) -> None:
+    """Exchange state unknown: stop all trading until an operator reconciles."""
+    pos.manual_halt = True
+    logger.error("live_trader[%s]: %s — order state unknown, manual_halt set", pos.exchange, what)
+    send_alert(
+        f"RECONCILE NEEDED — LIVE/{pos.exchange}/{pos.symbol}",
+        f"Could not confirm the result of a {what} order. Trading halted; check the "
+        f"exchange position and resume manually once it matches the DB.",
+    )
+
+
+def _live_close(db, engine, pos, price: float, reason: str) -> Optional[float]:
+    """Close `pos` on the exchange and record only what filled.
+
+    Returns realised P&L if the position is now fully flat, else None (nothing
+    or only part filled — the unfilled remainder stays open in the DB, matching
+    the exchange, and is retried next cycle).
+    """
+    side = "sell" if pos.side == "LONG" else "buy"
+    requested = abs(pos.qty)
+    fill = _execute_limit(engine, pos.symbol, side, requested, price)
+    if fill.uncertain:
+        _halt_unreconciled(db, pos, f"{reason} close")
         return None
-    return order.raw
+
+    if fill.qty <= 0:
+        logger.warning("live_trader: %s close of %s did not fill — position still open", reason, pos.symbol)
+        send_alert(f"CLOSE NOT FILLED — LIVE/{pos.exchange}/{pos.symbol}",
+                   f"{reason} close @ {price:.4f} did not fill. Position still open; retrying next cycle.")
+        return None
+
+    if fill.qty >= requested * (1 - 1e-9):
+        pnl = _close(pos, fill.price, as_of=datetime.now(timezone.utc))
+        log_order(db, pos, "CLOSE", fill.price, pnl=pnl, order_type="live",
+                  exchange_order_id=fill.order_id, close_reason=reason)
+        return pnl
+
+    # Partial: realise P&L on the filled slice through the same _close path.
+    part = replace(pos, qty=fill.qty, equity=0.0)
+    pnl = _close(part, fill.price, as_of=datetime.now(timezone.utc))
+    pos.qty = requested - fill.qty
+    pos.equity += pnl
+    log_order(db, pos, "CLOSE", fill.price, pnl=pnl, order_type="live",
+              exchange_order_id=fill.order_id, close_reason=f"{reason}_partial")
+    send_alert(f"PARTIAL CLOSE — LIVE/{pos.exchange}/{pos.symbol}",
+               f"{reason} close filled {fill.qty:.8f} of {requested:.8f}; "
+               f"{pos.qty:.8f} still open, retrying next cycle.")
+    return None
 
 
-def _fill_price(order: dict, fallback: float) -> float:
-    return float(order.get("average") or order.get("price") or fallback)
+def _live_open(db, engine, pos, target: str, qty: float, price: float, setup_tag) -> None:
+    """Open `target` on the exchange and record only the filled quantity."""
+    side = "buy" if target == "LONG" else "sell"
+    fill = _execute_limit(engine, pos.symbol, side, qty, price)
+    if fill.uncertain:
+        _halt_unreconciled(db, pos, "open")
+        return
+    if fill.qty <= 0:
+        logger.info("live_trader: OPEN %s %s did not fill — staying flat", target, pos.symbol)
+        return
+    notional = fill.qty * fill.price
+    _open(pos, target, fill.price, notional)
+    log_order(db, pos, "OPEN", fill.price, commission=notional * _COMMISSION_PCT,
+              order_type="live", exchange_order_id=fill.order_id, setup_tag=setup_tag)
+    logger.info("live_trader: OPEN %s %s qty=%.8f @ %.4f", target, pos.symbol, fill.qty, fill.price)
 
 
 # ── kill switch ────────────────────────────────────────────────────────────────
@@ -205,13 +324,17 @@ def force_close_live(db, pos) -> dict:
         engine = _build_execution_engine(exchange_name, shadow)
         exchange = _build_exchange(exchange_name)
         _configure_leverage(exchange, pos.symbol)
-        ccxt_side = "sell" if pos.side == "LONG" else "buy"
-        order = _place_limit_order(engine, pos.symbol, ccxt_side, abs(pos.qty), price)
-        fill = _fill_price(order, price) if order else price
-        oid = order["id"] if order else None
-        pnl = _close(pos, fill)
-        log_order(db, pos, "CLOSE", fill, pnl=pnl, order_type="live", exchange_order_id=oid,
-                  close_reason="kill_switch")
+        pnl = _live_close(db, engine, pos, price, "kill_switch")
+        if pnl is None:
+            # Halt anyway so nothing new opens, but report the truth: the
+            # position (or its unfilled remainder) is still open on the exchange.
+            pos.manual_halt = True
+            save_position(db, pos)
+            send_alert(f"KILL SWITCH — LIVE/{exchange_name}",
+                       f"Trading halted but close did NOT fully fill — {abs(pos.qty):.8f} "
+                       f"{pos.symbol} still open. Flatten on the exchange manually.")
+            return {"exchange": exchange_name, "closed": False, "manual_halt": True,
+                    "remaining_qty": abs(pos.qty), "error": "close not filled"}
 
     pos.manual_halt = True
     save_position(db, pos)
@@ -286,13 +409,11 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
     if not pos.is_flat and (pos.strategy_name != strategy_name or pos.symbol != symbol):
         logger.info("live_trader: top strategy changed — closing stale %s %s", pos.side, pos.symbol)
         if not shadow:
-            ccxt_side = "sell" if pos.side == "LONG" else "buy"
-            order = _place_limit_order(engine, pos.symbol, ccxt_side, abs(pos.qty), price)
-            fill = _fill_price(order, price) if order else price
-            oid = order["id"] if order else None
-            pnl = _close(pos, fill)
-            log_order(db, pos, "CLOSE", fill, pnl=pnl, order_type="live", exchange_order_id=oid,
-                      close_reason="rotation")
+            if _live_close(db, engine, pos, price, "rotation") is None:
+                # Old position still (partly) open — don't start trading the new
+                # strategy/symbol on top of it. Retry the close next cycle.
+                save_position(db, pos)
+                return True
         else:
             logger.info("live_trader: [shadow] would CLOSE %s %s @ %.4f", pos.side, pos.symbol, price)
             _close(pos, price)
@@ -331,13 +452,9 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
         reason = "account_failed" if pos.account_failed else "daily_halt"
         logger.warning("live_trader: %s — force-closing position", reason)
         if not shadow:
-            ccxt_side = "sell" if pos.side == "LONG" else "buy"
-            order = _place_limit_order(engine, pos.symbol, ccxt_side, abs(pos.qty), price)
-            fill = _fill_price(order, price) if order else price
-            oid = order["id"] if order else None
-            pnl = _close(pos, fill)
-            log_order(db, pos, "CLOSE", fill, pnl=pnl, order_type="live", exchange_order_id=oid,
-                      close_reason=reason)
+            # Unfilled remainder stays open; breach flags persist, so the
+            # next cycle retries the force-close.
+            _live_close(db, engine, pos, price, reason)
         else:
             logger.info("live_trader: [shadow] would CLOSE %s @ %.4f (risk breach)", pos.symbol, price)
             _close(pos, price)
@@ -370,14 +487,7 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                     _open(pos, target, price, notional)
                     log_order(db, pos, "OPEN", price, order_type="shadow", setup_tag=setup_tag)
                 else:
-                    ccxt_side = "buy" if target == "LONG" else "sell"
-                    order = _place_limit_order(engine, symbol, ccxt_side, qty, price)
-                    if order:
-                        fill = _fill_price(order, price)
-                        _open(pos, target, fill, notional)
-                        log_order(db, pos, "OPEN", fill, commission=notional * _COMMISSION_PCT,
-                                  order_type="live", exchange_order_id=order["id"], setup_tag=setup_tag)
-                        logger.info("live_trader: OPEN %s %s qty=%.6f @ %.4f", target, symbol, qty, fill)
+                    _live_open(db, engine, pos, target, qty, price, setup_tag)
         elif pos.side != target:
             # Flip
             if shadow:
@@ -389,24 +499,13 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                     _open(pos, target, price, notional)
                     log_order(db, pos, "OPEN", price, order_type="shadow", setup_tag=setup_tag)
             else:
-                ccxt_side = "sell" if pos.side == "LONG" else "buy"
-                order = _place_limit_order(engine, symbol, ccxt_side, abs(pos.qty), price)
-                fill = _fill_price(order, price) if order else price
-                oid = order["id"] if order else None
-                pnl = _close(pos, fill)
-                log_order(db, pos, "CLOSE", fill, pnl=pnl, order_type="live", exchange_order_id=oid,
-                          close_reason="position_flip")
-                logger.info("live_trader: CLOSE (flip) @ %.4f  pnl=%.2f", fill, pnl)
-                if not pos.daily_halt:
-                    notional = _target_notional(pos, cfg, extra_cap=_max_notional())
-                    qty = notional / fill
-                    ccxt_side2 = "buy" if target == "LONG" else "sell"
-                    order2 = _place_limit_order(engine, symbol, ccxt_side2, qty, fill)
-                    if order2:
-                        fill2 = _fill_price(order2, fill)
-                        _open(pos, target, fill2, notional)
-                        log_order(db, pos, "OPEN", fill2, commission=notional * _COMMISSION_PCT,
-                                  order_type="live", exchange_order_id=order2["id"], setup_tag=setup_tag)
+                pnl = _live_close(db, engine, pos, price, "position_flip")
+                # Only open the new side once the old one is fully closed.
+                if pnl is not None:
+                    logger.info("live_trader: CLOSE (flip) @ %.4f  pnl=%.2f", price, pnl)
+                    if not pos.daily_halt and not pos.manual_halt:
+                        notional = _target_notional(pos, cfg, extra_cap=_max_notional())
+                        _live_open(db, engine, pos, target, notional / price, price, setup_tag)
     else:
         if not pos.is_flat:
             if shadow:
@@ -414,14 +513,9 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
                 pnl = _close(pos, price)
                 log_order(db, pos, "CLOSE", price, pnl=pnl, order_type="shadow", close_reason="signal_exit")
             else:
-                ccxt_side = "sell" if pos.side == "LONG" else "buy"
-                order = _place_limit_order(engine, symbol, ccxt_side, abs(pos.qty), price)
-                fill = _fill_price(order, price) if order else price
-                oid = order["id"] if order else None
-                pnl = _close(pos, fill)
-                log_order(db, pos, "CLOSE", fill, pnl=pnl, order_type="live", exchange_order_id=oid,
-                          close_reason="signal_exit")
-                logger.info("live_trader: CLOSE @ %.4f  pnl=%.2f", fill, pnl)
+                pnl = _live_close(db, engine, pos, price, "signal_exit")
+                if pnl is not None:
+                    logger.info("live_trader: CLOSE @ %.4f  pnl=%.2f", price, pnl)
 
     pos.equity = pos.mark_to_market(price)
     save_position(db, pos)

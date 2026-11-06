@@ -751,6 +751,19 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 
 ## Session log  (newest first)
 
+### 2026-11-06 — session "live-fill-reconciliation" (Claude) — COMPLETE
+**Phase worked:** none of A–F — codebase-review follow-up (finding 2.1)
+**DB health check:** FAILED — DB unreachable from the cloud container (`psycopg2.OperationalError`); no DB-touching changes made, unit tests only
+**engine_results row count at session start:** unknown (DB unreachable)
+**Files changed:**
+  - Fast-forwarded `main` to `feature/agent-orchestration` (`3b79953`). Old `main` referenced `strategies/timeframe_resolver.py`, `cfg.eval_mode`, `cfg.risk_per_trade_pct` and alembic `0013`–`0015`, which only existed on this branch, so paper trading and `alembic upgrade head` were broken on `main`.
+  - `trading/live_trader.py` — every live open/close now goes through `_execute_limit` (place → poll up to `LIVE_LIMIT_FILL_TIMEOUT_S` → cancel → re-read) and updates position state from the **filled** qty only. Unfilled close leaves the position open and alerts; partial close realises P&L on the filled slice via `_close` and keeps the remainder open; flip only re-opens after a full close; rotation doesn't switch strategy/symbol until the old position is flat; unknown final order state sets `manual_halt` + RECONCILE alert; kill switch returns `closed: False` with `remaining_qty` when the close doesn't fill. Also fixes the `order["id"]` KeyError on a rejected order.
+  - `tests/test_live_fill_reconciliation.py` (new, 9 tests)
+**Suite result:** 806 passed, 3 failed, 6 errors. `test_provenance.py::test_backfill_pairs_skipped_when_either_leg_ambiguous` was already failing before this change; the `test_setup` / `test_multi_exchange` failures need a live DB or network.
+**Bugs discovered and logged:** still open from the review: no `amount_to_precision`/`price_to_precision` on live orders; spot account can be sent SHORT opens; `_top_accepted_strategy` orders by `created_at` before `avg_sharpe`; paper/live HOLD closes while the engine's HOLD carries; dashboard `require_token` fails open when `DASHBOARD_API_TOKEN` is unset.
+**Resume point for next session:** fix the pre-existing `test_provenance` failure, then the open items above (precision + spot-short guard first).
+**Session limit hit:** no
+
 ### 2026-09-06 — session "track-record-depth" (Claude) — COMPLETE through Task 4; Task 5 deliberately not attempted
 **Phase worked:** none of the 6 Kraken Prop phases — follow-up to 38362e2.
   5 tasks planned: retire Funding Rate Arbitrage, fix the exchange filter,
