@@ -751,6 +751,19 @@ engine (Phase E), missing test modules (Phase B), real engine run (Phase C).
 
 ## Session log  (newest first)
 
+### 2026-11-06 — session "live-precision-spot-short" (Claude) — COMPLETE
+**Phase worked:** none of A–F / Kraken Prop — codebase-review follow-up (live precision + spot-short guard)
+**DB health check:** FAILED — DB still unreachable from the cloud container; code-only change, unit tests only
+**engine_results row count at session start:** unknown (DB unreachable)
+**Files changed:**
+  - `trading/execution.py` — `CCXTExecutionAdapter._normalize`: every live order goes through `amount_to_precision` (truncates) / `price_to_precision` and is checked against the market's `limits.amount.min` / `limits.cost.min` before `create_limit_order`; below-minimum or truncated-to-zero orders come back as `status="error"` and are never sent. The returned `ExecutionOrder.qty/price` are the rounded values actually sent.
+  - `trading/live_trader.py` — `_execute_limit` judges fills against the rounded qty sent (`_Fill.requested`), so a close whose sub-precision dust was truncated off counts as a full close instead of a partial that retries forever. SELL on `LIVE_ACCOUNT_TYPE=spot` is exit-only (closes a long, never opens a short), in shadow mode too.
+  - `tests/test_execution_adapter.py` (+4), `tests/test_live_fill_reconciliation.py` (+5)
+**Suite result:** 815 passed, 3 failed, 6 errors — same pre-existing `test_provenance` failure and DB/network-dependent `test_setup`/`test_multi_exchange` as the previous entry; nothing new.
+**Bugs discovered and logged:** none new. Still open from the review: `_top_accepted_strategy` orders by `created_at` before `avg_sharpe`; paper/live HOLD closes while the engine's HOLD carries; dashboard `require_token` fails open when `DASHBOARD_API_TOKEN` is unset; pre-existing `test_provenance` failure.
+**Resume point for next session:** dashboard auth fail-open (security) or the HOLD semantics mismatch.
+**Session limit hit:** no (5 files, ~200 lines)
+
 ### 2026-11-06 — session "live-fill-reconciliation" (Claude) — COMPLETE
 **Phase worked:** none of A–F — codebase-review follow-up (finding 2.1)
 **DB health check:** FAILED — DB unreachable from the cloud container (`psycopg2.OperationalError`); no DB-touching changes made, unit tests only

@@ -7,6 +7,10 @@ Safety gates (all must pass before any order is placed):
   3. account_failed == False
   4. daily_halt == False  (for opens; force-close still runs on breach)
   5. Notional capped at LIVE_MAX_NOTIONAL_USDT (default 200)
+  6. Qty/price rounded to the market's precision and checked against its
+     minimum amount/cost (trading/execution.py) — below-minimum orders are
+     never sent
+  7. LIVE_ACCOUNT_TYPE=spot never opens a SHORT — SELL only exits a long
 
 Order execution: limit orders only, never market. Every order is placed at
 the signal bar's close price and given LIVE_LIMIT_FILL_TIMEOUT_S (default
@@ -178,6 +182,7 @@ class _Fill:
     price: float
     order_id: Optional[str]
     uncertain: bool = False
+    requested: float = 0.0  # qty actually sent, after exchange precision rounding
 
 
 def _fill_from_status(status: dict, requested: float, fallback_price: float,
@@ -206,8 +211,11 @@ def _execute_limit(engine, symbol: str, side: str, qty: float, price: float) -> 
         logger.error("live_trader: limit %s %s qty=%.8f rejected — %s", side, symbol, qty, err)
         return _Fill(0.0, price, None)
     if order.status == "shadow":
-        return _Fill(qty, price, None)
+        return _Fill(qty, price, None, requested=qty)
 
+    # The adapter may have truncated qty to the market's precision; judge the
+    # fill against what was actually sent, not what was asked for.
+    qty = order.qty
     oid = order.order_id
     status = order.raw or {}
     waited = 0.0
@@ -223,6 +231,7 @@ def _execute_limit(engine, symbol: str, side: str, qty: float, price: float) -> 
         status = engine.adapter.fetch_order(oid, symbol)
 
     fill = _fill_from_status(status, qty, price, oid)
+    fill.requested = qty
     if fill.qty < qty:
         logger.warning("live_trader: limit %s %s filled %.8f of %.8f — remainder cancelled  id=%s",
                        side, symbol, fill.qty, qty, oid)
@@ -260,7 +269,12 @@ def _live_close(db, engine, pos, price: float, reason: str) -> Optional[float]:
                    f"{reason} close @ {price:.4f} did not fill. Position still open; retrying next cycle.")
         return None
 
-    if fill.qty >= requested * (1 - 1e-9):
+    # Full close = everything that was sendable filled. Any sub-precision dust
+    # the adapter truncated off can't be traded, so the position is done.
+    if fill.qty >= fill.requested * (1 - 1e-9):
+        if fill.requested < requested:
+            logger.info("live_trader: %s close left %.10f %s dust below exchange precision",
+                        reason, requested - fill.requested, pos.symbol)
         pnl = _close(pos, fill.price, as_of=datetime.now(timezone.utc))
         log_order(db, pos, "CLOSE", fill.price, pnl=pnl, order_type="live",
                   exchange_order_id=fill.order_id, close_reason=reason)
@@ -475,6 +489,13 @@ def run_live_cycle(db, exchange: Optional[str] = None) -> bool:
         target = None
 
     setup_tag = f"{strategy_name}_{signal.lower()}" if signal in ("BUY", "SELL") else None
+
+    # A spot account can't hold a short: SELL is exit-only there (closes a
+    # long, never opens a short). Applied in shadow mode too so shadow runs
+    # show exactly what live would do.
+    if target == "SHORT" and _live_account_type() == "spot":
+        logger.info("live_trader: SELL on spot account — exit only, no short opened (%s)", symbol)
+        target = None
 
     if target is not None:
         if pos.is_flat:

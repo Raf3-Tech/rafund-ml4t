@@ -22,14 +22,17 @@ class FakeAdapter:
     """Scripted exchange: create_status for the placed order, then one
     status per fetch_order call (the last one repeats)."""
 
-    def __init__(self, create_status="open", fetches=None, filled_on_create=None):
+    def __init__(self, create_status="open", fetches=None, filled_on_create=None, sent_qty=None):
         self.create_status = create_status
+        self.sent_qty = sent_qty  # simulate the adapter truncating qty to precision
         self.fetches = list(fetches or [])
         self.filled_on_create = filled_on_create
         self.placed = []
         self.cancelled = []
 
     def place_limit_order(self, symbol, side, qty, price):
+        if self.sent_qty is not None:
+            qty = self.sent_qty
         self.placed.append((symbol, side, qty, price))
         if self.create_status == "error":
             return ExecutionOrder(None, "error", symbol, side, qty, price, None, raw={"error": "rejected"})
@@ -158,3 +161,84 @@ def test_kill_switch_reports_unfilled_close_honestly(journal, monkeypatch):
     assert result["closed"] is False and result["manual_halt"] is True
     assert result["remaining_qty"] == 1.0
     assert pos.side == "LONG" and pos.manual_halt is True
+
+
+def test_close_truncated_to_precision_and_fully_filled_goes_flat(journal):
+    """Adapter sent 0.999 of a 0.9994 position (sub-precision dust truncated);
+    filling all 0.999 is a full close, not a partial that retries forever."""
+    orders, _ = journal
+    adapter = FakeAdapter(create_status="closed", sent_qty=0.999, fetches=[{}])
+    pos = _long(qty=0.9994)
+    assert lt._live_close(None, FakeEngine(adapter), pos, 110.0, "signal_exit") is not None
+    assert pos.is_flat
+    assert orders[-1][2]["close_reason"] == "signal_exit"
+
+
+def test_partial_judged_against_sent_qty(journal):
+    adapter = FakeAdapter(sent_qty=0.999, fetches=[{"status": "canceled", "filled": 0.5}])
+    pos = _long(qty=0.9994)
+    assert lt._live_close(None, FakeEngine(adapter), pos, 110.0, "signal_exit") is None
+    assert pos.qty == pytest.approx(0.4994)
+
+
+# ── spot accounts can't short ────────────────────────────────────────────────
+
+
+class _StubStrategy:
+    def get_min_bars(self, params):
+        return 1
+
+
+@pytest.fixture
+def shadow_cycle(journal, monkeypatch):
+    """run_live_cycle in shadow mode with a SELL signal; returns (run, pos)."""
+    from types import SimpleNamespace
+    import config.loader
+    import strategies.registry
+
+    cfg = SimpleNamespace(collect_symbols=["BTC/USDT"], account_size=5000.0,
+                          max_drawdown_pct=0.03, max_daily_loss_pct=0.03)
+    monkeypatch.setattr(config.loader, "get_settings", lambda: cfg)
+    monkeypatch.setattr(strategies.registry.StrategyRegistry, "instantiate",
+                        staticmethod(lambda name: _StubStrategy()))
+    monkeypatch.setattr(lt, "_live_enabled", lambda: False)
+    monkeypatch.setattr(lt, "_top_accepted_strategy", lambda db: ("S", "BTC/USDT", {}))
+    monkeypatch.setattr(lt, "_latest_bars", lambda db, sym, n, exchange: pd.DataFrame({"close": [100.0, 110.0]}))
+    monkeypatch.setattr(lt, "_last_signal", lambda df, name, params: "SELL")
+    monkeypatch.setattr(lt, "_update_propfirm", lambda pos, eq, cfg: "")
+    monkeypatch.setattr(lt, "_target_notional", lambda pos, cfg, extra_cap=None: 100.0)
+    holder = {}
+
+    def run(pos, account_type):
+        monkeypatch.setenv("LIVE_ACCOUNT_TYPE", account_type)
+        pos.last_update = datetime.now(timezone.utc)
+        monkeypatch.setattr(lt, "load_position", lambda *a, **kw: pos)
+        holder["pos"] = pos
+        return lt.run_live_cycle(None, exchange="binance")
+
+    return run
+
+
+def test_spot_sell_when_flat_opens_nothing(shadow_cycle, journal):
+    orders, _ = journal
+    pos = PositionState(run_id="live_binance", strategy_name="S", symbol="BTC/USDT")
+    assert shadow_cycle(pos, "spot")
+    assert pos.is_flat
+    assert not any(e == "OPEN" for e, _, _ in orders)
+
+
+def test_spot_sell_when_long_closes_without_opening_short(shadow_cycle, journal):
+    orders, _ = journal
+    pos = _long()
+    assert shadow_cycle(pos, "spot")
+    events = [e for e, _, _ in orders]
+    assert "CLOSE" in events and "OPEN" not in events
+    assert pos.is_flat  # exited the long; did not flip to SHORT
+
+
+def test_futures_sell_when_flat_still_opens_short(shadow_cycle, journal):
+    orders, _ = journal
+    pos = PositionState(run_id="live_binance", strategy_name="S", symbol="BTC/USDT")
+    assert shadow_cycle(pos, "future")
+    assert pos.side == "SHORT"
+    assert any(e == "OPEN" for e, _, _ in orders)

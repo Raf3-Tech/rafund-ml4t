@@ -126,6 +126,7 @@ class CCXTExecutionAdapter(ExecutionAdapter):
 
         exchange = self.connect()
         try:
+            qty, price = self._normalize(exchange, symbol, qty, price)
             order = exchange.create_limit_order(symbol, side, qty, price)
         except Exception as exc:
             return ExecutionOrder(
@@ -150,6 +151,29 @@ class CCXTExecutionAdapter(ExecutionAdapter):
             filled_price=filled_price,
             raw=order,
         )
+
+    @staticmethod
+    def _normalize(exchange, symbol: str, qty: float, price: float) -> tuple:
+        """Round qty/price to the market's precision and enforce its minimums.
+
+        The single place order size/price are made exchange-legal. CCXT's
+        amount_to_precision truncates (never rounds up), so a close can't try
+        to sell more than is held. Raises ValueError below the exchange's
+        minimum amount or cost; the caller turns that into a status="error"
+        order, which the live trader records as nothing filled.
+        """
+        exchange.load_markets()  # cached by CCXT after the first call
+        market = exchange.market(symbol)
+        norm_qty = float(exchange.amount_to_precision(symbol, qty))
+        norm_price = float(exchange.price_to_precision(symbol, price))
+        limits = market.get("limits") or {}
+        min_amount = (limits.get("amount") or {}).get("min")
+        min_cost = (limits.get("cost") or {}).get("min")
+        if norm_qty <= 0 or (min_amount and norm_qty < min_amount):
+            raise ValueError(f"qty {qty} -> {norm_qty} below {symbol} minimum amount {min_amount}")
+        if min_cost and norm_qty * norm_price < min_cost:
+            raise ValueError(f"notional {norm_qty * norm_price:.8f} below {symbol} minimum cost {min_cost}")
+        return norm_qty, norm_price
 
     def fetch_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         exchange = self.connect()
